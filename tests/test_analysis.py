@@ -231,7 +231,7 @@ def test_4_analysis_call_model_and_relationships(db_session: Session) -> None:
         stage="triage",
         provider="mock",
         model="mock-v1",
-        status="success",
+        status="completed",
         input_tokens=120,
         output_tokens=45,
         estimated_cost_usd=0.00025,
@@ -423,15 +423,15 @@ async def test_14_analyze_entry_success(db_session: Session) -> None:
     assert analysis.relevance_status == "relevant"
     assert len(analysis.topics) >= 1
     assert len(analysis.calls) == 1
-    assert analysis.calls[0].status == "success"
+    assert analysis.calls[0].status == "completed"
     assert analysis.calls[0].provider == "mock"
     assert analysis.entry_content_hash is not None
     assert analysis.matrix_snapshot_hash is not None
 
 
 @pytest.mark.asyncio
-async def test_15_analyze_entry_single_primary_topic(db_session: Session) -> None:
-    """Ensure service guarantees at most one primary topic even if provider sets multiple."""
+async def test_15_analyze_entry_multiple_primary_topics_rejected(db_session: Session) -> None:
+    """Ensure service rejects responses with multiple primary topics without autocorrecting."""
     source, entry = create_test_source_and_entry(db_session)
     matrix, topics = create_test_matrix_with_topics(db_session)
     prompt = create_test_prompt_version(db_session)
@@ -448,14 +448,17 @@ async def test_15_analyze_entry_single_primary_topic(db_session: Session) -> Non
         db=db_session,
     )
 
-    primaries = [t for t in analysis.topics if t.is_primary]
-    assert len(primaries) == 1
-    assert primaries[0].topic.code == "antitrust_cartels"
+    assert analysis.status == "failed"
+    assert "Multiple primary topics" in (analysis.reason or "")
+    assert len(analysis.topics) == 0
+    assert len(analysis.calls) == 1
+    assert analysis.calls[0].status == "failed"
+    assert analysis.calls[0].error_type == "AnalysisValidationError"
 
 
 @pytest.mark.asyncio
-async def test_16_analyze_entry_unrecognized_topic_ignored(db_session: Session) -> None:
-    """Service safely ignores unknown topic codes without aborting the analysis."""
+async def test_16_analyze_entry_unrecognized_topic_rejected(db_session: Session) -> None:
+    """Service rejects unknown or hallucinated topic codes and records validation failure."""
     source, entry = create_test_source_and_entry(db_session)
     matrix, topics = create_test_matrix_with_topics(db_session)
     prompt = create_test_prompt_version(db_session)
@@ -472,9 +475,12 @@ async def test_16_analyze_entry_unrecognized_topic_ignored(db_session: Session) 
         db=db_session,
     )
 
-    assert analysis.status == "completed"
-    assert len(analysis.topics) == 1
-    assert analysis.topics[0].topic.code == "antitrust_cartels"
+    assert analysis.status == "failed"
+    assert "Unrecognized topic code" in (analysis.reason or "")
+    assert len(analysis.topics) == 0
+    assert len(analysis.calls) == 1
+    assert analysis.calls[0].status == "failed"
+    assert analysis.calls[0].error_type == "AnalysisValidationError"
 
 
 @pytest.mark.asyncio
@@ -504,7 +510,7 @@ async def test_18_analyze_entry_missing_entities_raises(db_session: Session) -> 
 
 @pytest.mark.asyncio
 async def test_19_analyze_entry_provider_failure_persists_audit(db_session: Session) -> None:
-    """When provider fails, EntryAnalysis is marked failed and AnalysisCall is recorded with error status."""
+    """When provider fails, EntryAnalysis is marked failed and AnalysisCall is recorded with failed status."""
     source, entry = create_test_source_and_entry(db_session)
     matrix, _ = create_test_matrix_with_topics(db_session)
     prompt = create_test_prompt_version(db_session)
@@ -517,15 +523,17 @@ async def test_19_analyze_entry_provider_failure_persists_audit(db_session: Sess
     assert analysis.status == "failed"
     assert "SimulatedTimeout" in (analysis.reason or "")
     assert len(analysis.calls) == 1
-    assert analysis.calls[0].status == "error"
+    assert analysis.calls[0].status == "failed"
     assert analysis.calls[0].error_type == "SimulatedTimeout"
     assert analysis.calls[0].error_message == "Gateway timeout"
 
 
-def test_20_analysis_service_monthly_limit(db_session: Session, monkeypatch) -> None:
-    """Service enforces monthly quota limit on analyses."""
+@pytest.mark.asyncio
+async def test_20_analysis_service_monthly_limit(db_session: Session, monkeypatch) -> None:
+    """Monthly limit check helper raises when reached, but analyze_entry does not block in Bloque 7A."""
     source, entry = create_test_source_and_entry(db_session)
-    matrix, _ = create_test_matrix_with_topics(db_session)
+    matrix, topics = create_test_matrix_with_topics(db_session)
+    prompt = create_test_prompt_version(db_session)
 
     # Set threshold low
     monkeypatch.setattr(get_settings(), "ANALYSIS_MONTHLY_ENTRY_LIMIT", 1)
@@ -542,14 +550,19 @@ def test_20_analysis_service_monthly_limit(db_session: Session, monkeypatch) -> 
     db_session.add(analysis)
     db_session.commit()
 
-    service = AnalysisService()
+    service = AnalysisService(provider=MockAIProvider())
+    # Direct helper raises RuntimeError
     with pytest.raises(RuntimeError) as exc_info:
         service.check_monthly_limit(db_session)
     assert "limit reached" in str(exc_info.value)
 
+    # analyze_entry does NOT block (enforcement deactivated in 7A per guidelines)
+    analysis2 = await service.analyze_entry(entry.id, matrix.id, prompt.id, db_session)
+    assert analysis2.status == "completed"
+
 
 def test_21_analysis_service_usage_summary(db_session: Session) -> None:
-    """Verify aggregated usage statistics calculation across multiple audit calls."""
+    """Verify aggregated usage statistics calculation across multiple audit calls with completed/failed."""
     source, entry = create_test_source_and_entry(db_session)
     matrix, _ = create_test_matrix_with_topics(db_session)
     prompt = create_test_prompt_version(db_session)
@@ -570,7 +583,7 @@ def test_21_analysis_service_usage_summary(db_session: Session) -> None:
         stage="triage",
         provider="mock",
         model="mock-v1",
-        status="success",
+        status="completed",
         input_tokens=100,
         output_tokens=50,
         estimated_cost_usd=0.0002,
@@ -581,7 +594,7 @@ def test_21_analysis_service_usage_summary(db_session: Session) -> None:
         stage="triage",
         provider="mock",
         model="mock-v1",
-        status="error",
+        status="failed",
         input_tokens=50,
         output_tokens=0,
         estimated_cost_usd=0.00005,
@@ -604,11 +617,11 @@ def test_21_analysis_service_usage_summary(db_session: Session) -> None:
 
 
 # ==============================================================================
-# Test 22: API Endpoints Read Operations
+# Test 22: API Endpoints Read Operations & Filters
 # ==============================================================================
 
 def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> None:
-    """Test REST API read endpoints: list, detail, entry history, usage, and prompts."""
+    """Test REST API read endpoints: list (with matrix_id filter), detail with prompt info, usage, and prompts."""
     source, entry = create_test_source_and_entry(db_session)
     matrix, topics = create_test_matrix_with_topics(db_session)
     prompt = create_test_prompt_version(db_session)
@@ -640,7 +653,7 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
         stage="triage",
         provider="mock",
         model="mock-v1",
-        status="success",
+        status="completed",
         input_tokens=80,
         output_tokens=30,
         estimated_cost_usd=0.0001,
@@ -648,12 +661,17 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
     db_session.add_all([at, call])
     db_session.commit()
 
-    # 2. GET /api/v1/entry-analyses
-    resp = client.get("/api/v1/entry-analyses?relevance_status=relevant")
+    # 2. GET /api/v1/entry-analyses (with relevance_status and matrix_id filters)
+    resp = client.get(f"/api/v1/entry-analyses?relevance_status=relevant&matrix_id={matrix.id}")
     assert resp.status_code == status.HTTP_200_OK
     analyses_list = resp.json()
     assert len(analyses_list) == 1
     assert analyses_list[0]["relevance_score"] == 90
+
+    # Test matrix_id filter with non-matching ID
+    resp_other = client.get(f"/api/v1/entry-analyses?matrix_id={uuid.uuid4()}")
+    assert resp_other.status_code == status.HTTP_200_OK
+    assert len(resp_other.json()) == 0
 
     # 3. GET /api/v1/entry-analyses/{id}
     resp_detail = client.get(f"/api/v1/entry-analyses/{analysis.id}")
@@ -663,6 +681,11 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
     assert len(detail_data["topics"]) == 1
     assert detail_data["topics"][0]["topic_code"] == "antitrust_cartels"
     assert len(detail_data["calls"]) == 1
+    # Check identifying prompt information
+    assert detail_data["calls"][0]["prompt_code"] == "test_prompt"
+    assert detail_data["calls"][0]["prompt_version"] == 1
+    assert detail_data["calls"][0]["prompt_stage"] == "triage"
+    assert detail_data["calls"][0]["status"] == "completed"
 
     # 4. GET /api/v1/entries/{id}/analyses
     resp_entry = client.get(f"/api/v1/entries/{entry.id}/analyses")
@@ -674,6 +697,7 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
     assert resp_usage.status_code == status.HTTP_200_OK
     usage_data = resp_usage.json()
     assert usage_data["total_calls"] == 1
+    assert usage_data["successful_calls"] == 1
     assert usage_data["total_tokens"] == 110
 
     # 6. GET /api/v1/analysis-prompts
@@ -683,7 +707,7 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
 
 
 # ==============================================================================
-# Test 23: Seed Script Idempotency
+# Tests 23 - 27: Idempotency, Immutability & Strict Topic Validation
 # ==============================================================================
 
 def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
@@ -694,7 +718,132 @@ def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
     codes1 = {p.code for p in prompts_run1}
     assert codes1 == {"observatory_triage", "observatory_deep_analysis"}
 
-    # Run 2
+    # Run 2: content identical -> unchanged
     prompts_run2 = seed_analysis_prompts(db_session)
     assert len(prompts_run2) == 2
     assert {p.id for p in prompts_run1} == {p.id for p in prompts_run2}
+
+
+def test_24_seed_analysis_prompts_immutability_conflict(db_session: Session, monkeypatch) -> None:
+    """Attempting to seed a modified prompt with an existing (code, version) raises ValueError without modifying."""
+    from scripts import seed_analysis_prompts as seed_module
+
+    # Seed initial prompts
+    prompts_init = seed_module.seed_analysis_prompts(db_session)
+    triage_prompt = [p for p in prompts_init if p.code == "observatory_triage"][0]
+    original_system_prompt = triage_prompt.system_prompt
+
+    # Alter the definition for observatory_triage v1
+    modified_definitions = [
+        {
+            "code": "observatory_triage",
+            "version": 1,
+            "stage": "triage",
+            "name": "Modified Observatory Triage v1",
+            "description": "Altered description",
+            "system_prompt": "DIFFERENT SYSTEM PROMPT THAT VIOLATES IMMUTABILITY",
+            "user_prompt_template": triage_prompt.user_prompt_template,
+            "response_schema_version": "v1",
+            "config": {"temperature": 0.1, "max_tokens": 1024},
+            "active": True,
+        }
+    ]
+    monkeypatch.setattr(seed_module, "PROMPT_DEFINITIONS", modified_definitions)
+
+    # Attempt to seed with modified content
+    with pytest.raises(ValueError) as exc_info:
+        with db_session.begin_nested():
+            seed_module.seed_analysis_prompts(db_session)
+
+    assert "Immutability conflict" in str(exc_info.value)
+    assert "version 2" in str(exc_info.value)
+
+    # Confirm original prompt record is untouched
+    db_session.refresh(triage_prompt)
+    assert triage_prompt.system_prompt == original_system_prompt
+
+
+def test_25_matrix_snapshot_comprehensive_structure(db_session: Session) -> None:
+    """Ensure matrix_snapshot contains all required business fields and topic structures."""
+    matrix, topics = create_test_matrix_with_topics(db_session)
+    snapshot, s_hash = compute_matrix_snapshot(matrix)
+
+    # Core matrix fields
+    assert "matrix_id" in snapshot
+    assert snapshot["code"] == "TEST-MATRIX-v1"
+    assert snapshot["name"] == "Test Matrix"
+    assert snapshot["status"] == "active"
+    assert snapshot["relevance_instructions"] == "Include competition, antitrust, state aid"
+    assert snapshot["exclusion_instructions"] == "Exclude unrelated criminal matters"
+    assert "topics" in snapshot
+
+    # Active topic items structure
+    for t in snapshot["topics"]:
+        assert "topic_id" in t
+        assert "code" in t
+        assert "name" in t
+        assert "parent_code" in t
+        assert "description" in t
+        assert "relevance_instructions" in t
+        assert "keywords" in t
+        assert isinstance(t["keywords"], list)
+
+    # Hash length
+    assert len(s_hash) == 64
+
+
+@pytest.mark.asyncio
+async def test_26_invented_topic_marks_call_and_analysis_failed(db_session: Session) -> None:
+    """Invented topic codes cause EntryAnalysis and AnalysisCall to fail with AnalysisValidationError."""
+    source, entry = create_test_source_and_entry(db_session)
+    matrix, topics = create_test_matrix_with_topics(db_session)
+    prompt = create_test_prompt_version(db_session)
+
+    # Provider hallucinates a topic
+    hallucinated = [
+        AIAnalysisTopicItem(topic_code="antitrust_cartels", is_primary=False),
+        AIAnalysisTopicItem(topic_code="invented_topic", is_primary=True),
+    ]
+    provider = MockAIProvider(fixed_topics=hallucinated)
+    service = AnalysisService(provider=provider)
+
+    analysis = await service.analyze_entry(entry.id, matrix.id, prompt.id, db_session)
+
+    # Both analysis and call must be marked failed
+    assert analysis.status == "failed"
+    assert len(analysis.topics) == 0  # No topics persisted
+    assert len(analysis.calls) == 1
+
+    call = analysis.calls[0]
+    assert call.status == "failed"
+    assert call.error_type == "AnalysisValidationError"
+    assert "invented_topic" in (call.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_27_primary_topic_validation_failures(db_session: Session) -> None:
+    """Reject responses where no primary topic is designated or primary topic is invalid."""
+    source, entry = create_test_source_and_entry(db_session)
+    matrix, topics = create_test_matrix_with_topics(db_session)
+    prompt = create_test_prompt_version(db_session)
+
+    # 1. No primary topic at all
+    no_primary = [
+        AIAnalysisTopicItem(topic_code="antitrust_cartels", is_primary=False),
+        AIAnalysisTopicItem(topic_code="merger_control", is_primary=False),
+    ]
+    service = AnalysisService(provider=MockAIProvider(fixed_topics=no_primary))
+    analysis1 = await service.analyze_entry(entry.id, matrix.id, prompt.id, db_session)
+    assert analysis1.status == "failed"
+    assert analysis1.calls[0].status == "failed"
+    assert analysis1.calls[0].error_type == "AnalysisValidationError"
+    assert "No primary topic designated" in analysis1.calls[0].error_message
+
+    # 2. Inactive topic attempted
+    inactive_attempt = [
+        AIAnalysisTopicItem(topic_code="inactive_topic", is_primary=True),
+    ]
+    service2 = AnalysisService(provider=MockAIProvider(fixed_topics=inactive_attempt))
+    analysis2 = await service2.analyze_entry(entry.id, matrix.id, prompt.id, db_session)
+    assert analysis2.status == "failed"
+    assert analysis2.calls[0].error_type == "AnalysisValidationError"

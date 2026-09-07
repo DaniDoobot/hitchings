@@ -31,6 +31,7 @@ def list_entry_analyses(
     status: Optional[str] = Query(None, description="Filter by status (pending, completed, failed)"),
     relevance_status: Optional[str] = Query(None, description="Filter by relevance_status (relevant, uncertain, not_relevant)"),
     entry_id: Optional[uuid.UUID] = Query(None, description="Filter by entry_id"),
+    matrix_id: Optional[uuid.UUID] = Query(None, description="Filter by matrix_id"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -43,6 +44,8 @@ def list_entry_analyses(
         stmt = stmt.where(EntryAnalysis.relevance_status == relevance_status)
     if entry_id is not None:
         stmt = stmt.where(EntryAnalysis.entry_id == entry_id)
+    if matrix_id is not None:
+        stmt = stmt.where(EntryAnalysis.matrix_id == matrix_id)
 
     stmt = stmt.order_by(EntryAnalysis.created_at.desc()).offset(offset).limit(limit)
     return list(db.execute(stmt).scalars().all())
@@ -53,7 +56,7 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
     """Retrieve a full entry analysis by ID, including snapshot, topics, and audit calls."""
     analysis = db.query(EntryAnalysis).options(
         joinedload(EntryAnalysis.topics).joinedload(EntryAnalysisTopic.topic),
-        joinedload(EntryAnalysis.calls),
+        joinedload(EntryAnalysis.calls).joinedload(AnalysisCall.prompt_version),
     ).filter(EntryAnalysis.id == analysis_id).first()
 
     if not analysis:
@@ -79,7 +82,32 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
     ]
 
     calls_formatted = [
-        AnalysisCallResponse.model_validate(c) for c in analysis.calls
+        AnalysisCallResponse(
+            id=c.id,
+            entry_analysis_id=c.entry_analysis_id,
+            prompt_version_id=c.prompt_version_id,
+            prompt_code=c.prompt_version.code if c.prompt_version else None,
+            prompt_version=c.prompt_version.version if c.prompt_version else None,
+            prompt_stage=c.prompt_version.stage if c.prompt_version else c.stage,
+            stage=c.stage,
+            provider=c.provider,
+            model=c.model,
+            status=c.status,
+            request_hash=c.request_hash,
+            input_chars=c.input_chars,
+            output_chars=c.output_chars,
+            input_tokens=c.input_tokens,
+            output_tokens=c.output_tokens,
+            estimated_cost_usd=float(c.estimated_cost_usd) if c.estimated_cost_usd is not None else None,
+            latency_ms=c.latency_ms,
+            error_type=c.error_type,
+            error_message=c.error_message,
+            call_metadata=c.call_metadata,
+            started_at=c.started_at,
+            completed_at=c.completed_at,
+            created_at=c.created_at,
+        )
+        for c in analysis.calls
     ]
 
     return EntryAnalysisDetailResponse(

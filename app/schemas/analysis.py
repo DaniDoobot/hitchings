@@ -85,6 +85,9 @@ class AnalysisCallResponse(BaseModel):
     id: uuid.UUID
     entry_analysis_id: uuid.UUID
     prompt_version_id: uuid.UUID
+    prompt_code: Optional[str] = None
+    prompt_version: Optional[int] = None
+    prompt_stage: Optional[str] = None
     stage: str
     provider: str
     model: str

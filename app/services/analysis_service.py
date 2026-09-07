@@ -26,6 +26,11 @@ from app.schemas.analysis import AnalysisUsageResponse
 logger = logging.getLogger(__name__)
 
 
+class AnalysisValidationError(ValueError):
+    """Raised when model response contains hallucinated topics or invalid topic designations."""
+    pass
+
+
 def utc_now() -> datetime:
     """Return timezone-aware current UTC datetime."""
     return datetime.now(timezone.utc)
@@ -128,8 +133,8 @@ class AnalysisService:
         pipeline_version: str = "v1",
     ) -> EntryAnalysis:
         """Execute full analysis flow: snapshot -> provider call -> validation -> audit -> persistence."""
-        # 1. Quota check
-        self.check_monthly_limit(db)
+        # 1. Quota check (enforcement deactivated in Bloque 7A per architectural guidelines)
+        # Usage metrics and monthly setting remain active for tracking
 
         # 2. Resolve entities
         entry = db.get(Entry, entry_id)
@@ -191,14 +196,14 @@ class AnalysisService:
 
         call_completed_at = utc_now()
 
-        # 6. Record Audit Call (always created, even on error)
+        # 6. Record Audit Call (always created, using completed/failed status)
         audit_call = AnalysisCall(
             entry_analysis_id=analysis.id,
             prompt_version_id=prompt_version.id,
             stage=prompt_version.stage,
             provider=result.provider_name or provider.provider_name,
             model=result.model or "unknown",
-            status="success" if result.success else "error",
+            status="completed" if result.success else "failed",
             request_hash=req_hash,
             input_chars=result.input_chars,
             output_chars=result.output_chars,
@@ -220,6 +225,7 @@ class AnalysisService:
             analysis.status = "failed"
             analysis.reason = f"Provider failure ({result.error_type}): {result.error_message}"
             analysis.completed_at = call_completed_at
+            audit_call.status = "failed"
             db.commit()
             db.refresh(analysis)
             return analysis
@@ -237,31 +243,58 @@ class AnalysisService:
         analysis.key_points = payload.key_points
         analysis.completed_at = call_completed_at
 
-        # 9. Map and validate topics against matrix topics
-        topic_by_code: dict[str, TrackingTopic] = {t.code: t for t in matrix.topics if t.active}
-        primary_assigned = False
+        # 9. Map and strictly validate topics against matrix snapshot
+        snapshot_topic_codes = {t["code"] for t in snapshot.get("topics", [])}
+        topic_by_code: dict[str, TrackingTopic] = {
+            t.code: t for t in matrix.topics if t.active and t.code in snapshot_topic_codes
+        }
 
+        try:
+            # Reject any unknown, foreign, or inactive topic
+            for topic_item in payload.topics:
+                if (
+                    topic_item.topic_code not in snapshot_topic_codes
+                    or topic_item.topic_code not in topic_by_code
+                ):
+                    raise AnalysisValidationError(
+                        f"Unrecognized topic code '{topic_item.topic_code}': topic does not exist, "
+                        f"belongs to another matrix, or is inactive in the matrix snapshot."
+                    )
+
+            # Validate primary topic designation when topics are present
+            if payload.topics:
+                primaries = [t for t in payload.topics if t.is_primary]
+                if len(primaries) == 0:
+                    raise AnalysisValidationError(
+                        "No primary topic designated among classified topics. Exactly one primary topic is required."
+                    )
+                if len(primaries) > 1:
+                    raise AnalysisValidationError(
+                        f"Multiple primary topics designated ({len(primaries)}). Exactly one primary topic is permitted."
+                    )
+                if primaries[0].topic_code not in snapshot_topic_codes:
+                    raise AnalysisValidationError(
+                        f"Primary topic '{primaries[0].topic_code}' does not exist in matrix snapshot."
+                    )
+        except AnalysisValidationError as val_exc:
+            analysis.status = "failed"
+            analysis.reason = str(val_exc)
+            analysis.completed_at = call_completed_at
+            audit_call.status = "failed"
+            audit_call.error_type = "AnalysisValidationError"
+            audit_call.error_message = str(val_exc)
+            db.commit()
+            db.refresh(analysis)
+            return analysis
+
+        # Persist valid topics
         for topic_item in payload.topics:
-            topic = topic_by_code.get(topic_item.topic_code)
-            if not topic:
-                logger.warning(
-                    "AI suggested topic code '%s' which does not exist or is inactive in matrix '%s'",
-                    topic_item.topic_code,
-                    matrix.code,
-                )
-                continue
-
-            # Ensure at most 1 primary topic
-            is_primary = False
-            if topic_item.is_primary and not primary_assigned:
-                is_primary = True
-                primary_assigned = True
-
+            topic = topic_by_code[topic_item.topic_code]
             analysis_topic = EntryAnalysisTopic(
                 analysis_id=analysis.id,
                 topic_id=topic.id,
                 confidence=topic_item.confidence,
-                is_primary=is_primary,
+                is_primary=topic_item.is_primary,
                 rationale=topic_item.rationale,
             )
             db.add(analysis_topic)
@@ -275,8 +308,8 @@ class AnalysisService:
         calls = db.query(AnalysisCall).all()
 
         total_calls = len(calls)
-        successful_calls = sum(1 for c in calls if c.status == "success")
-        failed_calls = sum(1 for c in calls if c.status == "error")
+        successful_calls = sum(1 for c in calls if c.status == "completed")
+        failed_calls = sum(1 for c in calls if c.status == "failed")
         total_in_tokens = sum(c.input_tokens or 0 for c in calls)
         total_out_tokens = sum(c.output_tokens or 0 for c in calls)
         total_tokens = total_in_tokens + total_out_tokens

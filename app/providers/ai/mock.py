@@ -130,18 +130,18 @@ class MockAIProvider(BaseAIProvider):
                     )
                 )
 
-        # Ensure max 1 primary topic
-        primary_count = sum(1 for t in topics if t.is_primary)
-        if primary_count > 1:
-            first_found = False
-            for t in topics:
-                if t.is_primary:
-                    if not first_found:
-                        first_found = True
-                    else:
-                        t.is_primary = False
-        elif primary_count == 0 and topics:
-            topics[0].is_primary = True
+            # Ensure max 1 primary topic for generated default topics
+            primary_count = sum(1 for t in topics if t.is_primary)
+            if primary_count > 1:
+                first_found = False
+                for t in topics:
+                    if t.is_primary:
+                        if not first_found:
+                            first_found = True
+                        else:
+                            t.is_primary = False
+            elif primary_count == 0 and topics:
+                topics[0].is_primary = True
 
         # Construct payload
         confidence = round(score / 100.0, 2)

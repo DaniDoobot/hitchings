@@ -119,16 +119,26 @@ def seed_analysis_prompts(db: Optional[Session] = None) -> list[AnalysisPromptVe
             ).scalar_one_or_none()
 
             if existing:
-                logger.info("Updating existing prompt version '%s:v%d' (id=%s)", code, version, existing.id)
-                existing.stage = prompt_data["stage"]
-                existing.name = prompt_data["name"]
-                existing.description = prompt_data["description"]
-                existing.system_prompt = prompt_data["system_prompt"]
-                existing.user_prompt_template = prompt_data["user_prompt_template"]
-                existing.response_schema_version = prompt_data["response_schema_version"]
-                existing.config = prompt_data["config"]
-                existing.active = prompt_data["active"]
-                seeded.append(existing)
+                # Check immutability: verify whether material content is identical
+                content_identical = (
+                    existing.stage == prompt_data["stage"]
+                    and existing.system_prompt == prompt_data["system_prompt"]
+                    and existing.user_prompt_template == prompt_data["user_prompt_template"]
+                    and existing.response_schema_version == prompt_data["response_schema_version"]
+                    and (existing.config or {}) == (prompt_data["config"] or {})
+                )
+                if content_identical:
+                    logger.info("Prompt version '%s:v%d' already exists and is unchanged (id=%s)", code, version, existing.id)
+                    seeded.append(existing)
+                else:
+                    err_msg = (
+                        f"Immutability conflict for prompt version '{code}:v{version}' (id={existing.id}). "
+                        f"The existing prompt definition differs from the seed specification. "
+                        f"Prompt versions are strictly immutable; create version {version + 1} (e.g. '{code}:v{version + 1}') "
+                        f"instead of modifying an existing version."
+                    )
+                    logger.error(err_msg)
+                    raise ValueError(err_msg)
             else:
                 logger.info("Creating new prompt version '%s:v%d'", code, version)
                 new_prompt = AnalysisPromptVersion(
@@ -153,7 +163,8 @@ def seed_analysis_prompts(db: Optional[Session] = None) -> list[AnalysisPromptVe
 
         return seeded
     except Exception as exc:
-        db.rollback()
+        if close_db:
+            db.rollback()
         logger.exception("Error during prompt version seeding: %s", exc)
         raise
     finally:
