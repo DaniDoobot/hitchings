@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.entry import Entry
+from app.models.analysis import EntryAnalysis
 from app.schemas.entry import EntryRead
+from app.schemas.analysis import EntryAnalysisResponse
 
 router = APIRouter(prefix="/entries", tags=["Entries"])
 
@@ -37,3 +39,21 @@ def get_entry(entry_id: uuid.UUID, db: Session = Depends(get_db)) -> Entry:
     if not entry:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
     return entry
+
+
+@router.get("/{entry_id}/analyses", response_model=List[EntryAnalysisResponse])
+def list_entry_analyses_for_entry(
+    entry_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> List[EntryAnalysis]:
+    """Retrieve historical analysis records (0..N) for a specific entry."""
+    entry = db.get(Entry, entry_id)
+    if not entry:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Entry not found")
+
+    stmt = (
+        select(EntryAnalysis)
+        .where(EntryAnalysis.entry_id == entry_id)
+        .order_by(EntryAnalysis.created_at.desc())
+    )
+    return list(db.execute(stmt).scalars().all())

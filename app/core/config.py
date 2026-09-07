@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     APIFY_ENABLED: bool = False
     APIFY_API_KEY: str = ""
 
+    # AI Analysis (Bloque 7A - Architecture & Persistence Foundation)
+    ANALYSIS_PROVIDER: str = "disabled"
+    ANALYSIS_RELEVANT_MIN_SCORE: int = 70
+    ANALYSIS_UNCERTAIN_MIN_SCORE: int = 40
+    ANALYSIS_MONTHLY_ENTRY_LIMIT: int = 1000
+
 
 @lru_cache
 def get_settings() -> Settings:

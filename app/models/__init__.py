@@ -11,6 +11,12 @@ from app.models.tracking import (
     TrackedEntity,
     TrackedEntityTopic,
 )
+from app.models.analysis import (
+    AnalysisPromptVersion,
+    EntryAnalysis,
+    EntryAnalysisTopic,
+    AnalysisCall,
+)
 
 __all__ = [
     "Base",
@@ -24,4 +30,8 @@ __all__ = [
     "TrackingTopic",
     "TrackedEntity",
     "TrackedEntityTopic",
+    "AnalysisPromptVersion",
+    "EntryAnalysis",
+    "EntryAnalysisTopic",
+    "AnalysisCall",
 ]

@@ -70,6 +70,12 @@ class Entry(Base):
 
     # Relationships
     source = relationship("Source", back_populates="entries")
+    analyses = relationship(
+        "EntryAnalysis",
+        back_populates="entry",
+        cascade="all, delete-orphan",
+        order_by="desc(EntryAnalysis.created_at)",
+    )
 
     def __repr__(self) -> str:
         return f"<Entry id={self.id} source_id={self.source_id} title='{self.title[:30] if self.title else 'No Title'}'>"

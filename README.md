@@ -10,7 +10,7 @@ En el futuro, HITCHINGS integrará dos grandes capacidades:
 
 ---
 
-## 2. Alcance Actual: BLOQUES 0, 1, 2, 3, 4 y 5
+## 2. Alcance Actual: BLOQUES 0, 1, 2, 3, 4, 5, 6 y 7A
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
@@ -19,6 +19,8 @@ El proyecto cuenta con:
 - **BLOQUE 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, estados `success`/`partial`/`failed`, cálculo dinámico de frescura y endpoints de observabilidad técnica).
 - **BLOQUE 4:** Segunda fuente real institucional: **European Commission / DG Competition** (vía RSS oficial de Competition Policy con enriquecimiento de texto íntegro vía Press Corner API y node fallback con `EuropeanCommissionExtractor`).
 - **BLOQUE 5:** Tercera fuente real institucional y nuevo tipo de contenido: **Competition Appeal Tribunal (CAT)** / Resoluciones Judiciales (vía website HTML oficial con `CompetitionAppealTribunalExtractor`, extracción de Neutral Citations, multi-casos, PDFs originales enlazados y resúmenes oficiales normalizados como `judicial_decision`).
+- **BLOQUE 6:** Cuarta fuente real institucional y jurisprudencia comunitaria: **Tribunal de Justicia de la Unión Europea (TJUE / CURIA)** / Sentencias y Conclusiones (vía InfoCuria, identificador canónico ECLI, deduplicación exacta, texto íntegro y limpio).
+- **BLOQUE 7A:** Arquitectura y Persistencia del Análisis con IA: cimientos de modelado, inmutabilidad (`Entry` vs `EntryAnalysis`), versionado estricto de prompts (`AnalysisPromptVersion`), snapshots canónicos con hash SHA-256 de matrices y contenidos, asignación normalizada de temas con un único tema primario (`EntryAnalysisTopic`), auditoría técnica granular (`AnalysisCall`: tokens, latencia, costes USD), proveedor mock determinista (`MockAIProvider`) y política de seguridad de cero llamadas externas no autorizadas (`ANALYSIS_PROVIDER="disabled"`).
 
 
 ### Principio Arquitectónico Fundamental: Separación de Responsabilidades
@@ -369,17 +371,57 @@ IngestionRun persistido + actualización de freshness (status='fresh', warning_h
 
 ---
 
-## 14. Cómo Ejecutar Tests
+## 14. Bloque 7A: Arquitectura y Persistencia del Análisis con IA
 
-La suite completa (68 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea, CAT y TJUE/CURIA), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
+El **Bloque 7A** establece los cimientos de modelado, persistencia, versionado y auditoría para el análisis asistido por inteligencia artificial de las publicaciones capturadas en HITCHINGS, bajo estrictas garantías de reproducibilidad, trazabilidad y control de costes.
+
+```text
+                                  ┌─────────────────────────────┐
+                                  │   TrackingMatrix (v0.1)     │
+                                  └──────────────┬──────────────┘
+                                                 │ Snapshot JSONB + SHA-256
+                                                 ▼
+┌─────────────────────────┐           ┌─────────────────────────────┐
+│      Entry (Original)   │──────────►│      EntryAnalysis          │
+│  (Inmutable en BD)      │  (1..N)   │  - relevance_score (0-100)  │
+└─────────────────────────┘           │  - relevance_status         │
+                                      │  - summary / key_points     │
+                                      └──────┬───────────────┬──────┘
+                                             │               │
+                      ┌──────────────────────┘               └──────────────────────┐
+                      ▼                                                             ▼
+┌──────────────────────────────────────────┐                  ┌──────────────────────────────────────────┐
+│      EntryAnalysisTopic (Normalizado)    │                  │       AnalysisCall (Auditoría Técnica)   │
+│  - topic_id (FK tracking_topics)         │                  │  - prompt_version_id (FK versioned)      │
+│  - confidence (0.0 - 1.0)                │                  │  - stage ('triage', 'deep_analysis')     │
+│  - is_primary (Exactamente 1 primario)   │                  │  - provider / model                      │
+│  - rationale                             │                  │  - input_tokens / output_tokens          │
+└──────────────────────────────────────────┘                  │  - estimated_cost_usd / latency_ms       │
+                                                              │  - status ('success', 'error')           │
+                                                              └──────────────────────────────────────────┘
+```
+
+### Principios Fundamentales del Análisis con IA:
+1. **Inmutabilidad de la Entrada (`Entry` vs `EntryAnalysis`):** La tabla `entries` preserva exactamente la captura original del medio fuente. Toda interpretación analítica se almacena en `entry_analyses`. Una misma entrada puede disponer de 0..N análisis históricos o comparativos entre versiones de matriz o prompts.
+2. **Snapshots Canónicos y Hashing Determinista:** Cada análisis guarda una copia estricta en JSONB de la `TrackingMatrix` en el momento de la evaluación (`matrix_snapshot`), calculando su hash SHA-256 (`matrix_snapshot_hash`). Asimismo, se calcula el hash del contenido textual analizado (`entry_content_hash`). Si la matriz cambia en el futuro, el histórico analítico permanece auditable y reproducible.
+3. **Control de Versiones de Prompts (`AnalysisPromptVersion`):** Los prompts no se almacenan como cadenas arbitrarias en el código, sino en base de datos con código, número de versión entero y etapa (`triage`, `deep_analysis`). La restricción única `UNIQUE(code, version)` previene colisiones.
+4. **Clasificación Temática Normalizada (`EntryAnalysisTopic`):** Los temas sugeridos por el análisis se validan contra los temas activos de la matriz. Se garantiza como regla de negocio que exista **como máximo 1 tema primario** (`is_primary=True`).
+5. **Auditoría Exhaustiva de Costes y Rendimiento (`AnalysisCall`):** Cada invocación individual a un modelo registra tokens de entrada y salida, latencia en milisegundos, coste estimado en USD (precisión `NUMERIC(12,6)`), payload de respuesta en bruto, y metadatos técnicos. Si la llamada falla, la auditoría persiste con estado `error`, tipo de excepción y mensaje para diagnóstico.
+6. **Política de Seguridad "Disabled-by-Default":** Por defecto, `ANALYSIS_PROVIDER="disabled"`, bloqueando cualquier intento de invocar modelos externos reales sin autorización explícita de configuración y sin generar costes no planificados. Para pruebas unitarias locales y tests automatizados, se implementa `MockAIProvider` determinista.
+
+---
+
+## 15. Cómo Ejecutar Tests
+
+La suite completa (**91 tests**, 0 fallos) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea, CAT y TJUE/CURIA), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, frescura, snapshots, modelos relacionales de IA, mock provider determinista, cuotas mensuales y endpoints de análisis:
 
 ```powershell
-pytest -v
+.venv\Scripts\pytest.exe -v
 ```
 
 ---
 
-## 15. Endpoints Disponibles
+## 16. Endpoints Disponibles
 
 ### Salud del Sistema
 - `GET /health`: Estado del proceso FastAPI (`{"status": "ok", "service": "hitchings"}`).
@@ -391,59 +433,23 @@ pytest -v
 - `POST /api/v1/sources`: Crear fuente técnica (permite asociar `tracked_entity_id`).
 - `PATCH /api/v1/sources/{id}`: Actualización parcial.
 - `DELETE /api/v1/sources/{id}`: Eliminación.
-- `GET /api/v1/sources/{id}/status`: **Observabilidad técnica y frescura** en tiempo real:
-  ```json
-  {
-    "source_id": "162474fa-1d13-4e24-b8a0-659863040157",
-    "name": "CNMC - Noticias",
-    "active": true,
-    "last_run_at": "2026-09-07T12:10:13.471078+02:00",
-    "last_success_at": "2026-09-07T12:10:15.847684+02:00",
-    "last_run_status": "success",
-    "latest_published_at": "2026-09-01T08:08:02+02:00",
-    "freshness": {
-      "status": "fresh",
-      "warning_hours": 168,
-      "hours_since_latest": 148.0
-    },
-    "last_run": {
-      "id": "feace384-88ea-4ded-b6e2-642816800114",
-      "started_at": "2026-09-07T12:10:13.471078+02:00",
-      "finished_at": "2026-09-07T12:10:15.847684+02:00",
-      "status": "success",
-      "fetched": 20,
-      "created": 0,
-      "duplicates": 20,
-      "failed": 0,
-      "duration_ms": 2376
-    }
-  }
-  ```
-- `POST /api/v1/sources/{id}/ingest`: Disparo manual de ingesta con retorno de `ingestion_run_id`:
-  ```json
-  {
-    "ingestion_run_id": "feace384-88ea-4ded-b6e2-642816800114",
-    "source_id": "162474fa-1d13-4e24-b8a0-659863040157",
-    "status": "success",
-    "fetched": 20,
-    "created": 0,
-    "duplicates": 20,
-    "failed": 0,
-    "started_at": "2026-09-07T10:10:13.471078Z",
-    "finished_at": "2026-09-07T10:10:15.847684Z",
-    "duration_ms": 2376,
-    "latest_published_at": "2026-09-01T06:08:02Z",
-    "oldest_published_at": "2026-07-27T09:39:58Z"
-  }
-  ```
+- `GET /api/v1/sources/{id}/status`: **Observabilidad técnica y frescura** en tiempo real.
+- `POST /api/v1/sources/{id}/ingest`: Disparo manual de ingesta con retorno de `ingestion_run_id`.
 
 ### Histórico de Ejecuciones (`/api/v1/ingestion-runs`)
 - `GET /api/v1/ingestion-runs`: Listado cronológico inverso con filtros (`source_id`, `status`, `limit`, `offset`).
 - `GET /api/v1/ingestion-runs/{id}`: Detalle completo de una ejecución histórica.
 
 ### Entradas Capturadas (`/api/v1/entries`)
-- `GET /api/v1/entries`: Listado de entradas persistidas con paginación (`limit`, `offset`) y filtros (`source_id`, `status`).
-- `GET /api/v1/entries/{id}`: Detalle completo de una entrada capturada (`title`, `url`, `published_at`, `raw_text`, `content_hash`, `raw_metadata`, etc.).
+- `GET /api/v1/entries`: Listado de entradas persistidas con paginación (`limit`, `offset`) y filtros (`source_id`).
+- `GET /api/v1/entries/{id}`: Detalle completo de una entrada capturada (`title`, `url`, `published_at`, `content`, `content_hash`, `raw_metadata`, etc.).
+- `GET /api/v1/entries/{entry_id}/analyses`: Historial completo de análisis analíticos (0..N) generados para esta publicación.
+
+### Análisis con IA (`/api/v1/entry-analyses` y `/api/v1/analysis-*`)
+- `GET /api/v1/entry-analyses`: Listado paginado y filtrable de análisis (`status`, `relevance_status`, `entry_id`, `limit`, `offset`).
+- `GET /api/v1/entry-analyses/{id}`: Detalle completo de un análisis incluyendo `matrix_snapshot`, topics asignados normalizados y registro de llamadas auditadas (`calls`).
+- `GET /api/v1/analysis-usage`: Resumen acumulado de llamadas exitosas/fallidas, recuento de tokens de entrada/salida y coste total estimado en USD agrupado por proveedor y etapa.
+- `GET /api/v1/analysis-prompts`: Listado de versiones de prompts de análisis disponibles (`observatory_triage`, `observatory_deep_analysis`).
 
 ### Matrices de Seguimiento (`/api/v1/tracking/matrices`)
 - `GET /api/v1/tracking/matrices`: Listar matrices.
@@ -473,21 +479,20 @@ pytest -v
 
 ---
 
-## 16. Funcionalidades Deliberadamente Pendientes
+## 17. Funcionalidades Deliberadamente Pendientes
 
-Para respetar la delimitación estricta de fases, en este Bloque 6 **NO** se han implementado:
-1. Retries automáticos, backoff exponencial o circuit breakers.
-2. Scheduler en segundo plano (Celery, APScheduler, cron).
-3. Ingesta, clasificación, resúmenes o scoring con IA.
-4. Extracción o parsing de texto de los archivos PDF ni OCR.
-5. Nuevas fuentes técnicas o providers de pago (Bright Data, Apify).
-6. Autenticación, JWT o control de acceso.
-7. Interfaz gráfica o frontend.
-8. Módulo de análisis documental (PDF, audio, exportación).
+Para respetar la delimitación estricta de fases, en este Bloque 7A **NO** se han implementado:
+1. Llamadas a modelos LLM externos de pago (OpenAI, Anthropic, Gemini, Vertex AI).
+2. Endpoint mutacional `POST /entries/{id}/analyze` o pipeline batch en background.
+3. Extracción de texto de documentos binarios PDF ni OCR.
+4. Scheduler en segundo plano (Celery, APScheduler, cron).
+5. Autenticación, JWT o control de acceso.
+6. Interfaz gráfica o frontend.
+7. Módulo de análisis documental (PDF, audio, exportación).
 
 ---
 
-## 17. Roadmap
+## 18. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -495,8 +500,9 @@ Para respetar la delimitación estricta de fases, en este Bloque 6 **NO** se han
 - [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad).
 - [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition.
 - [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments.
-- [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions. *(Completado)*
-- [ ] **Bloque 7:** Tratamiento y enriquecimiento con IA.
+- [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions.
+- [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista). *(Completado)*
+- [ ] **Bloque 7B:** Integración con proveedores LLM reales y pipeline de triage y análisis en profundidad.
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
