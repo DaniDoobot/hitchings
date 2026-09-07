@@ -10,7 +10,7 @@ En el futuro, HITCHINGS integrará dos grandes capacidades:
 
 ---
 
-## 2. Alcance Actual: BLOQUES 0, 1, 2, 3 y 4
+## 2. Alcance Actual: BLOQUES 0, 1, 2, 3, 4 y 5
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
@@ -18,6 +18,8 @@ El proyecto cuenta con:
 - **BLOQUE 2:** Primera fuente real end-to-end conectada a Internet (**CNMC - Prensa / Noticias** vía website HTML oficial con `CNMCNewsExtractor`), ingesta normalizada, deduplicación básica en base de datos y endpoints de consulta de entradas.
 - **BLOQUE 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, estados `success`/`partial`/`failed`, cálculo dinámico de frescura y endpoints de observabilidad técnica).
 - **BLOQUE 4:** Segunda fuente real institucional: **European Commission / DG Competition** (vía RSS oficial de Competition Policy con enriquecimiento de texto íntegro vía Press Corner API y node fallback con `EuropeanCommissionExtractor`).
+- **BLOQUE 5:** Tercera fuente real institucional y nuevo tipo de contenido: **Competition Appeal Tribunal (CAT)** / Resoluciones Judiciales (vía website HTML oficial con `CompetitionAppealTribunalExtractor`, extracción de Neutral Citations, multi-casos, PDFs originales enlazados y resúmenes oficiales normalizados como `judicial_decision`).
+
 
 ### Principio Arquitectónico Fundamental: Separación de Responsabilidades
 El diseño desacopla estrictamente tres dimensiones:
@@ -61,7 +63,7 @@ hitchings/
 │   ├── db/                   # Engine SQLAlchemy síncrono (psycopg v3) y sesiones
 │   ├── models/               # Modelos SQLAlchemy: Source, Entry, IngestionRun, Tracking*
 │   ├── providers/            # Contratos e implementaciones (NativeProvider, Bright Data, Apify)
-│   │   └── extractors/       # Extractores especializados (CNMCNewsExtractor, EuropeanCommissionExtractor)
+│   │   └── extractors/       # Extractores especializados (CNMC, European Commission, CAT)
 │   ├── schemas/              # Esquemas Pydantic para validación y serialización
 │   ├── services/             # Servicios de dominio: IngestionService con deduplicación y observabilidad
 │   └── main.py               # Punto de entrada FastAPI y lifespan
@@ -71,10 +73,11 @@ hitchings/
 │       ├── 0002_tracking_configuration.py # matrices, topics, entities, entity_topics
 │       └── 0003_ingestion_runs.py         # ingestion_runs, campos de frescura
 ├── scripts/
-│   ├── seed_tracking_v01.py               # Seed de la Matriz v0.1 y entidades del cliente
-│   ├── seed_source_cnmc.py                # Seed de la fuente real CNMC asociada a su entidad
-│   └── seed_source_european_commission.py # Seed de la fuente real Comisión Europea
-├── tests/                    # Tests unitarios, de API, modelos, seeds, CNMC y Comisión Europea (48 tests)
+│   ├── seed_tracking_v01.py                   # Seed de la Matriz v0.1 y entidades del cliente
+│   ├── seed_source_cnmc.py                    # Seed de la fuente real CNMC asociada a su entidad
+│   ├── seed_source_european_commission.py     # Seed de la fuente real Comisión Europea
+│   └── seed_source_competition_appeal_tribunal.py # Seed de la fuente real CAT (Judgments)
+├── tests/                    # Tests unitarios, de API, modelos, seeds y fuentes reales (56 tests)
 ├── .env.example              # Plantilla de variables de entorno seguras
 ├── .gitignore                # Exclusiones de Git (.env, .venv, caches)
 ├── Dockerfile                # Imagen Docker multi-plataforma (Python 3.12-slim)
@@ -275,9 +278,52 @@ IngestionRun persistido + actualización de freshness (status='fresh', warning_h
 
 ---
 
-## 12. Cómo Ejecutar Tests
+## 12. Tercera Fuente Real: Competition Appeal Tribunal (CAT) / Judgments (BLOQUE 5)
 
-La suite completa (48 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC y Comisión Europea), parsing RSS, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
+### Circuito y Arquitectura:
+```text
+Competition Appeal Tribunal (https://www.catribunal.org.uk/judgments)
+        ↓
+Source (name='Competition Appeal Tribunal - Judgments', type='website', provider='native', category='institutional', tracked_entity_id='Competition Appeal Tribunal')
+        ↓
+NativeProvider dispatch -> CompetitionAppealTribunalExtractor
+        ↓
+Parsing HTML de listado (/judgments) con soporte de initial_fetch_limit (20) y paginación (?page=0, 1, ...)
+        ├── Extracción de casos asociados (case_numbers, case_names, case_urls)
+        ├── Extracción de Neutral Citation oficial ([2026] CAT 71, [2026] EWCA Civ 993)
+        ├── Extracción de tipo de resolución y enlace al PDF original de la sentencia (judgment_pdf_url)
+        └── Detección de landing de resumen oficial (/judgments/{slug})
+        ↓
+Enriquecimiento concurrente de resumen oficial (asyncio.Semaphore):
+        ├── Con landing de resumen: extracción de texto íntegro en <div class="above-related"> y excerpt de 1.er párrafo
+        └── Sin landing (ej. EWCA Civ): content=None, excerpt=None, url al caso con ancla de citación
+        ↓
+IngestionService (reutilizado de forma transparente)
+        ↓
+Deduplicación jerárquica (Neutral Citation como external_id + URL canónica)
+        ↓
+Entry en PostgreSQL:
+        ├── content_type = 'judicial_decision'
+        ├── language = 'en'
+        ├── title = '[2026] CAT 71 | Walter Hugh Merricks CBE v Mastercard Incorporated - Ruling (Trial 2 Costs)'
+        ├── published_at = fecha oficial de emisión del tribunal
+        └── raw_metadata = {case_numbers, case_names, case_urls, neutral_citation, judgment_pdf_url, has_summary}
+        ↓
+IngestionRun persistido + actualización de freshness (status='stale' en receso judicial, warning_hours=336 / 14 días)
+```
+
+### Logros y Decisiones de Diseño del Bloque 5:
+1. **Nuevo Tipo de Contenido (`content_type='judicial_decision'`):** HITCHINGS valida la captura de resoluciones judiciales formales, diferenciándolas de notas de prensa o noticias institucionales.
+2. **Neutral Citations Oficiales:** Se capturan y normalizan las citaciones canónicas del sistema judicial británico (`[2026] CAT 71`, `[2026] EWCA Civ 872`), utilizándolas como `external_id` único y en el título.
+3. **Mapeo de Casos Complejos:** Sentencias con múltiples casos agrupados (ej. litigios paraguas de comisiones de intercambio) conservan la lista completa de números y nombres de caso en `raw_metadata`.
+4. **Resúmenes Oficiales vs. Resoluciones Sin Resumen:** Cuando el tribunal publica un resumen oficial (`/judgments/{slug}`), se extrae el texto íntegro y el primer párrafo como extracto. En resoluciones de tribunales superiores (Court of Appeal) sin resumen en CAT, se almacena el enlace al PDF oficial y la página del caso correspondiente sin generar errores ni campos espurios.
+5. **Cero Migraciones Innecesarias:** Se respetó el modelo existente `Entry`, asegurando que `external_id` permanezca acotado ($\le 255$ caracteres) mediante la Neutral Citation oficial.
+
+---
+
+## 13. Cómo Ejecutar Tests
+
+La suite completa (56 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea y Competition Appeal Tribunal), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
 
 ```powershell
 pytest -v
@@ -285,7 +331,7 @@ pytest -v
 
 ---
 
-## 13. Endpoints Disponibles
+## 14. Endpoints Disponibles
 
 ### Salud del Sistema
 - `GET /health`: Estado del proceso FastAPI (`{"status": "ok", "service": "hitchings"}`).
@@ -379,28 +425,31 @@ pytest -v
 
 ---
 
-## 14. Funcionalidades Deliberadamente Pendientes
+## 15. Funcionalidades Deliberadamente Pendientes
 
-Para respetar la delimitación estricta de fases, en este Bloque 4 **NO** se han implementado:
+Para respetar la delimitación estricta de fases, en este Bloque 5 **NO** se han implementado:
 1. Retries automáticos, backoff exponencial o circuit breakers.
 2. Scheduler en segundo plano (Celery, APScheduler, cron).
 3. Ingesta, clasificación, resúmenes o scoring con IA.
-4. Nuevas fuentes técnicas o providers de pago (Bright Data, Apify).
-5. Autenticación, JWT o control de acceso.
-6. Interfaz gráfica o frontend.
-7. Módulo de análisis documental (PDF, audio, exportación).
+4. Extracción o parsing de texto de los archivos PDF ni OCR.
+5. Nuevas fuentes técnicas o providers de pago (Bright Data, Apify).
+6. Autenticación, JWT o control de acceso.
+7. Interfaz gráfica o frontend.
+8. Módulo de análisis documental (PDF, audio, exportación).
 
 ---
 
-## 15. Roadmap
+## 16. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
 - [x] **Bloque 2:** Primera fuente real end-to-end: CNMC (Website HTML oficial, deduplicación e ingesta).
 - [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad).
-- [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition. *(Completado)*
-- [ ] **Bloque 5:** Tratamiento y enriquecimiento con IA.
-- [ ] **Bloque 6:** Automatización / programación (scheduler).
-- [ ] **Bloque 7:** LinkedIn y fuentes complejas mediante proveedor externo.
-- [ ] **Bloque 8:** Interfaz web.
+- [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition.
+- [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments. *(Completado)*
+- [ ] **Bloque 6:** Tratamiento y enriquecimiento con IA.
+- [ ] **Bloque 7:** Automatización / programación (scheduler).
+- [ ] **Bloque 8:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [ ] **Bloque 9:** Interfaz web.
 - [ ] **Futuro:** Módulo de análisis documental.
+

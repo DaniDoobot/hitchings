@@ -95,6 +95,14 @@ class NativeProvider(BaseSourceProvider):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
 
+        # Specific website adapter dispatch: CAT (Competition Appeal Tribunal)
+        if "catribunal.org.uk" in source.url.lower():
+            from app.providers.extractors.competition_appeal_tribunal import CompetitionAppealTribunalExtractor
+            extractor = CompetitionAppealTribunalExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
         raise ProviderError(f"No website extractor implemented yet for URL: {source.url}")
 
     async def _fetch_rss(self, source: Source) -> list[RawEntryData]:
