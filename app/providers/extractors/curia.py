@@ -91,15 +91,18 @@ def select_best_language(lang_variants: list[dict]) -> str:
     return codes[0] if codes else "EN"
 
 
-def clean_document_html(raw_html: str) -> tuple[str, Optional[str], Optional[str]]:
-    """Clean full document HTML and extract excerpt and usual case name.
+def clean_document_html(raw_html: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Clean official document HTML, convert to clean plain text, and extract excerpt and usual case name.
 
     Returns:
-        (clean_html, excerpt, usual_name)
+        (clean_text, excerpt, usual_name)
     """
+    if not raw_html or not raw_html.strip():
+        return None, None, None
+
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    for el in soup.find_all(["script", "style", "link", "meta"]):
+    for el in soup.find_all(["script", "style", "link", "meta", "nav", "header", "footer"]):
         el.decompose()
 
     text_head = soup.get_text()[:1500]
@@ -111,9 +114,36 @@ def clean_document_html(raw_html: str) -> tuple[str, Optional[str], Optional[str
         if lower_cand not in {"1", "i", "ii", "provisional text", "texte provisoire", "curia"} and not lower_cand.startswith("demande"):
             usual_name = candidate
 
-    paragraphs = [p.get_text().strip() for p in soup.find_all("p") if len(p.get_text().strip()) > 35]
+    body = soup.find("body") or soup
+
+    for br in body.find_all("br"):
+        br.replace_with("\n")
+
+    block_tags = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "li", "blockquote"]
+    lines: list[str] = []
+    paragraphs_for_excerpt: list[str] = []
+
+    for tag in body.find_all(block_tags):
+        # Only take leaf block elements to avoid duplicating nested text
+        if not any(child.name in block_tags for child in tag.find_all(block_tags)):
+            clean = re.sub(r"[ \t\xa0]+", " ", tag.get_text()).strip()
+            if clean:
+                lines.append(clean)
+                if tag.name == "p" and len(clean) > 35:
+                    paragraphs_for_excerpt.append(clean)
+
+    if not lines:
+        raw = body.get_text()
+        clean_text = re.sub(r"\n\s*\n+", "\n\n", raw).strip()
+    else:
+        clean_text = "\n\n".join(lines).strip()
+
+    if not clean_text:
+        return None, None, usual_name
+
+    # Extract substantive excerpt from official text without inventing artificial phrases
     clean_paragraphs = [
-        p for p in paragraphs
+        p for p in paragraphs_for_excerpt
         if not p.lower().startswith("provisional text")
         and not p.lower().startswith("édition provisoire")
         and not p.lower().startswith("delivered on")
@@ -134,13 +164,7 @@ def clean_document_html(raw_html: str) -> tuple[str, Optional[str], Optional[str
             if len(first_p) > 400:
                 excerpt += "..."
 
-    body = soup.find("body")
-    if body:
-        clean_html = body.decode_contents().strip()
-    else:
-        clean_html = str(soup).strip()
-
-    return clean_html, excerpt, usual_name
+    return clean_text, excerpt, usual_name
 
 
 class CuriaCaseLawExtractor:
@@ -262,19 +286,10 @@ class CuriaCaseLawExtractor:
                     except Exception as exc:
                         logger.warning("Error fetching document blob for %s: %s", ecli, exc)
 
+            # If blob was unavailable, DO NOT fabricate content or excerpt (preserve provenance)
             if not body_content:
-                logger.info("Generating structured fallback content for %s", ecli)
-                body_content = (
-                    f"<div class='curia-case-law'>"
-                    f"<h2>{published_id} — {doc_type_en}</h2>"
-                    f"<p><strong>ECLI:</strong> {ecli}</p>"
-                    f"<p><strong>Court:</strong> {court_name}</p>"
-                    f"<p><strong>Date:</strong> {doc_date_str}</p>"
-                    f"<p>Official document available at <a href='{canonical_web_url}'>InfoCuria</a>.</p>"
-                    f"</div>"
-                )
-                if not excerpt:
-                    excerpt = f"{doc_type_en} delivered by {court_name} in case {published_id} on {doc_date_str} ({ecli})."
+                body_content = None
+                excerpt = None
 
             if usual_name:
                 title = f"Case {published_id} [{usual_name}] | {doc_type_en}"
@@ -282,6 +297,8 @@ class CuriaCaseLawExtractor:
                 title = f"Case {published_id} | {doc_type_en}"
             else:
                 title = f"{doc_type_en} ({ecli})"
+
+            has_text = bool(body_content and len(body_content.strip()) > 0)
 
             raw_metadata = {
                 "ecli": ecli,
@@ -300,7 +317,10 @@ class CuriaCaseLawExtractor:
                 "blob_url": blob_url,
                 "language": selected_lang.lower(),
                 "usual_name": usual_name,
-                "has_html_body": bool(blob_url and len(body_content) > 500),
+                "content_source": "infocuria_html" if has_text else None,
+                "content_format": "text/plain" if has_text else None,
+                "full_text_available": has_text,
+                "has_html_body": has_text,
             }
 
             return RawEntryData(

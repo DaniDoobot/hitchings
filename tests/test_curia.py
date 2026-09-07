@@ -138,23 +138,33 @@ def test_select_best_language():
 
 
 def test_clean_document_html_opinion():
-    """Verify HTML cleanup, excerpt, and usual name parsing from opinion HTML."""
-    clean_html, excerpt, usual_name = clean_document_html(SAMPLE_OPINION_HTML)
+    """Verify HTML cleanup to clean text, excerpt, and usual name parsing."""
+    clean_text, excerpt, usual_name = clean_document_html(SAMPLE_OPINION_HTML)
 
-    assert "OPINION OF ADVOCATE GENERAL" in clean_html
-    assert "Directive 1999/70/EC" in clean_html
-    assert "<script>" not in clean_html
-    assert "<html>" not in clean_html
+    assert clean_text is not None
+    assert "OPINION OF ADVOCATE GENERAL" in clean_text
+    assert "Directive 1999/70/EC" in clean_text
+    # Verify strict absence of HTML tags
+    assert "<p" not in clean_text
+    assert "<div" not in clean_text
+    assert "<span" not in clean_text
+    assert "<html" not in clean_text
+    assert "<body" not in clean_text
+    assert "</" not in clean_text
+
     assert usual_name is None
     assert excerpt is not None
     assert "Reference for a preliminary ruling" in excerpt
 
 
 def test_clean_document_html_judgment_with_usual_name():
-    """Verify extraction of bracketed case name like [Lertimene]."""
-    clean_html, excerpt, usual_name = clean_document_html(SAMPLE_JUDGMENT_HTML)
+    """Verify extraction of bracketed case name like [Lertimene] and clean text."""
+    clean_text, excerpt, usual_name = clean_document_html(SAMPLE_JUDGMENT_HTML)
 
-    assert "JUDGMENT OF THE COURT" in clean_html
+    assert clean_text is not None
+    assert "JUDGMENT OF THE COURT" in clean_text
+    assert "<p" not in clean_text
+    assert "<div" not in clean_text
     assert usual_name == "Lertimene"
     assert excerpt is not None
     assert "Directive 2004/38/EC" in excerpt
@@ -202,7 +212,7 @@ class MockAsyncClient:
 
 @pytest.mark.asyncio
 async def test_curia_extractor_success():
-    """Verify end-to-end extraction from search hits and blob HTML."""
+    """Verify end-to-end extraction from search hits and blob HTML with text normalization."""
     blob_map = {
         "325979-EN-1.html": MockResponse(200, SAMPLE_OPINION_HTML),
         "325980-FR-1.html": MockResponse(200, SAMPLE_JUDGMENT_HTML),
@@ -214,7 +224,7 @@ async def test_curia_extractor_success():
         name="Court of Justice of the European Union - Case Law",
         type=SourceType.WEBSITE,
         provider="native",
-        url="https://curia.europa.eu/jurisprudence",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
         config={"initial_fetch_limit": 20},
     )
 
@@ -223,6 +233,7 @@ async def test_curia_extractor_success():
 
     assert len(entries) == 2
 
+    # Entry 1: Opinion of the Advocate General
     e1 = entries[0]
     assert e1.external_id == "ECLI:EU:C:2026:702"
     assert e1.title == "Case C-380/25 | Opinion of the Advocate General"
@@ -233,8 +244,14 @@ async def test_curia_extractor_success():
     assert e1.raw_metadata["case_number"] == "C-380/25"
     assert e1.raw_metadata["celex"] == "62025CC0380"
     assert e1.raw_metadata["document_type"] == "Opinion of the Advocate General"
+    assert e1.raw_metadata["content_source"] == "infocuria_html"
+    assert e1.raw_metadata["content_format"] == "text/plain"
+    assert e1.raw_metadata["full_text_available"] is True
     assert "OPINION OF ADVOCATE GENERAL" in e1.content
+    assert "<p>" not in e1.content
+    assert "<div>" not in e1.content
 
+    # Entry 2: Judgment with [Lertimene]
     e2 = entries[1]
     assert e2.external_id == "ECLI:EU:C:2026:690"
     assert e2.title == "Case C-320/25 [Lertimene] | Judgment"
@@ -242,12 +259,16 @@ async def test_curia_extractor_success():
     assert e2.language == "fr"
     assert e2.raw_metadata["case_number"] == "C-320/25"
     assert e2.raw_metadata["usual_name"] == "Lertimene"
+    assert e2.raw_metadata["content_source"] == "infocuria_html"
+    assert e2.raw_metadata["content_format"] == "text/plain"
+    assert e2.raw_metadata["full_text_available"] is True
     assert "JUDGMENT OF THE COURT" in e2.content
+    assert "<p>" not in e2.content
 
 
 @pytest.mark.asyncio
 async def test_curia_extractor_blob_fallback():
-    """Verify fallback content generated when blob download returns 404/500."""
+    """Verify that when official blob fails, content and excerpt are null without fabricated text."""
     client = MockAsyncClient(MockResponse(200, json_data=MOCK_SEARCH_RESPONSE), {})
 
     source = Source(
@@ -255,7 +276,7 @@ async def test_curia_extractor_blob_fallback():
         name="Court of Justice of the European Union - Case Law",
         type=SourceType.WEBSITE,
         provider="native",
-        url="https://curia.europa.eu/jurisprudence",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
     )
 
     extractor = CuriaCaseLawExtractor()
@@ -263,10 +284,17 @@ async def test_curia_extractor_blob_fallback():
 
     assert len(entries) == 2
     for e in entries:
-        assert e.content is not None
-        assert "curia-case-law" in e.content
-        assert e.external_id in e.content
-        assert e.excerpt is not None
+        # Strict provenance: no fabricated content or excerpt
+        assert e.content is None
+        assert e.excerpt is None
+        # Metadata is fully preserved
+        assert e.external_id is not None
+        assert e.external_id.startswith("ECLI:EU:C:")
+        assert e.raw_metadata["case_number"] is not None
+        assert e.raw_metadata["full_text_available"] is False
+        assert e.raw_metadata["content_source"] is None
+        assert e.raw_metadata["content_format"] is None
+        assert "infocuria_url" in e.raw_metadata
 
 
 @pytest.mark.asyncio
@@ -278,7 +306,7 @@ async def test_curia_extractor_search_failure():
         name="Court of Justice of the European Union - Case Law",
         type=SourceType.WEBSITE,
         provider="native",
-        url="https://curia.europa.eu/jurisprudence",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
     )
 
     extractor = CuriaCaseLawExtractor()
@@ -299,7 +327,7 @@ def test_native_provider_can_handle_curia():
         name="Court of Justice of the European Union - Case Law",
         type=SourceType.WEBSITE,
         provider="native",
-        url="https://curia.europa.eu/jurisprudence",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
     )
     assert provider.can_handle(source) is True
 
@@ -336,7 +364,7 @@ async def test_curia_ingestion_service_e2e(db_session: Session):
         name="Court of Justice of the European Union - Case Law Test",
         type=SourceType.WEBSITE,
         provider="native",
-        url="https://curia.europa.eu/jurisprudence",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
         active=True,
         category="institutional",
         tracked_entity_id=entity.id,
@@ -365,6 +393,16 @@ async def test_curia_ingestion_service_e2e(db_session: Session):
             assert e.content_type == "eu_case_law"
             assert e.content is not None
             assert len(e.content) > 50
+            # Strict verification of clean text without HTML tags
+            assert "<html" not in e.content
+            assert "<body" not in e.content
+            assert "<p" not in e.content
+            assert "<div" not in e.content
+            assert "<span" not in e.content
+            assert "</" not in e.content
+            assert e.raw_metadata["content_source"] == "infocuria_html"
+            assert e.raw_metadata["content_format"] == "text/plain"
+            assert e.raw_metadata["full_text_available"] is True
 
         # Second Run: exact duplicates, creates 0
         res2 = await service.ingest_source(source.id, db_session)
@@ -380,3 +418,59 @@ async def test_curia_ingestion_service_e2e(db_session: Session):
         status_resp = service.get_source_status(source, db_session)
         assert status_resp.freshness is not None
         assert status_resp.freshness.warning_hours == 336
+
+
+@pytest.mark.asyncio
+async def test_curia_ingestion_service_blob_failure_e2e(db_session: Session):
+    """Verify that when the official blob fails, the Entry is still created with content=None and excerpt=None."""
+    entity = TrackedEntity(
+        id=uuid.uuid4(),
+        display_name="El Tribunal de Justicia de la Unión Europea",
+        entity_type="institution",
+        active=True,
+    )
+    db_session.add(entity)
+
+    source = Source(
+        id=uuid.uuid4(),
+        name="Court of Justice of the European Union - Blob Failure Test",
+        type=SourceType.WEBSITE,
+        provider="native",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
+        active=True,
+        category="institutional",
+        tracked_entity_id=entity.id,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    service = IngestionService()
+
+    # Search succeeds, but GET blob returns 500
+    async def mock_router_blob_down(*args, **kwargs):
+        url = args[0] if args else kwargs.get("url", "")
+        if "search" in url:
+            return MockResponse(200, json_data=MOCK_SEARCH_RESPONSE)
+        return MockResponse(500, "Blob Server Error")
+
+    with patch("httpx.AsyncClient.post", side_effect=mock_router_blob_down), \
+         patch("httpx.AsyncClient.get", side_effect=mock_router_blob_down):
+
+        res = await service.ingest_source(source.id, db_session)
+        assert res.status == IngestionRunStatus.SUCCESS.value
+        assert res.fetched == 2
+        assert res.created == 2
+
+        entries = db_session.query(Entry).filter(Entry.source_id == source.id).all()
+        assert len(entries) == 2
+        for e in entries:
+            # Strict provenance: no fabricated content or excerpt
+            assert e.content is None
+            assert e.excerpt is None
+            assert e.external_id is not None
+            assert e.external_id.startswith("ECLI:EU:C:")
+            assert e.raw_metadata["full_text_available"] is False
+            assert e.raw_metadata["content_source"] is None
+            assert e.raw_metadata["content_format"] is None
+            assert "infocuria_url" in e.raw_metadata
+            assert "case_number" in e.raw_metadata

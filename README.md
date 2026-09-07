@@ -78,7 +78,7 @@ hitchings/
 │   ├── seed_source_european_commission.py     # Seed de la fuente real Comisión Europea
 │   ├── seed_source_competition_appeal_tribunal.py # Seed de la fuente real CAT (Judgments)
 │   └── seed_source_curia.py                   # Seed de la fuente real TJUE / CURIA (Case Law)
-├── tests/                    # Tests unitarios, de API, modelos, seeds y fuentes reales (67 tests)
+├── tests/                    # Tests unitarios, de API, modelos, seeds y fuentes reales (68 tests)
 ├── .env.example              # Plantilla de variables de entorno seguras
 ├── .gitignore                # Exclusiones de Git (.env, .venv, caches)
 ├── Dockerfile                # Imagen Docker multi-plataforma (Python 3.12-slim)
@@ -341,8 +341,8 @@ Búsqueda oficial InfoCuria (tabName='jurisprudence', sort='DOC_DATE desc', init
 Descarga concurrente del documento íntegro oficial (InfoCuria Blob Storage):
         ├── https://infocuriaws.curia.europa.eu/blob/download-file-html/{jur}/{year}/{proc}/{file}
         ├── Preferencia de idioma canónico: EN -> FR -> primer idioma oficial disponible
-        ├── Limpieza de HTML: extracción semántica de <body> sin scripts, styles ni elementos ajenos
-        └── Generación de fallback estructurado si el almacenamiento temporal de blob no estuviera disponible
+        ├── Conversión oficial HTML a texto limpio: preservación semántica de párrafos, encabezados, partes y numeración sin tags HTML
+        └── Principio de procedencia: si el blob no estuviera disponible, content=None y excerpt=None sin generar texto ficticio
         ↓
 IngestionService (reutilizado al 100% de forma transparente)
         ↓
@@ -353,8 +353,8 @@ Entry en PostgreSQL:
         ├── language = 'en' / 'fr'
         ├── title = 'Case C-60/25 [Livronsa] | Judgment'
         ├── published_at = fecha oficial de lectura / pronunciamiento
-        ├── content = HTML íntegro y limpio de la sentencia o conclusiones oficiales
-        └── raw_metadata = {ecli, case_number, document_type, celex, court, infocuria_url, curia_classic_url, eurlex_url}
+        ├── content = Texto íntegro y limpio de la resolución judicial oficial (sin tags HTML)
+        └── raw_metadata = {ecli, case_number, document_type, celex, court, infocuria_url, content_source='infocuria_html', content_format='text/plain', full_text_available=True}
         ↓
 IngestionRun persistido + actualización de freshness (status='fresh', warning_hours=336 / 14 días)
 ```
@@ -362,15 +362,16 @@ IngestionRun persistido + actualización de freshness (status='fresh', warning_h
 ### Logros y Decisiones de Diseño del Bloque 6:
 1. **Regla de Oro: 1 Resolución Judicial = 1 Entry:** No se capturan entregas de vídeo agregadas ni índices masivos, sino cada sentencia individual, auto o conclusiones del Abogado General como un registro independiente con su propio texto completo.
 2. **Identificador Canónico ECLI:** Se normaliza el European Case Law Identifier (`ECLI:EU:C:...` / `ECLI:EU:T:...`) como `external_id` único, garantizando deduplicación exacta y trazabilidad a escala comunitaria.
-3. **Extracción Directa InfoCuria:** Conexión con los endpoints oficiales del nuevo sistema InfoCuria de la Unión Europea para búsqueda estructurada y descarga de contenido HTML íntegro.
-4. **Respeto a la Matriz y Entidad Existente:** Se vincula con la entidad `"El Tribunal de Justicia de la Unión Europea"` (ID `46c36f17-fca8-49ae-ad5c-080d5492b400`), sin crear entidades duplicadas.
-5. **Captura Exhaustiva y Neutral:** Se capturan las decisiones más recientes sin filtrar por materia en la capa de ingesta, dejando la clasificación temática para la futura capa de IA.
+3. **Extracción Directa InfoCuria:** Conexión con los endpoints oficiales del nuevo sistema InfoCuria de la Unión Europea para búsqueda estructurada y descarga de contenido.
+4. **Normalización a Texto Limpio y Procedencia Estricta:** `Entry.content` almacena texto limpio conforme al estándar del observatorio; si el blob no está disponible, no se fabrican cuerpos documentales ficticios.
+5. **Respeto a la Matriz y Entidad Existente:** Se vincula con la entidad `"El Tribunal de Justicia de la Unión Europea"` (ID `46c36f17-fca8-49ae-ad5c-080d5492b400`), sin crear entidades duplicadas.
+6. **Captura Exhaustiva y Neutral:** Se capturan las decisiones más recientes sin filtrar por materia en la capa de ingesta, dejando la clasificación temática para la futura capa de IA.
 
 ---
 
 ## 14. Cómo Ejecutar Tests
 
-La suite completa (67 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea, CAT y TJUE/CURIA), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
+La suite completa (68 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea, CAT y TJUE/CURIA), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
 
 ```powershell
 pytest -v

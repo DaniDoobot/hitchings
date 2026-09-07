@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 CURIA_ENTITY_NAME = "El Tribunal de Justicia de la Unión Europea"
 CURIA_EXPECTED_ENTITY_ID = uuid.UUID("46c36f17-fca8-49ae-ad5c-080d5492b400")
 CURIA_SOURCE_NAME = "Court of Justice of the European Union - Case Law"
-CURIA_WEBSITE_URL = "https://curia.europa.eu/jurisprudence"
+CURIA_WEBSITE_URL = "https://infocuria.curia.europa.eu/tabs/jurisprudence"
 
 
 def seed_curia_source() -> Source:
@@ -54,6 +54,7 @@ def seed_curia_source() -> Source:
                 (Source.name == CURIA_SOURCE_NAME)
                 | (Source.tracked_entity_id == entity.id)
                 | (Source.url == CURIA_WEBSITE_URL)
+                | (Source.url == "https://curia.europa.eu/jurisprudence")
             )
         ).scalar_one_or_none()
 
