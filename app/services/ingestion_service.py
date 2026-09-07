@@ -233,17 +233,17 @@ class IngestionService:
             .limit(1)
         ).scalar_one_or_none()
 
-        # 2. Determine latest publication date from runs or entries
+        # 2. Determine latest publication date from current entries (or historical runs fallback)
         latest_pub = db.execute(
-            select(func.max(IngestionRun.latest_published_at)).where(
-                IngestionRun.source_id == source.id,
-                IngestionRun.status.in_([IngestionRunStatus.SUCCESS.value, IngestionRunStatus.PARTIAL.value])
-            )
+            select(func.max(Entry.published_at)).where(Entry.source_id == source.id)
         ).scalar()
 
         if not latest_pub:
             latest_pub = db.execute(
-                select(func.max(Entry.published_at)).where(Entry.source_id == source.id)
+                select(func.max(IngestionRun.latest_published_at)).where(
+                    IngestionRun.source_id == source.id,
+                    IngestionRun.status.in_([IngestionRunStatus.SUCCESS.value, IngestionRunStatus.PARTIAL.value])
+                )
             ).scalar()
 
         # 3. Freshness evaluation
