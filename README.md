@@ -10,13 +10,14 @@ En el futuro, HITCHINGS integrará dos grandes capacidades:
 
 ---
 
-## 2. Alcance Actual: BLOQUES 0, 1, 2 y 3
+## 2. Alcance Actual: BLOQUES 0, 1, 2, 3 y 4
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
 - **BLOQUE 1:** Gestión configurable de fuentes, matriz de seguimiento v0.1 (`TrackingMatrix`, `TrackingTopic`, `TrackedEntity`, `TrackedEntityTopic`).
 - **BLOQUE 2:** Primera fuente real end-to-end conectada a Internet (**CNMC - Prensa / Noticias** vía website HTML oficial con `CNMCNewsExtractor`), ingesta normalizada, deduplicación básica en base de datos y endpoints de consulta de entradas.
 - **BLOQUE 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, estados `success`/`partial`/`failed`, cálculo dinámico de frescura y endpoints de observabilidad técnica).
+- **BLOQUE 4:** Segunda fuente real institucional: **European Commission / DG Competition** (vía RSS oficial de Competition Policy con enriquecimiento de texto íntegro vía Press Corner API y node fallback con `EuropeanCommissionExtractor`).
 
 ### Principio Arquitectónico Fundamental: Separación de Responsabilidades
 El diseño desacopla estrictamente tres dimensiones:
@@ -58,19 +59,22 @@ hitchings/
 │   │       └── tracking.py   # Matrices, topics, entities y associations (/api/v1/tracking)
 │   ├── core/                 # Configuración central (pydantic-settings) y logging
 │   ├── db/                   # Engine SQLAlchemy síncrono (psycopg v3) y sesiones
-│   ├── models/               # Modelos SQLAlchemy: Source, Entry, ProviderUsage, Tracking*
-│   ├── providers/            # Contratos e implementaciones (NativeProvider RSS, Bright Data, Apify)
+│   ├── models/               # Modelos SQLAlchemy: Source, Entry, IngestionRun, Tracking*
+│   ├── providers/            # Contratos e implementaciones (NativeProvider, Bright Data, Apify)
+│   │   └── extractors/       # Extractores especializados (CNMCNewsExtractor, EuropeanCommissionExtractor)
 │   ├── schemas/              # Esquemas Pydantic para validación y serialización
-│   ├── services/             # Servicios de dominio: IngestionService con deduplicación
+│   ├── services/             # Servicios de dominio: IngestionService con deduplicación y observabilidad
 │   └── main.py               # Punto de entrada FastAPI y lifespan
 ├── migrations/               # Scripts de migración Alembic
 │   └── versions/
 │       ├── 0001_initial_schema.py        # sources, entries, provider_usage
-│       └── 0002_tracking_configuration.py # matrices, topics, entities, entity_topics
+│       ├── 0002_tracking_configuration.py # matrices, topics, entities, entity_topics
+│       └── 0003_ingestion_runs.py         # ingestion_runs, campos de frescura
 ├── scripts/
-│   ├── seed_tracking_v01.py  # Seed de la Matriz v0.1 y entidades del cliente
-│   └── seed_source_cnmc.py   # Seed de la fuente técnica real CNMC asociada a su entidad
-├── tests/                    # Tests unitarios, de API, modelos, seeds e ingesta
+│   ├── seed_tracking_v01.py               # Seed de la Matriz v0.1 y entidades del cliente
+│   ├── seed_source_cnmc.py                # Seed de la fuente real CNMC asociada a su entidad
+│   └── seed_source_european_commission.py # Seed de la fuente real Comisión Europea
+├── tests/                    # Tests unitarios, de API, modelos, seeds, CNMC y Comisión Europea (48 tests)
 ├── .env.example              # Plantilla de variables de entorno seguras
 ├── .gitignore                # Exclusiones de Git (.env, .venv, caches)
 ├── Dockerfile                # Imagen Docker multi-plataforma (Python 3.12-slim)
@@ -153,7 +157,13 @@ Registra la fuente técnica oficial de la CNMC (`type="website"`, `url="https://
 python -m scripts.seed_source_cnmc
 ```
 
-Ambos scripts son completamente **idempotentes**.
+### 3. Fuente Real Comisión Europea / DG Competition
+Registra la fuente técnica oficial de Competition Policy de la Comisión Europea (`type="rss"`, `url="https://competition-policy.ec.europa.eu/node/38/rss_en"`) vinculándola a la entidad vigilada existente "European Commission" (`002dde9c-af40-443c-80f4-c9eca5b9f57f`):
+```powershell
+python -m scripts.seed_source_european_commission
+```
+
+Todos los scripts son completamente **idempotentes**.
 
 ---
 
@@ -230,9 +240,44 @@ Configurable por fuente en `source.config` mediante `freshness_warning_hours` (e
 
 ---
 
-## 11. Cómo Ejecutar Tests
+## 11. Segunda Fuente Real: European Commission / DG Competition (BLOQUE 4)
 
-La suite completa (40 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractor HTML de CNMC, parsing RSS, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
+### Circuito y Arquitectura Reutilizable:
+```text
+European Commission / DG Competition (https://competition-policy.ec.europa.eu/node/38/rss_en)
+        ↓
+Source (type='rss', provider='native', category='institutional', tracked_entity_id='European Commission')
+        ↓
+NativeProvider dispatch -> EuropeanCommissionExtractor
+        ↓
+Parsing RSS XML (Drupal node/38 feed) con soporte de initial_fetch_limit (20)
+        ↓
+Extracción de metadata semántica (categories: antitrust, mergers, state aid, cartels, foreign subsidies)
+        ↓
+Enriquecimiento concurrente de texto íntegro (asyncio.Semaphore):
+   ├── Caso A: URL Press Corner directa -> API JSON oficial (https://ec.europa.eu/commission/presscorner/api/documents?reference={REF}&language={LANG})
+   ├── Caso B: URL de nodo Drupal -> Extracción de enlace Press Corner o parseo HTML de <main>/<article>
+   └── Fallback graceful -> Descripción del feed RSS
+        ↓
+IngestionService (reutilizado de forma transparente)
+        ↓
+Deduplicación jerárquica (SHA-256 de contenido + URL canónica)
+        ↓
+Entry en PostgreSQL (content_type='institutional_news', metadata completa)
+        ↓
+IngestionRun persistido + actualización de freshness (status='fresh', warning_hours=168)
+```
+
+### Principales Logros del Bloque 4:
+1. **Reutilización Total:** Se reutilizó al 100% el motor `IngestionService`, el modelo `Entry`, la auditoría `IngestionRun` y el sistema de alertas de `freshness` sin modificar el esquema de base de datos ni crear tablas redundantes.
+2. **Extracción Multicanal:** Se conecta el RSS agregador de novedades de la Dirección General de Competencia con la API REST oficial de documentos de la Comisión Europea (*Press Corner*), obteniendo notas de prensa íntegras (3.500 – 7.200 caracteres) con formato limpio y extractos descriptivos.
+3. **Idempotencia y Deduplicación:** Ejecuciones sucesivas respetan las entradas existentes, registrando exactamente 0 duplicados y marcando los elementos existentes como no modificados.
+
+---
+
+## 12. Cómo Ejecutar Tests
+
+La suite completa (48 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC y Comisión Europea), parsing RSS, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
 
 ```powershell
 pytest -v
@@ -240,7 +285,7 @@ pytest -v
 
 ---
 
-## 12. Endpoints Disponibles
+## 13. Endpoints Disponibles
 
 ### Salud del Sistema
 - `GET /health`: Estado del proceso FastAPI (`{"status": "ok", "service": "hitchings"}`).
@@ -334,9 +379,9 @@ pytest -v
 
 ---
 
-## 13. Funcionalidades Deliberadamente Pendientes
+## 14. Funcionalidades Deliberadamente Pendientes
 
-Para respetar la delimitación estricta de fases, en este Bloque 3 **NO** se han implementado:
+Para respetar la delimitación estricta de fases, en este Bloque 4 **NO** se han implementado:
 1. Retries automáticos, backoff exponencial o circuit breakers.
 2. Scheduler en segundo plano (Celery, APScheduler, cron).
 3. Ingesta, clasificación, resúmenes o scoring con IA.
@@ -347,13 +392,13 @@ Para respetar la delimitación estricta de fases, en este Bloque 3 **NO** se han
 
 ---
 
-## 14. Roadmap
+## 15. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
 - [x] **Bloque 2:** Primera fuente real end-to-end: CNMC (Website HTML oficial, deduplicación e ingesta).
-- [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad). *(Completado)*
-- [ ] **Bloque 4:** Ampliación de fuentes libres e institucionales (Comisión Europea, reguladores, etc.).
+- [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad).
+- [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition. *(Completado)*
 - [ ] **Bloque 5:** Tratamiento y enriquecimiento con IA.
 - [ ] **Bloque 6:** Automatización / programación (scheduler).
 - [ ] **Bloque 7:** LinkedIn y fuentes complejas mediante proveedor externo.

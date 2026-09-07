@@ -60,6 +60,16 @@ class NativeProvider(BaseSourceProvider):
         if not self.can_handle(source):
             raise ValueError(f"NativeProvider cannot handle source {source.name} (type={source.type})")
 
+        url_lower = (source.url or "").lower()
+
+        # 1. European Commission / DG Competition adapter
+        if "competition-policy.ec.europa.eu" in url_lower or "ec.europa.eu" in url_lower:
+            from app.providers.extractors.european_commission import EuropeanCommissionExtractor
+            extractor = EuropeanCommissionExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -77,7 +87,7 @@ class NativeProvider(BaseSourceProvider):
         if not source.url:
             raise ProviderError(f"Source '{source.name}' has no URL configured for website ingestion")
 
-        # Specific website adapter dispatch
+        # Specific website adapter dispatch: CNMC
         if "cnmc.es" in source.url.lower():
             from app.providers.extractors.cnmc import CNMCNewsExtractor
             extractor = CNMCNewsExtractor()
