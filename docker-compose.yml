@@ -1,0 +1,51 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: hitchings_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hitchings}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hitchings}
+      POSTGRES_DB: ${POSTGRES_DB:-hitchings}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hitchings} -d ${POSTGRES_DB:-hitchings}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hitchings_api
+    restart: unless-stopped
+    environment:
+      PROJECT_NAME: ${PROJECT_NAME:-HITCHINGS}
+      ENV: ${ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hitchings}:${POSTGRES_PASSWORD:-hitchings}@db:5432/${POSTGRES_DB:-hitchings}
+      BRIGHTDATA_ENABLED: ${BRIGHTDATA_ENABLED:-false}
+      BRIGHTDATA_API_KEY: ${BRIGHTDATA_API_KEY:-}
+      BRIGHTDATA_MONTHLY_LIMIT: ${BRIGHTDATA_MONTHLY_LIMIT:-5000}
+      BRIGHTDATA_SOFT_LIMIT: ${BRIGHTDATA_SOFT_LIMIT:-4500}
+      BRIGHTDATA_ALLOW_PAID_USAGE: ${BRIGHTDATA_ALLOW_PAID_USAGE:-false}
+      APIFY_ENABLED: ${APIFY_ENABLED:-false}
+      APIFY_API_KEY: ${APIFY_API_KEY:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini
+
+volumes:
+  postgres_data:
+    driver: local
