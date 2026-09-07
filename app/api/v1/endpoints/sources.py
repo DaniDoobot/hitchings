@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.source import Source
 from app.schemas.source import SourceCreate, SourceUpdate, SourceRead
+from app.schemas.ingestion import IngestionResult
+from app.services.ingestion_service import IngestionService
 
 router = APIRouter(prefix="/sources", tags=["Sources"])
 
@@ -90,3 +92,25 @@ def delete_source(source_id: uuid.UUID, db: Session = Depends(get_db)) -> None:
 
     db.delete(source)
     db.commit()
+
+
+@router.post("/{source_id}/ingest", response_model=IngestionResult)
+async def ingest_source_endpoint(
+    source_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> IngestionResult:
+    """Manually trigger ingestion for a specific data source."""
+    source = db.get(Source, source_id)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+
+    service = IngestionService()
+    try:
+        return await service.ingest_source(source_id, db)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ingestion failed: {exc}"
+        )

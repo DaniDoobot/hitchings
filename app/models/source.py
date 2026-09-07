@@ -40,7 +40,7 @@ class Source(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[SourceType] = mapped_column(
-        SAEnum(SourceType, name="source_type", native_enum=True),
+        SAEnum(SourceType, name="source_type", native_enum=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False
     )
     url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
