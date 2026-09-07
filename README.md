@@ -6,12 +6,17 @@
 
 En el futuro, HITCHINGS integrará dos grandes capacidades:
 1. **Observatorio automático de novedades:** monitorización continua, clasificación temática, síntesis y scoring mediante IA.
-2. **Herramienta de análisis documental:** ingesta de documentos, audios y textos, prompts especializados y generación de inf## 2. Alcance Actual: BLOQUES 0, 1 y 2
+2. **Herramienta de análisis documental:** ingesta de documentos, audios y textos, prompts especializados y generación de informes.
+
+---
+
+## 2. Alcance Actual: BLOQUES 0, 1, 2 y 3
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
-- **BLOQUE 1:** Gestión configurable de fuentes, matriz de seguimiento v0.1 (`TrackingMatrix`, `TrackingTopic`, `TrackedEntity`, `EntityTopicAssociation`).
-- **BLOQUE 2:** Primera fuente real end-to-end conectada a Internet (**CNMC - Prensa / Noticias** vía RSS oficial), ingesta normalizada, deduplicación básica en base de datos y endpoints de consulta de entradas.
+- **BLOQUE 1:** Gestión configurable de fuentes, matriz de seguimiento v0.1 (`TrackingMatrix`, `TrackingTopic`, `TrackedEntity`, `TrackedEntityTopic`).
+- **BLOQUE 2:** Primera fuente real end-to-end conectada a Internet (**CNMC - Prensa / Noticias** vía website HTML oficial con `CNMCNewsExtractor`), ingesta normalizada, deduplicación básica en base de datos y endpoints de consulta de entradas.
+- **BLOQUE 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, estados `success`/`partial`/`failed`, cálculo dinámico de frescura y endpoints de observabilidad técnica).
 
 ### Principio Arquitectónico Fundamental: Separación de Responsabilidades
 El diseño desacopla estrictamente tres dimensiones:
@@ -187,9 +192,47 @@ Si una entrada ya existe, se contabiliza como duplicada y se omiten inserciones 
 
 ---
 
-## 10. Cómo Ejecutar Tests
+---
 
-La suite completa (31 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractor HTML de CNMC, parsing RSS y deduplicación:
+## 10. Trazabilidad, Histórico y Observabilidad de Ingestas (BLOQUE 3)
+
+### El Modelo `IngestionRun` (`ingestion_runs`)
+Cada ejecución de ingesta genera un registro histórico inmutable con sus métricas y estado:
+- `id`: Identificador único UUID de la ejecución.
+- `source_id`: Clave foránea a la fuente técnica (`ON DELETE CASCADE`).
+- `started_at` / `finished_at`: Marcas de tiempo UTC.
+- `status`: Estado del ciclo de captura (`running`, `success`, `partial`, `failed`).
+- `fetched_count`, `created_count`, `duplicate_count`, `failed_count`: Métricas de elementos procesados.
+- `latest_published_at` / `oldest_published_at`: Rango de fechas de las publicaciones capturadas.
+- `error_type` / `error_message`: Diagnóstico de fallos sin almacenar volcados de pila en la base de datos.
+- `duration_ms`: Duración calculada en milisegundos.
+
+### Diferencia entre `Source.last_run_at` e Histórico:
+- `Source.last_run_at`: Muestra únicamente la marca temporal del **último intento de inicio** de ingesta.
+- `Source.last_success_at`: Se actualiza **estrictamente** cuando una ejecución concluye en estado `success`. En ejecuciones `failed` o `partial`, `last_success_at` conserva intacto su valor anterior.
+- `IngestionRun`: Proporciona la auditoría completa y detallada de todas las ejecuciones históricas.
+
+### Estados de Ejecución:
+1. `running`: Ejecución en curso.
+2. `success`: El proceso finalizó completamente sin errores en la obtención ni en los elementos individuales.
+3. `partial`: El proceso finalizó pero uno o varios elementos individuales fallaron durante la persistencia o normalización.
+4. `failed`: Error global o estructural (caída de red, HTTP 5xx, excepción fatal del extractor).
+
+### Control Dinámico de Frescura (`freshness`):
+Distingue claramente dos escenarios operativos distintos:
+- **Ejecución fallida (`status: failed`):** El scraper o la conexión con la fuente técnica tienen un problema técnico.
+- **Fuente sin contenido reciente (`status: success`, `freshness: stale`):** El scraper funciona con éxito técnico, pero el organismo o portal no ha publicado novedades dentro del umbral esperado.
+
+Configurable por fuente en `source.config` mediante `freshness_warning_hours` (ej. 168 horas = 7 días):
+- `fresh`: `now - latest_published_at <= freshness_warning_hours`.
+- `stale`: El tiempo transcurrido supera el umbral configurado.
+- `unknown`: No se dispone de fecha de publicación en ejecuciones exitosas previas.
+
+---
+
+## 11. Cómo Ejecutar Tests
+
+La suite completa (40 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractor HTML de CNMC, parsing RSS, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
 
 ```powershell
 pytest -v
@@ -197,7 +240,7 @@ pytest -v
 
 ---
 
-## 11. Endpoints Disponibles
+## 12. Endpoints Disponibles
 
 ### Salud del Sistema
 - `GET /health`: Estado del proceso FastAPI (`{"status": "ok", "service": "hitchings"}`).
@@ -209,20 +252,55 @@ pytest -v
 - `POST /api/v1/sources`: Crear fuente técnica (permite asociar `tracked_entity_id`).
 - `PATCH /api/v1/sources/{id}`: Actualización parcial.
 - `DELETE /api/v1/sources/{id}`: Eliminación.
-- `POST /api/v1/sources/{id}/ingest`: **Disparo manual de ingesta** para la fuente técnica indicada. Retorna métricas de la captura y control de frescura:
+- `GET /api/v1/sources/{id}/status`: **Observabilidad técnica y frescura** en tiempo real:
   ```json
   {
     "source_id": "162474fa-1d13-4e24-b8a0-659863040157",
+    "name": "CNMC - Noticias",
+    "active": true,
+    "last_run_at": "2026-09-07T12:10:13.471078+02:00",
+    "last_success_at": "2026-09-07T12:10:15.847684+02:00",
+    "last_run_status": "success",
+    "latest_published_at": "2026-09-01T08:08:02+02:00",
+    "freshness": {
+      "status": "fresh",
+      "warning_hours": 168,
+      "hours_since_latest": 148.0
+    },
+    "last_run": {
+      "id": "feace384-88ea-4ded-b6e2-642816800114",
+      "started_at": "2026-09-07T12:10:13.471078+02:00",
+      "finished_at": "2026-09-07T12:10:15.847684+02:00",
+      "status": "success",
+      "fetched": 20,
+      "created": 0,
+      "duplicates": 20,
+      "failed": 0,
+      "duration_ms": 2376
+    }
+  }
+  ```
+- `POST /api/v1/sources/{id}/ingest`: Disparo manual de ingesta con retorno de `ingestion_run_id`:
+  ```json
+  {
+    "ingestion_run_id": "feace384-88ea-4ded-b6e2-642816800114",
+    "source_id": "162474fa-1d13-4e24-b8a0-659863040157",
+    "status": "success",
     "fetched": 20,
-    "created": 20,
-    "duplicates": 0,
+    "created": 0,
+    "duplicates": 20,
     "failed": 0,
-    "started_at": "2026-09-07T09:34:08.143208Z",
-    "finished_at": "2026-09-07T09:34:09.755682Z",
+    "started_at": "2026-09-07T10:10:13.471078Z",
+    "finished_at": "2026-09-07T10:10:15.847684Z",
+    "duration_ms": 2376,
     "latest_published_at": "2026-09-01T06:08:02Z",
     "oldest_published_at": "2026-07-27T09:39:58Z"
   }
   ```
+
+### Histórico de Ejecuciones (`/api/v1/ingestion-runs`)
+- `GET /api/v1/ingestion-runs`: Listado cronológico inverso con filtros (`source_id`, `status`, `limit`, `offset`).
+- `GET /api/v1/ingestion-runs/{id}`: Detalle completo de una ejecución histórica.
 
 ### Entradas Capturadas (`/api/v1/entries`)
 - `GET /api/v1/entries`: Listado de entradas persistidas con paginación (`limit`, `offset`) y filtros (`source_id`, `status`).
@@ -256,28 +334,28 @@ pytest -v
 
 ---
 
-## 12. Funcionalidades Deliberadamente Pendientes
+## 13. Funcionalidades Deliberadamente Pendientes
 
-Para respetar la delimitación estricta de fases, en este Bloque 2 **NO** se han implementado:
-1. Scraping complejo o descargas web con renderizado dinámico (Playwright, navegadores headless).
-2. Llamadas a APIs de terceros de pago (Bright Data, Apify).
-3. Planificador o scheduler recurrente automático en segundo plano.
-4. Ingesta, clasificación, resúmenes o scoring con IA.
-5. Modelo `EntryAnalysis` (se creará en el bloque de IA).
-6. Autenticación, JWT o control de acceso.
-7. Interfaz gráfica o frontend.
-8. Módulo de análisis documental (PDF, audio, exportación).
+Para respetar la delimitación estricta de fases, en este Bloque 3 **NO** se han implementado:
+1. Retries automáticos, backoff exponencial o circuit breakers.
+2. Scheduler en segundo plano (Celery, APScheduler, cron).
+3. Ingesta, clasificación, resúmenes o scoring con IA.
+4. Nuevas fuentes técnicas o providers de pago (Bright Data, Apify).
+5. Autenticación, JWT o control de acceso.
+6. Interfaz gráfica o frontend.
+7. Módulo de análisis documental (PDF, audio, exportación).
 
 ---
 
-## 13. Roadmap
+## 14. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
-- [x] **Bloque 2:** Primera fuente real end-to-end: CNMC (RSS, deduplicación e ingesta). *(Completado)*
-- [ ] **Bloque 3:** Normalización avanzada y ampliación de fuentes libres.
-- [ ] **Bloque 4:** Tratamiento y enriquecimiento con IA.
-- [ ] **Bloque 5:** Automatización / programación (scheduler).
-- [ ] **Bloque 6:** LinkedIn y fuentes complejas mediante proveedor externo.
-- [ ] **Bloque 7:** Interfaz web.
+- [x] **Bloque 2:** Primera fuente real end-to-end: CNMC (Website HTML oficial, deduplicación e ingesta).
+- [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad). *(Completado)*
+- [ ] **Bloque 4:** Ampliación de fuentes libres e institucionales (Comisión Europea, reguladores, etc.).
+- [ ] **Bloque 5:** Tratamiento y enriquecimiento con IA.
+- [ ] **Bloque 6:** Automatización / programación (scheduler).
+- [ ] **Bloque 7:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [ ] **Bloque 8:** Interfaz web.
 - [ ] **Futuro:** Módulo de análisis documental.

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.source import Source
 from app.schemas.source import SourceCreate, SourceUpdate, SourceRead
-from app.schemas.ingestion import IngestionResult
+from app.schemas.ingestion import IngestionResult, SourceStatusResponse
 from app.services.ingestion_service import IngestionService
 
 router = APIRouter(prefix="/sources", tags=["Sources"])
@@ -114,3 +114,16 @@ async def ingest_source_endpoint(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Ingestion failed: {exc}"
         )
+
+
+@router.get("/{source_id}/status", response_model=SourceStatusResponse)
+def get_source_status_endpoint(
+    source_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> SourceStatusResponse:
+    """Retrieve real-time technical observability and freshness status for a source."""
+    source = db.get(Source, source_id)
+    if not source:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+
+    return IngestionService.get_source_status(source, db)

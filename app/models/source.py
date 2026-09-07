@@ -80,6 +80,7 @@ class Source(Base):
     # Relationships
     entries = relationship("Entry", back_populates="source", cascade="all, delete-orphan")
     tracked_entity = relationship("TrackedEntity", back_populates="sources")
+    ingestion_runs = relationship("IngestionRun", back_populates="source", cascade="all, delete-orphan", order_by="desc(IngestionRun.started_at)")
 
     def __init__(self, **kwargs: Any) -> None:
         kwargs.setdefault("active", True)

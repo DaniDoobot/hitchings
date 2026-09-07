@@ -63,7 +63,10 @@ def seed_cnmc_source() -> Source:
                 active=True,
                 category="institutional",
                 tracked_entity_id=entity.id,
-                config={"initial_fetch_limit": 20},
+                config={
+                    "initial_fetch_limit": 20,
+                    "freshness_warning_hours": 168,
+                },
             )
             db.add(source)
             db.commit()
@@ -78,10 +81,10 @@ def seed_cnmc_source() -> Source:
             source.tracked_entity_id = entity.id
             source.active = True
             source.category = "institutional"
-            if not source.config or not isinstance(source.config, dict):
-                source.config = {"initial_fetch_limit": 20}
-            else:
-                source.config["initial_fetch_limit"] = 20
+            new_config = dict(source.config) if (source.config and isinstance(source.config, dict)) else {}
+            new_config["initial_fetch_limit"] = 20
+            new_config["freshness_warning_hours"] = 168
+            source.config = new_config
             db.commit()
             db.refresh(source)
             logger.info("Updated existing Source '%s' to website type (id=%s, url=%s)", source.name, source.id, source.url)
