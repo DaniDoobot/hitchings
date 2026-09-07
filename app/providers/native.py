@@ -70,6 +70,14 @@ class NativeProvider(BaseSourceProvider):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
 
+        # 2. CJEU / CURIA adapter
+        if "curia.europa.eu" in url_lower:
+            from app.providers.extractors.curia import CuriaCaseLawExtractor
+            extractor = CuriaCaseLawExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -99,6 +107,14 @@ class NativeProvider(BaseSourceProvider):
         if "catribunal.org.uk" in source.url.lower():
             from app.providers.extractors.competition_appeal_tribunal import CompetitionAppealTribunalExtractor
             extractor = CompetitionAppealTribunalExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: CJEU / CURIA
+        if "curia.europa.eu" in source.url.lower():
+            from app.providers.extractors.curia import CuriaCaseLawExtractor
+            extractor = CuriaCaseLawExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)

@@ -76,8 +76,9 @@ hitchings/
 │   ├── seed_tracking_v01.py                   # Seed de la Matriz v0.1 y entidades del cliente
 │   ├── seed_source_cnmc.py                    # Seed de la fuente real CNMC asociada a su entidad
 │   ├── seed_source_european_commission.py     # Seed de la fuente real Comisión Europea
-│   └── seed_source_competition_appeal_tribunal.py # Seed de la fuente real CAT (Judgments)
-├── tests/                    # Tests unitarios, de API, modelos, seeds y fuentes reales (56 tests)
+│   ├── seed_source_competition_appeal_tribunal.py # Seed de la fuente real CAT (Judgments)
+│   └── seed_source_curia.py                   # Seed de la fuente real TJUE / CURIA (Case Law)
+├── tests/                    # Tests unitarios, de API, modelos, seeds y fuentes reales (67 tests)
 ├── .env.example              # Plantilla de variables de entorno seguras
 ├── .gitignore                # Exclusiones de Git (.env, .venv, caches)
 ├── Dockerfile                # Imagen Docker multi-plataforma (Python 3.12-slim)
@@ -321,9 +322,55 @@ IngestionRun persistido + actualización de freshness (status='stale' en receso 
 
 ---
 
-## 13. Cómo Ejecutar Tests
+## 13. Cuarta Fuente Real: Tribunal de Justicia de la UE / CURIA (BLOQUE 6)
 
-La suite completa (56 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea y Competition Appeal Tribunal), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
+### Circuito y Arquitectura:
+```text
+InfoCuria Elastic REST API (https://infocuriaws.curia.europa.eu/elastic-connector/search)
+        ↓
+Source (name='Court of Justice of the European Union - Case Law', type='website', provider='native', category='institutional', tracked_entity_id='El Tribunal de Justicia de la Unión Europea')
+        ↓
+NativeProvider dispatch -> CuriaCaseLawExtractor
+        ↓
+Búsqueda oficial InfoCuria (tabName='jurisprudence', sort='DOC_DATE desc', initial_fetch_limit=20)
+        ├── Captura de resoluciones individuales: Sentencias (Arrêt), Autos (Ordonnance), Conclusiones AG (Conclusions)
+        ├── Identificador canónico judicial: ECLI (e.g. ECLI:EU:C:2026:702, ECLI:EU:C:2026:685) -> external_id
+        ├── Metadata rica: número de caso (C-380/25), tribunal (Court of Justice / General Court), CELEX, fechas oficiales
+        └── Detección de nombre usual oficial / ficticio RGPD (e.g. [Livronsa], [Lertimene], [Grixta])
+        ↓
+Descarga concurrente del documento íntegro oficial (InfoCuria Blob Storage):
+        ├── https://infocuriaws.curia.europa.eu/blob/download-file-html/{jur}/{year}/{proc}/{file}
+        ├── Preferencia de idioma canónico: EN -> FR -> primer idioma oficial disponible
+        ├── Limpieza de HTML: extracción semántica de <body> sin scripts, styles ni elementos ajenos
+        └── Generación de fallback estructurado si el almacenamiento temporal de blob no estuviera disponible
+        ↓
+IngestionService (reutilizado al 100% de forma transparente)
+        ↓
+Deduplicación canónica por ECLI + SHA-256
+        ↓
+Entry en PostgreSQL:
+        ├── content_type = 'eu_case_law'
+        ├── language = 'en' / 'fr'
+        ├── title = 'Case C-60/25 [Livronsa] | Judgment'
+        ├── published_at = fecha oficial de lectura / pronunciamiento
+        ├── content = HTML íntegro y limpio de la sentencia o conclusiones oficiales
+        └── raw_metadata = {ecli, case_number, document_type, celex, court, infocuria_url, curia_classic_url, eurlex_url}
+        ↓
+IngestionRun persistido + actualización de freshness (status='fresh', warning_hours=336 / 14 días)
+```
+
+### Logros y Decisiones de Diseño del Bloque 6:
+1. **Regla de Oro: 1 Resolución Judicial = 1 Entry:** No se capturan entregas de vídeo agregadas ni índices masivos, sino cada sentencia individual, auto o conclusiones del Abogado General como un registro independiente con su propio texto completo.
+2. **Identificador Canónico ECLI:** Se normaliza el European Case Law Identifier (`ECLI:EU:C:...` / `ECLI:EU:T:...`) como `external_id` único, garantizando deduplicación exacta y trazabilidad a escala comunitaria.
+3. **Extracción Directa InfoCuria:** Conexión con los endpoints oficiales del nuevo sistema InfoCuria de la Unión Europea para búsqueda estructurada y descarga de contenido HTML íntegro.
+4. **Respeto a la Matriz y Entidad Existente:** Se vincula con la entidad `"El Tribunal de Justicia de la Unión Europea"` (ID `46c36f17-fca8-49ae-ad5c-080d5492b400`), sin crear entidades duplicadas.
+5. **Captura Exhaustiva y Neutral:** Se capturan las decisiones más recientes sin filtrar por materia en la capa de ingesta, dejando la clasificación temática para la futura capa de IA.
+
+---
+
+## 14. Cómo Ejecutar Tests
+
+La suite completa (67 tests) valida configuración, endpoints, modelos, contratos de providers, seeds, extractores especializados (CNMC, Comisión Europea, CAT y TJUE/CURIA), parsing RSS y HTML Drupal, deduplicación, ciclo de vida de `IngestionRun`, fallos, parciales y cálculo dinámico de frescura:
 
 ```powershell
 pytest -v
@@ -331,7 +378,7 @@ pytest -v
 
 ---
 
-## 14. Endpoints Disponibles
+## 15. Endpoints Disponibles
 
 ### Salud del Sistema
 - `GET /health`: Estado del proceso FastAPI (`{"status": "ok", "service": "hitchings"}`).
@@ -425,9 +472,9 @@ pytest -v
 
 ---
 
-## 15. Funcionalidades Deliberadamente Pendientes
+## 16. Funcionalidades Deliberadamente Pendientes
 
-Para respetar la delimitación estricta de fases, en este Bloque 5 **NO** se han implementado:
+Para respetar la delimitación estricta de fases, en este Bloque 6 **NO** se han implementado:
 1. Retries automáticos, backoff exponencial o circuit breakers.
 2. Scheduler en segundo plano (Celery, APScheduler, cron).
 3. Ingesta, clasificación, resúmenes o scoring con IA.
@@ -439,17 +486,18 @@ Para respetar la delimitación estricta de fases, en este Bloque 5 **NO** se han
 
 ---
 
-## 16. Roadmap
+## 17. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
 - [x] **Bloque 2:** Primera fuente real end-to-end: CNMC (Website HTML oficial, deduplicación e ingesta).
 - [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad).
 - [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition.
-- [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments. *(Completado)*
-- [ ] **Bloque 6:** Tratamiento y enriquecimiento con IA.
-- [ ] **Bloque 7:** Automatización / programación (scheduler).
-- [ ] **Bloque 8:** LinkedIn y fuentes complejas mediante proveedor externo.
-- [ ] **Bloque 9:** Interfaz web.
+- [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments.
+- [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions. *(Completado)*
+- [ ] **Bloque 7:** Tratamiento y enriquecimiento con IA.
+- [ ] **Bloque 8:** Automatización / programación (scheduler).
+- [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [ ] **Bloque 10:** Interfaz web.
 - [ ] **Futuro:** Módulo de análisis documental.
 
