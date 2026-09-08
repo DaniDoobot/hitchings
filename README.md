@@ -749,14 +749,30 @@ El planificador incorpora dos metodologías complementarias:
 ### 3. Aclaración Inequívoca de Identificadores (IDs)
 Se auditó y diferenció la semántica de identificadores para evitar confusiones de diagnóstico:
 - **`entry_id: c9e2a041-b66e-4e67-9d1b-090b6bfc6943`:** Noticia de la Comisión Europea ("Commission adopts EU Guidelines on exclusionary abuses of dominance"). Su análisis histórico de smoke test v2 es `analysis_id: 5ea42a63-adae-404b-b2e7-77aad0f4f043` (completed, score 95).
-- **`entry_id: c119efb6-ecde-48c6-9a04-490becb6f176`:** Resolución CAT 67 (*Dr. Rachael Kent v Apple*). Sus análisis históricos reales son `analysis_id: 255f9570-e3a9-4656-9da0-f2ad0d0fd1c4` (v2, stale por tener 32 chars) y `analysis_id: 3a16fccc-d1f9-4ab6-9a96-1885bb326c87` (v3, current con 15.522 chars).
+- **`entry_id: c119efb6-ecde-48c6-9a04-490becb6f176`:** Resolución CAT 67 (*GLOBAL-365 plc & Another v PayPoint plc & Others*). Sus análisis históricos reales son `analysis_id: 255f9570-e3a9-4656-9da0-f2ad0d0fd1c4` (v2, stale por tener 32 chars) y `analysis_id: 3a16fccc-d1f9-4ab6-9a96-1885bb326c87` (v3, current con 15.522 chars).
 
 ---
 
-## 21. Funcionalidades Deliberadamente Pendientes
+## 21. Auditoría de Identidad de Inventario y Preflight de Baseline v4 (Bloque 7G.2)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7G.1 **NO** se han implementado:
-1. Llamadas a Gemini o ejecución del backfill v4 (solo script de planificación dry-run).
+### 1. Auditoría de Identidad en Base de Datos
+- **Aclaración definitiva de `c119efb6`:** Se comprobó directamente en PostgreSQL que la entrada `c119efb6-ecde-48c6-9a04-490becb6f176` corresponde inequívocamente a `[2026] CAT 67 | GLOBAL-365 plc & Another v PayPoint plc & Others - Ruling (Costs)` (Case No: `1597/5/7/23`, 15.522 caracteres enriquecidos desde el PDF oficial). La mención previa en texto narrativo a *Dr. Rachael Kent v Apple* (CAT 57 / `ebc678c6`) fue un lapsus narrativo del asistente sin ninguna corrupción en la base de datos PostgreSQL.
+- **Auditor de inventario read-only (`scripts/audit_entry_inventory.py`):** Script de verificación exhaustiva que audita las 80 entradas del repositorio sin realizar escrituras ni llamadas a la IA:
+  - Comprueba la coherencia de URLs, títulos, fechas, hashes canónicos y suficiencia.
+  - Verifica la presencia de identificadores judiciales (citas neutrales, números de caso y nombres de partes) en el texto de las resoluciones de CAT y TJUE/CURIA (normalizando guiones no separables `\u2011`).
+  - Control de colisiones y duplicados: 0 colisiones de URL, 0 colisiones de hash de deduplicación, 0 colisiones de título por fuente.
+- **Resultado global de preflight:**
+  - `IDENTITY_OK`: 80 / 80 (CNMC: 20, CAT: 20, CURIA: 20, EC: 20).
+  - `IDENTITY_WARNING`: 0 / 80.
+  - `IDENTITY_ERROR`: 0 / 80.
+  - Preflight aprobado para autorización futura del backfill v4.
+
+---
+
+## 22. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7G.2 **NO** se han implementado:
+1. Llamadas a Gemini o ejecución del backfill v4 (solo scripts analíticos de planificación y preflight).
 2. Modificación de prompts v1, v2, v3 o v4.
 3. Creación de prompts v5.
 4. Alteración o borrado de `EntryAnalysisTopic` o `EntryAnalysis` históricos.
@@ -765,7 +781,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 7G.1 **NO** se 
 
 ---
 
-## 22. Roadmap
+## 23. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -783,7 +799,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7G.1 **NO** se 
 - [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene.
 - [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas).
 - [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4.
-- [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs. *(Cerrado)*
+- [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs.
+- [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
