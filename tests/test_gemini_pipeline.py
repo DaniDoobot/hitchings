@@ -539,7 +539,11 @@ async def test_37_pipeline_relevant_calls_deep(db_session):
             return await super().analyze(prompt_version, entry, matrix_snapshot, **kwargs)
 
     source = make_source(db_session, "Source 37")
-    entry = make_entry(db_session, source, content="Merger filing notification for control of undertaking.")
+    entry = make_entry(
+        db_session,
+        source,
+        content="Merger filing notification for control of undertaking under Article 101 and relevant competition rules. " * 10,
+    )
     matrix, _ = make_matrix(db_session, "37")
     triage_p = make_prompt(db_session, "triage37", 1, "triage")
     deep_p = make_prompt(db_session, "deep37", 1, "deep_analysis")
@@ -642,7 +646,11 @@ async def test_39_pipeline_deep_failure_preserves_triage(db_session):
             return await super().analyze(prompt_version, entry, matrix_snapshot, **kwargs)
 
     source = make_source(db_session, "Source 39")
-    entry = make_entry(db_session, source, content="Merger filing for company X acquiring company Y.")
+    entry = make_entry(
+        db_session,
+        source,
+        content="Merger filing for company X acquiring company Y under European and national competition frameworks. " * 10,
+    )
     matrix, _ = make_matrix(db_session, "39")
     triage_p = make_prompt(db_session, "triage39", 1, "triage")
     deep_p = make_prompt(db_session, "deep39", 1, "deep_analysis")

@@ -39,6 +39,12 @@ from app.services.analysis_service import (
     compute_content_hash,
     compute_matrix_snapshot,
 )
+from app.services.grounding_validator import (
+    AnalysisGroundingError,
+    validate_triage_evidence,
+    validate_deep_evidence,
+)
+from app.services.source_sufficiency_service import assess_source_sufficiency
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +121,21 @@ class AnalysisPipelineService:
         if not deep_prompt.active:
             raise ValueError(f"Deep prompt '{deep_prompt.code}:v{deep_prompt.version}' is inactive")
 
-        # 2. Compute snapshot and hashes
+        # 2. Assess source sufficiency & compute snapshot and hashes
+        sufficiency_assessment = assess_source_sufficiency(entry)
+        sufficiency_level = sufficiency_assessment.level.value
+        signals = sufficiency_assessment.signals
+
+        extra_meta.update({
+            "source_sufficiency": sufficiency_level,
+            "source_sufficiency_reason": sufficiency_assessment.reason,
+            "content_source": signals.content_source,
+            "full_text_available": signals.full_text_available,
+            "official_summary_available": signals.official_summary_available,
+            "pdf_available": signals.pdf_available,
+            "content_chars": signals.content_chars,
+        })
+
         snapshot, snapshot_hash = compute_matrix_snapshot(matrix)
         content_hash = compute_analysis_input_hash(entry)
 
@@ -151,7 +171,22 @@ class AnalysisPipelineService:
             db.refresh(analysis)
             return analysis
 
-        # 5. DEEP ANALYSIS (only for 'relevant' entries)
+        # Gate check: If source sufficiency is INSUFFICIENT, triage is allowed but DEEP is skipped
+        if sufficiency_level == "insufficient":
+            triage_call.call_metadata = {
+                **(triage_call.call_metadata or {}),
+                "deep_skipped": True,
+                "deep_skipped_reason": "insufficient_source",
+            }
+            analysis.status = "completed"
+            analysis.summary = None
+            analysis.key_points = []
+            analysis.completed_at = utc_now()
+            db.commit()
+            db.refresh(analysis)
+            return analysis
+
+        # 5. DEEP ANALYSIS (only for 'relevant' entries with sufficient sources)
         if analysis.relevance_status == "relevant":
             analysis = await self._run_deep(
                 analysis=analysis,
@@ -282,6 +317,19 @@ class AnalysisPipelineService:
             triage_call.error_message = str(val_exc)
             return analysis, triage_call, None
 
+        # Validate grounding evidence if v3 triage
+        if getattr(payload, "evidence", None) is not None or getattr(triage_prompt, "response_schema_version", None) == "v3" or triage_prompt.version >= 3:
+            try:
+                validate_triage_evidence(payload.evidence, entry)
+            except AnalysisGroundingError as gr_exc:
+                analysis.status = "failed"
+                analysis.reason = str(gr_exc)
+                analysis.completed_at = utc_now()
+                triage_call.status = "failed"
+                triage_call.error_type = "AnalysisGroundingError"
+                triage_call.error_message = str(gr_exc)
+                return analysis, triage_call, None
+
         # Persist triage results into EntryAnalysis
         analysis.relevance_score = payload.relevance_score
         analysis.relevance_status = relevance_status
@@ -357,9 +405,33 @@ class AnalysisPipelineService:
             analysis.completed_at = utc_now()
             return analysis
 
+        payload = result.payload
+
+        # Validate grounding evidence if v3 deep
+        if (
+            getattr(payload, "key_point_items", None) is not None
+            or getattr(payload, "summary_evidence", None) is not None
+            or getattr(deep_prompt, "response_schema_version", None) == "v3"
+            or deep_prompt.version >= 3
+        ):
+            try:
+                validate_deep_evidence(
+                    summary_evidence=payload.summary_evidence,
+                    key_points=payload.key_point_items,
+                    entry=entry,
+                )
+            except AnalysisGroundingError as gr_exc:
+                analysis.status = "failed"
+                analysis.reason = str(gr_exc)
+                analysis.completed_at = utc_now()
+                deep_call.status = "failed"
+                deep_call.error_type = "AnalysisGroundingError"
+                deep_call.error_message = str(gr_exc)
+                return analysis
+
         # Persist deep results (summary + key_points only; triage fields unchanged)
-        analysis.summary = result.payload.summary
-        analysis.key_points = result.payload.key_points or []
+        analysis.summary = payload.summary
+        analysis.key_points = payload.key_points or []
         analysis.status = "completed"
         analysis.completed_at = utc_now()
         return analysis

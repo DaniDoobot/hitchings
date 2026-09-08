@@ -613,9 +613,9 @@ Para la fuente judicial del Competition Appeal Tribunal (CAT), se aplica una pol
 ### Justificación de la Estrategia:
 - **Reducción de alucinaciones y no-grounding:** Evita que el modelo intente sintetizar un fallo o asignar responsabilidades a partir de titulares vacíos o avisos procesales genéricos de 30 caracteres.
 - **Máxima fidelidad documental:** Todo hecho, cuantía, fecha o criterio reflejado en el análisis procede directamente del texto oficial suministrado.
-- **Preservación estricta de procedencia y trazabilidad (Bloque 7D.1):** 
+- **Preservación estricta de procedencia y trazabilidad (Bloques 7D.1 y 7E):** 
   - `Entry.content_hash`: Es la identidad canónica de deduplicación de ingesta (`SHA256(clean_url | clean_title | clean_excerpt)`). Permanece **invariable** ante enriquecimientos de contenido (PDF), garantizando que las futuras ingestas reconozcan la entrada como ya existente sin crear duplicados.
-  - `EntryAnalysis.entry_content_hash`: Es el hash criptográfico del payload analizado por el modelo IA (`SHA256(clean_title | clean_content)` al momento del análisis). Permanece **inmutable** en el histórico.
+  - `EntryAnalysis.entry_content_hash`: Es el hash criptográfico de la versión textual de la entrada (`SHA256(clean_title | clean_content)` en el momento del análisis). Permanece **inmutable** en el histórico. No debe confundirse con un hash de todo el request exacto enviado a Gemini (el cual incluye además prompt del sistema, snapshot de la matriz, fuente, fecha, URL, configuración, etc.). La reproducibilidad integral del análisis depende conjuntamente de `entry_content_hash`, `matrix_snapshot_hash`, `prompt_version_id`, `provider`, `model`, `pipeline_version` y `call_metadata`.
   - **Detección de análisis obsoletos (*stale*):** Se evalúa dinámicamente comparando el hash del contenido actual de la entrada con el hash registrado en el análisis histórico: `compute_analysis_input_hash(entry) != analysis.entry_content_hash`. Si difieren (como en las 6 entradas de CAT enriquecidas con PDF), el sistema identifica de forma determinista que existe un contenido más rico disponible para re-análisis.
 
 ---

@@ -19,7 +19,11 @@ from app.schemas.analysis import (
     AIAnalysisResponsePayload,
     AIAnalysisTopicItem,
     DeepAnalysisResult,
+    DeepAnalysisResultV3,
+    GroundingEvidence,
+    KeyPointV3,
     TriageAnalysisResult,
+    TriageAnalysisResultV3,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,6 +165,7 @@ class GeminiAPIProvider(BaseAIProvider):
         prompt_version: AnalysisPromptVersion,
         entry: Entry,
         snapshot: dict[str, Any],
+        extra_call_metadata: Optional[dict[str, Any]] = None,
     ) -> tuple[str, str, int]:
         """Build system prompt, user message, and input chars for TRIAGE stage.
 
@@ -178,6 +183,23 @@ class GeminiAPIProvider(BaseAIProvider):
         )
         content_type = entry.content_type or "desconocido"
 
+        # Build sufficiency & provenance context
+        sufficiency_info = ""
+        if extra_call_metadata and "source_sufficiency" in extra_call_metadata:
+            suff_level = extra_call_metadata.get("source_sufficiency")
+            suff_reason = extra_call_metadata.get("source_sufficiency_reason", "")
+            sufficiency_info = (
+                f"Suficiencia de la fuente: {suff_level}\n"
+                f"Evaluación de suficiencia: {suff_reason}\n"
+            )
+            if suff_level == "partial":
+                sufficiency_info += (
+                    "[AVISO DE SUFICIENCIA: FUENTE PARCIAL / RESUMEN OFICIAL]\n"
+                    "El material suministrado es un resumen o extracto oficial y no necesariamente el documento íntegro.\n"
+                    "No asumas contenido no presente ni describas como hechos aspectos no soportados por el material.\n"
+                    "Formula tus justificaciones con el nivel de certeza permitido por la fuente.\n"
+                )
+
         user_text = (
             f"[MATRIZ HITCHINGS]\n"
             f"Nombre: {snapshot.get('name', '')}\n"
@@ -191,7 +213,8 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Título: {entry.title or '(sin título)'}\n"
             f"Fecha de publicación: {published_at_str}\n"
             f"Tipo de contenido: {content_type}\n"
-            f"URL: {entry.url or '(sin URL)'}\n\n"
+            f"URL: {entry.url or '(sin URL)'}\n"
+            f"{sufficiency_info}\n"
             f"{content_section}"
         )
 
@@ -204,6 +227,7 @@ class GeminiAPIProvider(BaseAIProvider):
         entry: Entry,
         snapshot: dict[str, Any],
         triage_result: Optional[dict[str, Any]] = None,
+        extra_call_metadata: Optional[dict[str, Any]] = None,
     ) -> tuple[str, str, int]:
         """Build system prompt, user message, and input chars for DEEP ANALYSIS stage.
 
@@ -227,6 +251,23 @@ class GeminiAPIProvider(BaseAIProvider):
             entry.published_at.strftime("%Y-%m-%d") if entry.published_at else "Desconocida"
         )
 
+        # Build sufficiency & provenance context
+        sufficiency_info = ""
+        if extra_call_metadata and "source_sufficiency" in extra_call_metadata:
+            suff_level = extra_call_metadata.get("source_sufficiency")
+            suff_reason = extra_call_metadata.get("source_sufficiency_reason", "")
+            sufficiency_info = (
+                f"Suficiencia de la fuente: {suff_level}\n"
+                f"Evaluación de suficiencia: {suff_reason}\n"
+            )
+            if suff_level == "partial":
+                sufficiency_info += (
+                    "[AVISO DE SUFICIENCIA: FUENTE PARCIAL / RESUMEN OFICIAL]\n"
+                    "El material suministrado es un resumen o extracto oficial y no necesariamente el documento íntegro.\n"
+                    "No infieras hechos, fundamentos, cuantías, decisiones o contexto que no aparezcan expresamente en el material suministrado.\n"
+                    "Formula tus afirmaciones con el nivel de certeza permitido por la fuente (ej. 'El resumen oficial indica...').\n"
+                )
+
         user_text = (
             f"[CLASIFICACIÓN DE TRIAGE]\n"
             f"Relevancia: {relevance_score}/100\n"
@@ -237,7 +278,8 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Fuente: {entry.source.name if entry.source else 'Desconocida'}\n"
             f"Título: {entry.title or '(sin título)'}\n"
             f"Fecha de publicación: {published_at_str}\n"
-            f"URL: {entry.url or '(sin URL)'}\n\n"
+            f"URL: {entry.url or '(sin URL)'}\n"
+            f"{sufficiency_info}\n"
             f"{content_section}"
         )
 
@@ -300,28 +342,31 @@ class GeminiAPIProvider(BaseAIProvider):
         stage = prompt_version.stage
 
         # Determine thinking level and max output tokens by stage
+        cfg = getattr(prompt_version, "config", None) or {}
         if stage == "triage":
-            thinking_level = self._settings.ANALYSIS_TRIAGE_THINKING_LEVEL
-            max_output_tokens = 512
+            thinking_level = cfg.get("thinking_level", self._settings.ANALYSIS_TRIAGE_THINKING_LEVEL)
+            max_output_tokens = cfg.get("max_output_tokens", 1024)
         elif stage == "deep_analysis":
-            thinking_level = self._settings.ANALYSIS_DEEP_THINKING_LEVEL
-            max_output_tokens = 2048
+            thinking_level = cfg.get("thinking_level", self._settings.ANALYSIS_DEEP_THINKING_LEVEL)
+            max_output_tokens = max(cfg.get("max_output_tokens", 4096), 4096)
         else:
             thinking_level = "low"
-            max_output_tokens = 1024
+            max_output_tokens = 2048
+
+        is_v3 = (getattr(prompt_version, "response_schema_version", None) == "v3" or getattr(prompt_version, "version", 0) >= 3)
 
         # Build prompt
         try:
             if stage == "triage":
                 system_text, user_text, input_chars = self._build_triage_prompt(
-                    prompt_version, entry, matrix_snapshot
+                    prompt_version, entry, matrix_snapshot, extra_call_metadata=extra_call_metadata
                 )
-                response_schema = TriageAnalysisResult
+                response_schema = TriageAnalysisResultV3 if is_v3 else TriageAnalysisResult
             else:
                 system_text, user_text, input_chars = self._build_deep_prompt(
-                    prompt_version, entry, matrix_snapshot, triage_result=triage_result
+                    prompt_version, entry, matrix_snapshot, triage_result=triage_result, extra_call_metadata=extra_call_metadata
                 )
-                response_schema = DeepAnalysisResult
+                response_schema = DeepAnalysisResultV3 if is_v3 else DeepAnalysisResult
         except AnalysisInputTooLarge as exc:
             latency = int((time.monotonic() - start_time) * 1000) or 1
             return AIProviderResult(
@@ -394,6 +439,30 @@ class GeminiAPIProvider(BaseAIProvider):
         except Exception:
             parsed = None
 
+        # Fallback: if response.parsed was None but raw text was returned, parse JSON directly
+        if parsed is None:
+            raw_text = ""
+            try:
+                raw_text = response.text or ""
+            except Exception:
+                pass
+            if raw_text:
+                try:
+                    # Strip any markdown fences if present
+                    clean_text = raw_text.strip()
+                    if clean_text.startswith("```json"):
+                        clean_text = clean_text[7:]
+                    if clean_text.startswith("```"):
+                        clean_text = clean_text[3:]
+                    if clean_text.endswith("```"):
+                        clean_text = clean_text[:-3]
+                    clean_text = clean_text.strip()
+                    raw_dict = json.loads(clean_text)
+                    parsed = response_schema.model_validate(raw_dict)
+                    logger.info("Successfully parsed structured output via JSON fallback (stage=%s, entry=%s)", stage, entry.id)
+                except Exception as parse_err:
+                    logger.debug("Fallback JSON parse failed (stage=%s, entry=%s): %s", stage, entry.id, parse_err)
+
         if parsed is None:
             raw_text = ""
             try:
@@ -433,39 +502,80 @@ class GeminiAPIProvider(BaseAIProvider):
         output_chars = len(str(parsed))
 
         if stage == "triage":
-            assert isinstance(parsed, TriageAnalysisResult)
-            topics: list[AIAnalysisTopicItem] = []
-            for code in parsed.topic_codes:
-                topics.append(
-                    AIAnalysisTopicItem(
-                        topic_code=code,
-                        is_primary=(code == parsed.primary_topic_code),
-                        confidence=parsed.confidence,
-                        rationale=None,
+            if is_v3:
+                assert isinstance(parsed, TriageAnalysisResultV3)
+                topics: list[AIAnalysisTopicItem] = []
+                for code in parsed.topic_codes:
+                    topics.append(
+                        AIAnalysisTopicItem(
+                            topic_code=code,
+                            is_primary=(code == parsed.primary_topic_code),
+                            confidence=parsed.confidence,
+                            rationale=None,
+                        )
                     )
+                payload = AIAnalysisResponsePayload(
+                    relevance_score=parsed.relevance_score,
+                    confidence=parsed.confidence,
+                    topics=topics,
+                    summary=None,
+                    key_points=[],
+                    reason=parsed.reason,
+                    evidence=parsed.evidence,
+                )
+            else:
+                assert isinstance(parsed, TriageAnalysisResult)
+                topics = []
+                for code in parsed.topic_codes:
+                    topics.append(
+                        AIAnalysisTopicItem(
+                            topic_code=code,
+                            is_primary=(code == parsed.primary_topic_code),
+                            confidence=parsed.confidence,
+                            rationale=None,
+                        )
+                    )
+                payload = AIAnalysisResponsePayload(
+                    relevance_score=parsed.relevance_score,
+                    confidence=parsed.confidence,
+                    topics=topics,
+                    summary=None,
+                    key_points=[],
+                    reason=parsed.reason,
                 )
 
-            payload = AIAnalysisResponsePayload(
-                relevance_score=parsed.relevance_score,
-                confidence=parsed.confidence,
-                topics=topics,
-                summary=None,
-                key_points=[],
-                reason=parsed.reason,
-            )
-
         else:
-            assert isinstance(parsed, DeepAnalysisResult)
-            payload = AIAnalysisResponsePayload(
-                relevance_score=0,
-                confidence=None,
-                topics=[],
-                summary=parsed.summary,
-                key_points=parsed.key_points,
-                reason=None,
-            )
+            if is_v3:
+                assert isinstance(parsed, DeepAnalysisResultV3)
+                payload = AIAnalysisResponsePayload(
+                    relevance_score=0,
+                    confidence=None,
+                    topics=[],
+                    summary=parsed.summary,
+                    key_points=[kp.point for kp in parsed.key_points],
+                    reason=None,
+                    summary_evidence=parsed.summary_evidence,
+                    key_point_items=parsed.key_points,
+                )
+            else:
+                assert isinstance(parsed, DeepAnalysisResult)
+                payload = AIAnalysisResponsePayload(
+                    relevance_score=0,
+                    confidence=None,
+                    topics=[],
+                    summary=parsed.summary,
+                    key_points=parsed.key_points,
+                    reason=None,
+                )
+
+        parsed_dump: Optional[dict[str, Any]] = None
+        if hasattr(parsed, "model_dump"):
+            parsed_dump = parsed.model_dump()
+        elif hasattr(parsed, "dict"):
+            parsed_dump = parsed.dict()
 
         raw_resp: dict[str, Any] = {
+            "result": parsed_dump,
             "model": self._settings.GEMINI_MODEL,
             "stage": stage,
             "input_tokens": input_tokens,

@@ -110,6 +110,33 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
         for c in analysis.calls
     ]
 
+    # Extract grounding evidence from audit calls if available (v3 pipeline)
+    grounding_evidence: Optional[dict[str, Any]] = None
+    triage_ev = None
+    summary_ev = None
+    kp_ev = None
+
+    for c in analysis.calls:
+        if not c.raw_response or not isinstance(c.raw_response, dict):
+            continue
+        res = c.raw_response.get("result")
+        if not isinstance(res, dict):
+            continue
+        if c.stage == "triage" and "evidence" in res:
+            triage_ev = res.get("evidence")
+        elif c.stage == "deep_analysis":
+            if "summary_evidence" in res:
+                summary_ev = res.get("summary_evidence")
+            if "key_points" in res:
+                kp_ev = res.get("key_points")
+
+    if triage_ev is not None or summary_ev is not None or kp_ev is not None:
+        grounding_evidence = {
+            "triage_evidence": triage_ev or [],
+            "summary_evidence": summary_ev or [],
+            "key_points_evidence": kp_ev or [],
+        }
+
     return EntryAnalysisDetailResponse(
         id=analysis.id,
         entry_id=analysis.entry_id,
@@ -131,6 +158,7 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
         updated_at=analysis.updated_at,
         topics=topics_formatted,
         calls=calls_formatted,
+        grounding_evidence=grounding_evidence,
     )
 
 

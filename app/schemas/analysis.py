@@ -26,16 +26,19 @@ class AIAnalysisResponsePayload(BaseModel):
     summary: Optional[str] = Field(None, description="Executive summary of the publication")
     key_points: list[str] = Field(default_factory=list, description="Key legal/regulatory bullet points")
     reason: Optional[str] = Field(None, description="Reasoning behind the relevance score")
+    # v3 Grounding evidence fields
+    evidence: Optional[list["GroundingEvidence"]] = Field(None, description="Triage grounding evidence quotes")
+    summary_evidence: Optional[list["GroundingEvidence"]] = Field(None, description="Deep summary grounding evidence quotes")
+    key_point_items: Optional[list["KeyPointV3"]] = Field(None, description="Deep key points with individual evidence")
 
 
 # ---------------------------------------------------------------------------
-# Gemini Developer API Structured Output Schemas (Bloque 7B)
-# These are used as response_schema in google-genai GenerateContentConfig.
-# They define exactly what the model must produce per pipeline stage.
+# Gemini Developer API Structured Output Schemas (Bloque 7B — v2)
+# Preserved intact for historical v2 auditability and playback.
 # ---------------------------------------------------------------------------
 
 class TriageAnalysisResult(BaseModel):
-    """Structured output schema for the TRIAGE stage.
+    """Structured output schema for the TRIAGE stage (v2).
 
     Used as Structured Output schema in Gemini API calls.
     The model must return valid JSON matching this schema.
@@ -63,7 +66,7 @@ class TriageAnalysisResult(BaseModel):
 
 
 class DeepAnalysisResult(BaseModel):
-    """Structured output schema for the DEEP ANALYSIS stage.
+    """Structured output schema for the DEEP ANALYSIS stage (v2).
 
     Only executed when relevance_status == 'relevant'.
     Does NOT modify relevance_score, topics, or primary topic from triage.
@@ -81,6 +84,87 @@ class DeepAnalysisResult(BaseModel):
             "Lista de 3 a 6 puntos clave concretos y no redundantes en castellano. "
             "Cada punto debe ser específico y útil para el observatorio HITCHINGS."
         )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gemini Developer API Structured Output Schemas (Bloque 7E — v3 Grounded)
+# Evidence-grounded pipeline with deterministic quote verification.
+# ---------------------------------------------------------------------------
+
+class GroundingEvidence(BaseModel):
+    """Verbatim evidence quote extracted from source text for strict grounding."""
+    source_field: str = Field(
+        ...,
+        description="Campo de origen de la cita: 'title', 'content' o 'excerpt'."
+    )
+    quote: str = Field(
+        ...,
+        description="Cita textual exacta copiada VERBATIM de la fuente original. No traducir, no parafrasear, sin markdown."
+    )
+
+
+class TriageAnalysisResultV3(BaseModel):
+    """Structured output schema for TRIAGE stage v3 with mandatory grounding evidence."""
+    relevance_score: int = Field(
+        ..., ge=0, le=100,
+        description="Puntuación de relevancia HITCHINGS de 0 (no relevante) a 100 (muy relevante)"
+    )
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Confianza en la clasificación de 0.0 a 1.0"
+    )
+    topic_codes: list[str] = Field(
+        default_factory=list,
+        description="Códigos de temas HITCHINGS aplicables. Usar únicamente los códigos proporcionados."
+    )
+    primary_topic_code: Optional[str] = Field(
+        None,
+        description="Código del tema principal. Debe ser uno de topic_codes. Null si topic_codes está vacío."
+    )
+    reason: str = Field(
+        ...,
+        description="Justificación específica en castellano de la puntuación de relevancia asignada."
+    )
+    evidence: list[GroundingEvidence] = Field(
+        default_factory=list,
+        description=(
+            "1 a 3 evidencias textuales breves copiadas VERBATIM de la fuente original "
+            "(title, content o excerpt) que sustentan la decisión, incluso para not_relevant o uncertain."
+        )
+    )
+
+
+class KeyPointV3(BaseModel):
+    """Individual key point item with mandatory grounding evidence quotes."""
+    point: str = Field(
+        ...,
+        description="Punto clave concreto, sustantivo y no redundante en castellano."
+    )
+    evidence: list[GroundingEvidence] = Field(
+        ...,
+        min_length=1,
+        description="Al menos 1 evidencia textual breve copiada VERBATIM de la fuente que respalda este punto."
+    )
+
+
+class DeepAnalysisResultV3(BaseModel):
+    """Structured output schema for DEEP ANALYSIS stage v3 with mandatory grounding evidence."""
+    summary: str = Field(
+        ...,
+        description=(
+            "Resumen jurídico preciso en castellano (orientativamente 150-300 palabras cuando el material lo justifique). "
+            "Exclusivamente basado en el material suministrado."
+        )
+    )
+    summary_evidence: list[GroundingEvidence] = Field(
+        default_factory=list,
+        description="2 a 4 evidencias textuales representativas copiadas VERBATIM de la fuente que respaldan las ideas materiales centrales del resumen."
+    )
+    key_points: list[KeyPointV3] = Field(
+        ...,
+        min_length=1,
+        description="Lista de 3 a 6 puntos clave en castellano, cada uno obligatoriamente respaldado por al menos 1 evidencia textual."
     )
 
 
@@ -192,10 +276,11 @@ class EntryAnalysisResponse(BaseModel):
 
 
 class EntryAnalysisDetailResponse(EntryAnalysisResponse):
-    """Detailed response including full snapshot, topic associations, and audit calls."""
+    """Detailed response including full snapshot, topic associations, audit calls, and grounding evidence."""
     matrix_snapshot: dict[str, Any]
     topics: list[EntryAnalysisTopicResponse] = Field(default_factory=list)
     calls: list[AnalysisCallResponse] = Field(default_factory=list)
+    grounding_evidence: Optional[dict[str, Any]] = Field(None, description="Structured grounding evidence extracted from v3 audit calls")
 
 
 # ---------------------------------------------------------------------------

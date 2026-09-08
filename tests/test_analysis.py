@@ -714,24 +714,27 @@ def test_22_analysis_api_endpoints(client: TestClient, db_session: Session) -> N
 def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
     """Verify that seed_analysis_prompts runs idempotently without duplicating prompt versions.
 
-    After Bloque 7B, the seed creates 4 prompt versions:
+    After Bloque 7E, the seed creates 6 prompt versions:
       - observatory_triage v1, observatory_deep_analysis v1 (legacy/mock)
       - observatory_triage v2, observatory_deep_analysis v2 (Gemini API)
+      - observatory_triage v3, observatory_deep_analysis v3 (Gemini API grounded)
     """
     # Run 1
     prompts_run1 = seed_analysis_prompts(db_session)
-    assert len(prompts_run1) == 4
+    assert len(prompts_run1) == 6
     codes1 = {p.code for p in prompts_run1}
     assert codes1 == {"observatory_triage", "observatory_deep_analysis"}
     versions1 = {(p.code, p.version) for p in prompts_run1}
     assert ("observatory_triage", 1) in versions1
     assert ("observatory_triage", 2) in versions1
+    assert ("observatory_triage", 3) in versions1
     assert ("observatory_deep_analysis", 1) in versions1
     assert ("observatory_deep_analysis", 2) in versions1
+    assert ("observatory_deep_analysis", 3) in versions1
 
     # Run 2: content identical -> unchanged (same IDs)
     prompts_run2 = seed_analysis_prompts(db_session)
-    assert len(prompts_run2) == 4
+    assert len(prompts_run2) == 6
     assert {p.id for p in prompts_run1} == {p.id for p in prompts_run2}
 
 
