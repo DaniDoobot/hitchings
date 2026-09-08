@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 from typing import Optional, Any
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -274,11 +274,39 @@ class EntryAnalysisResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("key_points", mode="before")
+    @classmethod
+    def normalize_key_points(cls, v: Any) -> Optional[list[str]]:
+        """Ensure key_points is strictly list[str] on API serialization, converting historical dicts if present."""
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            return None
+        result: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                result.append(item)
+            elif isinstance(item, dict) and "point" in item:
+                result.append(str(item["point"]))
+            elif hasattr(item, "point"):
+                result.append(str(getattr(item, "point")))
+            else:
+                result.append(str(item))
+        return result
+
 
 class EntryAnalysisDetailResponse(EntryAnalysisResponse):
     """Detailed response including full snapshot, topic associations, audit calls, and grounding evidence."""
     matrix_snapshot: dict[str, Any]
-    topics: list[EntryAnalysisTopicResponse] = Field(default_factory=list)
+    topics: list[EntryAnalysisTopicResponse] = Field(default_factory=list, description="Raw model-assigned topic classifications")
+    canonical_topics: list[EntryAnalysisTopicResponse] = Field(
+        default_factory=list,
+        description="Canonical topics view removing redundant ancestor categories when specific descendants are selected",
+    )
+    canonical_primary_topic: Optional[EntryAnalysisTopicResponse] = Field(
+        None,
+        description="Canonical primary topic resolved deterministically",
+    )
     calls: list[AnalysisCallResponse] = Field(default_factory=list)
     grounding_evidence: Optional[dict[str, Any]] = Field(None, description="Structured grounding evidence extracted from v3 audit calls")
 

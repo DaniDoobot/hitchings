@@ -431,7 +431,19 @@ class AnalysisPipelineService:
 
         # Persist deep results (summary + key_points only; triage fields unchanged)
         analysis.summary = payload.summary
-        analysis.key_points = payload.key_points or []
+        # Enforce key_points contract: strictly list[str] in EntryAnalysis
+        clean_key_points: list[str] = []
+        if payload.key_points:
+            for item in payload.key_points:
+                if isinstance(item, str):
+                    clean_key_points.append(item)
+                elif isinstance(item, dict) and "point" in item:
+                    clean_key_points.append(str(item["point"]))
+                elif hasattr(item, "point"):
+                    clean_key_points.append(str(getattr(item, "point")))
+                else:
+                    clean_key_points.append(str(item))
+        analysis.key_points = clean_key_points
         analysis.status = "completed"
         analysis.completed_at = utc_now()
         return analysis

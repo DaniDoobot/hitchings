@@ -22,6 +22,7 @@ from app.schemas.analysis import (
     PromptVersionResponse,
 )
 from app.services.analysis_service import AnalysisService
+from app.services.topic_canonicalization_service import canonicalize_analysis_topics
 
 router = APIRouter(tags=["AI Analysis"])
 
@@ -80,6 +81,31 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
         )
         for t in analysis.topics
     ]
+
+    # Compute canonical topic view (removing redundant ancestors when specific descendants are selected)
+    canonical_topics_formatted: list[EntryAnalysisTopicResponse] = []
+    canonical_primary_formatted: Optional[EntryAnalysisTopicResponse] = None
+
+    if analysis.topics:
+        canonical_res = canonicalize_analysis_topics(analysis.topics, db=db)
+        raw_topic_map = {t.topic_id: t for t in analysis.topics}
+
+        for ct in canonical_res.canonical_topics:
+            orig = raw_topic_map.get(ct.topic_id)
+            resp = EntryAnalysisTopicResponse(
+                id=orig.id if orig else ct.topic_id,
+                analysis_id=analysis.id,
+                topic_id=ct.topic_id,
+                confidence=ct.confidence,
+                is_primary=ct.is_primary,
+                rationale=orig.rationale if orig else None,
+                created_at=orig.created_at if orig else analysis.created_at,
+                topic_code=ct.topic_code,
+                topic_name=ct.topic_name,
+            )
+            canonical_topics_formatted.append(resp)
+            if ct.is_primary:
+                canonical_primary_formatted = resp
 
     calls_formatted = [
         AnalysisCallResponse(
@@ -157,6 +183,8 @@ def get_entry_analysis(analysis_id: uuid.UUID, db: Session = Depends(get_db)) ->
         created_at=analysis.created_at,
         updated_at=analysis.updated_at,
         topics=topics_formatted,
+        canonical_topics=canonical_topics_formatted,
+        canonical_primary_topic=canonical_primary_formatted,
         calls=calls_formatted,
         grounding_evidence=grounding_evidence,
     )

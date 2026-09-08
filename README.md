@@ -693,18 +693,54 @@ La validación se ejecutó exclusivamente sobre la entrada de *Livronsa* (`27c1a
 
 ---
 
-## 19. Funcionalidades Deliberadamente Pendientes
+## 19. Compatibilidad de Resultados, Topics Canónicos y Plan de Baseline v4 (Bloque 7G)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7F **NO** se han implementado:
-1. Análisis de las 59 Entries restantes sin procesar.
-2. Modificación de prompts v1, v2 o v3 históricos.
-3. Creación de prompts v5.
-4. Scheduler en segundo plano (Celery, APScheduler, cron).
-5. Interfaz gráfica o frontend.
+### 1. Contrato Invariable de `EntryAnalysis.key_points`
+Se establece de forma terminante y retrocompatible el contrato de datos para los puntos clave del análisis:
+- **`EntryAnalysis.summary`:** Texto final narrativo resumido (150–300 palabras).
+- **`EntryAnalysis.key_points`:** Lista estricta de cadenas de texto (`list[str]`). No duplica la estructura de citas.
+- **Evidencia estructurada (`grounding_evidence`):** Se preserva íntegramente en el Structured Output de auditoría dentro de `AnalysisCall.raw_response["result"]["key_points"]` (con sus campos `point` y `evidence`).
+- **Retrocompatibilidad de API:** Las respuestas Pydantic (`EntryAnalysisResponse` y `EntryAnalysisDetailResponse`) incorporan un validador que normaliza de forma transparente cualquier representación histórica en formato `list[dict]` a `list[str]`, garantizando un contrato público estable en `GET /api/v1/entry-analyses/{id}`.
+
+### 2. Visión Canónica de Temas (`TopicCanonicalizationService`)
+La auditoría reveló que en 20 de los 30 análisis históricos (66,7%), el modelo asignó concurrentemente categorías generales (padres) y específicas (hijos), tales como `private_enforcement` junto con `damages_actions`.
+- **Principio de Auditoría:** `EntryAnalysisTopic` se mantiene inmutable para conservar exactamente la clasificación original emitida por el LLM.
+- **Regla de Canonicidad:** Cuando una categoría específica (descendiente) está seleccionada, la categoría general (ancestro) se elimina de `canonical_topics` por subsunción lógica. Si solo se seleccionó la categoría general sin descendientes, se preserva íntegramente. Soporta profundidad arbitraria ($Padre \to Hijo \to Nieto$).
+- **Resolución de Tema Principal Canónico (`canonical_primary`):** Si el tema primario original era un ancestro eliminado, se resuelve deterministamente entre sus descendientes seleccionados mediante: (1) mayor `confidence`; (2) menor `priority` / `display_order`; (3) `topic.code ASC`.
+- **Expansión de Filtros (`expand_topic_filter`):** Las consultas y filtros por tema padre se expanden automáticamente para incluir todos sus descendientes, garantizando que búsquedas de nivel superior encuentren todas las entradas etiquetadas a nivel hoja.
+
+### 3. Algoritmo de Selección de Análisis Vigente (`CurrentAnalysisService`)
+Un análisis se considera vigente (*current production analysis*) para una entrada si:
+1. `status == "completed"`.
+2. `entry_content_hash == compute_analysis_input_hash(entry)` (corresponde a la versión textual actual).
+3. Entre múltiples candidatos válidos, se selecciona la versión de pipeline numéricamente más reciente (`v4 > v3 > v2 > v1`), desempatando por fecha de creación descendente (`created_at DESC`).
+4. Los análisis fallidos (*failed*) o desfasados por enriquecimiento posterior (*stale*) se preservan en el histórico pero nunca se seleccionan como vigentes.
+
+### 4. Planificador de Baseline Homogéneo v4 (`scripts/plan_v4_backfill.py`)
+Se implementó un planificador en modo estrictamente **dry-run** (sin llamadas a Gemini) que diagnostica el universo de las 80 entradas:
+- **Con análisis v4 vigente:** 1 entrada (*Livronsa*).
+- **Pendientes de baseline v4:** 79 entradas (59 nunca analizadas + 20 analizadas previamente sin v4).
+- **Volumen textual pendiente:** 1.871.834 caracteres (65 texto completo, 14 resúmenes oficiales, 0 insuficientes).
+- **Estimación de coste orientativa (basada en históricos locales):**
+  - LOW: ~$0.6650 (relevancia 35%, 106 llamadas).
+  - EXPECTED: ~$0.7519 (relevancia 48%, 117 llamadas).
+  - HIGH: ~$1.0605 (relevancia 65%, 130 llamadas).
 
 ---
 
-## 20. Roadmap
+## 20. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7G **NO** se han implementado:
+1. Llamadas a Gemini o ejecución del backfill v4 (solo script de planificación dry-run).
+2. Modificación de prompts v1, v2, v3 o v4.
+3. Creación de prompts v5.
+4. Alteración o borrado de `EntryAnalysisTopic` o `EntryAnalysis` históricos.
+5. Scheduler en segundo plano (Celery, APScheduler, cron).
+6. Interfaz gráfica o frontend.
+
+---
+
+## 21. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -720,7 +756,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7F **NO** se ha
 - [x] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline, prompts v3 y validación controlada de 8 entries.
 - [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real.
 - [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene.
-- [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas). *(Cerrado)*
+- [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas).
+- [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
