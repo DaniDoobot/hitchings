@@ -35,6 +35,7 @@ from app.schemas.analysis import AIAnalysisTopicItem
 from app.services.analysis_service import (
     AnalysisService,
     AnalysisValidationError,
+    compute_analysis_input_hash,
     compute_content_hash,
     compute_matrix_snapshot,
 )
@@ -116,7 +117,7 @@ class AnalysisPipelineService:
 
         # 2. Compute snapshot and hashes
         snapshot, snapshot_hash = compute_matrix_snapshot(matrix)
-        content_hash = compute_content_hash(entry)
+        content_hash = compute_analysis_input_hash(entry)
 
         # 3. Create EntryAnalysis record
         started_at = utc_now()

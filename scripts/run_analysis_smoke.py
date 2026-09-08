@@ -43,7 +43,7 @@ from app.models.entry import Entry
 from app.models.tracking import TrackingMatrix
 from app.providers.ai.gemini_api import GeminiAPIProvider
 from app.services.analysis_pipeline_service import AnalysisPipelineService
-from app.services.analysis_service import compute_content_hash
+from app.services.analysis_service import compute_analysis_input_hash
 
 logging.basicConfig(
     level=logging.INFO,
@@ -133,7 +133,7 @@ async def run_smoke(
         print(f"\nERROR: Entry '{entry_uuid}' not found in database.")
         sys.exit(1)
 
-    content_hash = compute_content_hash(entry)
+    analysis_input_hash = compute_analysis_input_hash(entry)
     content_len = len(entry.content or "")
 
     print(f"  Entry ID:               {entry.id}")
@@ -142,7 +142,8 @@ async def run_smoke(
     print(f"  Published At:           {entry.published_at}")
     print(f"  Content Type:           {entry.content_type}")
     print(f"  Content Length:         {content_len:,} chars")
-    print(f"  Content Hash:           {content_hash}")
+    print(f"  Analysis Input Hash:    {analysis_input_hash}")
+    print(f"  Ingestion Dedupe Hash:  {entry.content_hash}")
     print_separator()
 
     # Precheck prior analyses

@@ -66,10 +66,14 @@ def compute_matrix_snapshot(matrix: TrackingMatrix) -> tuple[dict[str, Any], str
     return snapshot, snapshot_hash
 
 
-def compute_content_hash(entry: Entry) -> str:
-    """Generate SHA-256 hash of an entry's textual content."""
+def compute_analysis_input_hash(entry: Entry) -> str:
+    """Generate deterministic SHA-256 hash of an entry's textual payload (title | content) for AI analysis."""
     text = f"{entry.title or ''}|{entry.content or ''}".strip()
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Backward-compatibility alias
+compute_content_hash = compute_analysis_input_hash
 
 
 class AnalysisService:
@@ -158,7 +162,7 @@ class AnalysisService:
 
         # 3. Snapshot & Content Hash
         snapshot, snapshot_hash = compute_matrix_snapshot(matrix)
-        content_hash = compute_content_hash(entry)
+        content_hash = compute_analysis_input_hash(entry)
 
         # 4. Initialize EntryAnalysis in 'pending' status
         started_at = utc_now()

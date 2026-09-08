@@ -25,6 +25,7 @@ from app.services.analysis_service import (
     AnalysisService,
     compute_matrix_snapshot,
     compute_content_hash,
+    compute_analysis_input_hash,
 )
 from scripts.seed_analysis_prompts import seed_analysis_prompts
 
@@ -268,14 +269,14 @@ def test_5_compute_matrix_snapshot_and_hash(db_session: Session) -> None:
 
 
 def test_6_compute_content_hash(db_session: Session) -> None:
-    """Ensure content hash is deterministic and changes with title/content."""
+    """Ensure analysis input content hash is deterministic and changes with title/content."""
     source, entry = create_test_source_and_entry(db_session, title="Title A", content="Content A")
-    hash_a1 = compute_content_hash(entry)
+    hash_a1 = compute_analysis_input_hash(entry)
     hash_a2 = compute_content_hash(entry)
     assert hash_a1 == hash_a2
 
     entry.title = "Title B"
-    hash_b = compute_content_hash(entry)
+    hash_b = compute_analysis_input_hash(entry)
     assert hash_a1 != hash_b
 
 

@@ -13,7 +13,11 @@ from app.models.source import Source, SourceType
 from app.models.entry import Entry
 from app.providers.native import NativeProvider, parse_rfc822_date
 from app.providers.base import RawEntryData, ProviderError
-from app.services.ingestion_service import IngestionService, compute_content_hash
+from app.services.ingestion_service import (
+    IngestionService,
+    compute_content_hash,
+    compute_ingestion_dedupe_hash,
+)
 
 SAMPLE_RSS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -450,4 +454,13 @@ async def test_cnmc_website_native_provider_integration() -> None:
     assert "Primer punto clave" in entries[0].content
     assert entries[0].raw_metadata["sector"] == "Telecomunicaciones"
     assert entries[0].external_id == "https://www.cnmc.es/prensa/registro-alias-llamamiento-20260901"
+
+
+def test_compute_ingestion_dedupe_hash_consistency():
+    """Verify compute_ingestion_dedupe_hash and compute_content_hash backwards compat."""
+    h1 = compute_ingestion_dedupe_hash("Title", "https://example.com/test", "Excerpt")
+    h2 = compute_content_hash("Title", "https://example.com/test", "Excerpt")
+    assert h1 == h2
+    assert len(h1) == 64
+
 

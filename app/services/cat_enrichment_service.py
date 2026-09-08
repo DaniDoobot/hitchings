@@ -18,7 +18,7 @@ import pypdf
 from sqlalchemy.orm import Session
 
 from app.models.entry import Entry
-from app.services.analysis_service import compute_content_hash
+from app.services.analysis_service import compute_analysis_input_hash
 from app.services.source_sufficiency_service import (
     SourceSufficiencyLevel,
     assess_source_sufficiency,
@@ -209,10 +209,17 @@ class CatEnrichmentService:
         entry.content = extracted_text
         entry.raw_metadata = meta
 
-        # Update entry.content_hash to represent the new content version
-        # Historical EntryAnalysis.entry_content_hash remains completely untouched!
-        new_content_hash = compute_content_hash(entry)
-        entry.content_hash = new_content_hash
+        # CRITICAL (Bloque 7D.1): Entry.content_hash is strictly the ingestion deduplication
+        # identity (SHA256(canonical_url | clean_title | clean_excerpt)) and MUST NOT be
+        # modified upon content enrichment. This ensures future ingestion runs properly detect
+        # the entry as already existing.
+        #
+        # Historical EntryAnalysis.entry_content_hash (SHA256(title | content) at analysis time)
+        # also remains untouched.
+        #
+        # Stale analysis detection is achieved by comparing compute_analysis_input_hash(entry)
+        # against historical EntryAnalysis.entry_content_hash.
+        current_analysis_input_hash = compute_analysis_input_hash(entry)
 
         db.flush()
 
@@ -224,7 +231,7 @@ class CatEnrichmentService:
             "pages": page_count,
             "extracted_chars": len(extracted_text),
             "old_content_chars": old_content_chars,
-            "old_content_hash": old_content_hash,
-            "new_content_hash": new_content_hash,
+            "ingestion_content_hash": entry.content_hash,
+            "analysis_input_hash": current_analysis_input_hash,
         }
         return True, details

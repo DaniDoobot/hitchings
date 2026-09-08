@@ -27,13 +27,17 @@ from app.schemas.ingestion import (
 logger = logging.getLogger(__name__)
 
 
-def compute_content_hash(title: Optional[str], url: str, excerpt: Optional[str] = None) -> str:
-    """Generate a deterministic SHA-256 hash for basic content deduplication."""
+def compute_ingestion_dedupe_hash(title: Optional[str], url: str, excerpt: Optional[str] = None) -> str:
+    """Generate a deterministic SHA-256 hash for ingestion deduplication (URL | title | excerpt)."""
     clean_url = (url or "").strip()
     clean_title = (title or "").strip()
     clean_excerpt = (excerpt or "").strip()
     raw = f"{clean_url}|{clean_title}|{clean_excerpt}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+# Backward-compatibility alias
+compute_content_hash = compute_ingestion_dedupe_hash
 
 
 class IngestionService:

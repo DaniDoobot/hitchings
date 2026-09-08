@@ -613,8 +613,10 @@ Para la fuente judicial del Competition Appeal Tribunal (CAT), se aplica una pol
 ### Justificación de la Estrategia:
 - **Reducción de alucinaciones y no-grounding:** Evita que el modelo intente sintetizar un fallo o asignar responsabilidades a partir de titulares vacíos o avisos procesales genéricos de 30 caracteres.
 - **Máxima fidelidad documental:** Todo hecho, cuantía, fecha o criterio reflejado en el análisis procede directamente del texto oficial suministrado.
-- **Eficiencia en el consumo de tokens y costes de Gemini:** En resoluciones con un sumario oficial sustantivo de 200 a 2.000 caracteres (como CAT 65, 68 o 70), se utiliza directamente dicho sumario en lugar de enviar sentencias completas de 50 a 100 páginas en PDF, reduciendo el coste de triage/deep entre un 80% y un 95%.
-- **Preservación estricta de procedencia y trazabilidad:** Cuando una entrada es enriquecida desde su PDF oficial, se actualiza `Entry.content` y `Entry.content_hash`, pero se preserva intacto el hash histórico de los análisis previos (`EntryAnalysis.entry_content_hash`), permitiendo auditar cuándo una entrada fue analizada sobre una versión anterior del contenido.
+- **Preservación estricta de procedencia y trazabilidad (Bloque 7D.1):** 
+  - `Entry.content_hash`: Es la identidad canónica de deduplicación de ingesta (`SHA256(clean_url | clean_title | clean_excerpt)`). Permanece **invariable** ante enriquecimientos de contenido (PDF), garantizando que las futuras ingestas reconozcan la entrada como ya existente sin crear duplicados.
+  - `EntryAnalysis.entry_content_hash`: Es el hash criptográfico del payload analizado por el modelo IA (`SHA256(clean_title | clean_content)` al momento del análisis). Permanece **inmutable** en el histórico.
+  - **Detección de análisis obsoletos (*stale*):** Se evalúa dinámicamente comparando el hash del contenido actual de la entrada con el hash registrado en el análisis histórico: `compute_analysis_input_hash(entry) != analysis.entry_content_hash`. Si difieren (como en las 6 entradas de CAT enriquecidas con PDF), el sistema identifica de forma determinista que existe un contenido más rico disponible para re-análisis.
 
 ---
 

@@ -19,6 +19,8 @@ from app.services.source_sufficiency_service import (
     assess_source_sufficiency,
 )
 from app.services.cat_enrichment_service import CatEnrichmentService
+from app.services.ingestion_service import compute_ingestion_dedupe_hash
+from app.services.analysis_service import compute_analysis_input_hash
 
 
 @pytest.fixture
@@ -282,27 +284,37 @@ def test_cat_enrichment_failure_leaves_entry_intact(db_session, make_test_source
     assert entry.raw_metadata.get("content_source") != "cat_judgment_pdf_text"
 
 
-def test_historical_analysis_hash_preserved(db_session, make_test_source):
+def test_historical_analysis_hash_preserved_and_stale_detected(db_session, make_test_source):
     source = make_test_source("Competition Appeal Tribunal - Judgments")
     db_session.add(source)
     db_session.flush()
 
+    initial_content = "Ruling of the Tribunal on costs."
+    title = "[2026] CAT 67 | GLOBAL-365 plc v PayPoint plc - Ruling (Costs)"
+    url = "https://example.com/cat67"
+    excerpt = "Short excerpt"
+
+    ingestion_hash = compute_ingestion_dedupe_hash(title, url, excerpt)
     entry = Entry(
         source_id=source.id,
-        url="https://example.com/cat67",
-        title="[2026] CAT 67",
-        content="Short text",
-        content_hash="initial_entry_hash",
+        url=url,
+        title=title,
+        excerpt=excerpt,
+        content=initial_content,
+        content_hash=ingestion_hash,
     )
     db_session.add(entry)
     db_session.flush()
+
+    # Initial analysis hash is computed from title + content at analysis time
+    initial_analysis_hash = compute_analysis_input_hash(entry)
 
     analysis = EntryAnalysis(
         entry_id=entry.id,
         matrix_id=uuid.uuid4(),
         matrix_snapshot={"name": "Snapshot"},
         matrix_snapshot_hash="matrix_hash_1",
-        entry_content_hash="historical_analysis_content_hash_12345",
+        entry_content_hash=initial_analysis_hash,
         pipeline_version="v2",
         status="completed",
         relevance_score=75,
@@ -311,12 +323,50 @@ def test_historical_analysis_hash_preserved(db_session, make_test_source):
     db_session.add(analysis)
     db_session.commit()
 
-    # Simulate enrichment modifying entry.content and entry.content_hash
-    entry.content = "New rich full text from judgment PDF..."
-    entry.content_hash = "new_enriched_entry_hash_67890"
+    # Initially, entry is NOT stale: current analysis input hash matches analysis record
+    assert compute_analysis_input_hash(entry) == analysis.entry_content_hash
+
+    # Simulate enrichment modifying ONLY entry.content (PDF text layer)
+    # Entry.content_hash MUST NOT change because URL, title, excerpt are unchanged!
+    entry.content = "New rich full text from judgment PDF containing 15,000 characters..."
     db_session.commit()
 
-    # Verify that EntryAnalysis.entry_content_hash did NOT change!
+    # Ingestion deduplication hash is strictly preserved
+    assert entry.content_hash == ingestion_hash
+
+    # Historical EntryAnalysis.entry_content_hash did NOT change!
     db_session.refresh(analysis)
-    assert analysis.entry_content_hash == "historical_analysis_content_hash_12345"
-    assert entry.content_hash != analysis.entry_content_hash
+    assert analysis.entry_content_hash == initial_analysis_hash
+
+    # Current analysis input hash has changed with the new content
+    new_analysis_hash = compute_analysis_input_hash(entry)
+    assert new_analysis_hash != initial_analysis_hash
+
+    # Stale analysis condition is satisfied:
+    # compute_analysis_input_hash(current_entry) != analysis.entry_content_hash
+    is_stale = compute_analysis_input_hash(entry) != analysis.entry_content_hash
+    assert is_stale is True
+
+
+def test_hash_computation_functions_distinction():
+    """Verify compute_ingestion_dedupe_hash and compute_analysis_input_hash semantics."""
+    title = "Test Judgment"
+    url = "https://example.com/test?utm_source=rss"
+    content = "Detailed judgment text..."
+
+    dedupe_hash_1 = compute_ingestion_dedupe_hash("  Test Judgment  ", "https://example.com/test  ")
+    dedupe_hash_2 = compute_ingestion_dedupe_hash("Test Judgment", "https://example.com/test")
+    # Clean URL and title normalization (whitespace stripping) ensures matching dedupe hash
+    assert dedupe_hash_1 == dedupe_hash_2
+
+    entry = Entry(
+        title=title,
+        url=url,
+        content=content,
+        content_hash=dedupe_hash_1,
+    )
+    analysis_hash = compute_analysis_input_hash(entry)
+
+    # Ingestion dedupe hash and analysis input hash serve different purposes and have different values
+    assert dedupe_hash_1 != analysis_hash
+
