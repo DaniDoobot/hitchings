@@ -27,24 +27,46 @@ def compile_uuid_sqlite(type_, compiler, **kw):
 def verify_test_db_url_is_safe(url_str: str) -> None:
     """Validate that a database URL strictly targets an isolated test environment.
 
-    Fail-closed:
-    Rejects any URL that does not explicitly target an in-memory SQLite database
-    or a dedicated database containing 'test' in its name/path.
+    Fail-closed structural validation:
+    1. For SQLite: in-memory ('', ':memory:', 'file::memory:') or file containing 'test'.
+    2. For external databases (PostgreSQL, MySQL, etc.): the DATABASE NAME component
+       must unequivocally be a test database (e.g. starts with 'test_' or ends with '_test' or '_tests').
+       Having 'test' in username, password, host, or query parameters is strictly REJECTED.
 
     Raises:
         RuntimeError: if the URL does not match safe test patterns.
     """
-    low = url_str.lower()
-    is_safe = (
-        low.startswith("sqlite:///:memory:")
-        or ":memory:" in low
-        or "test" in low
-    )
+    from sqlalchemy.engine import make_url
+
+    try:
+        parsed = make_url(url_str)
+    except Exception as exc:
+        raise RuntimeError(f"SECURITY / LEDGER VIOLATION: Invalid database URL format: {exc}") from exc
+
+    backend = parsed.get_backend_name()
+    database = (parsed.database or "").strip().lower()
+
+    is_safe = False
+    if backend == "sqlite":
+        if database in ("", ":memory:", "file::memory:") or not database:
+            is_safe = True
+        elif "test" in database:
+            is_safe = True
+    else:
+        if database and (
+            database.startswith("test_")
+            or database.endswith("_test")
+            or database.endswith("_tests")
+            or database in ("test", "tests")
+        ):
+            is_safe = True
+
     if not is_safe:
+        safe_repr = f"backend='{backend}', database='{database}'"
         raise RuntimeError(
-            "SECURITY / LEDGER VIOLATION: Test database URL does not match safe test patterns. "
-            "Tests must strictly run against an isolated test database (e.g. SQLite in-memory or a database containing 'test'). "
-            "Aborting test execution to prevent contamination of development or production database."
+            f"SECURITY / LEDGER VIOLATION: Database target ({safe_repr}) does not match safe test patterns. "
+            f"Tests must strictly run against an isolated test database (e.g. SQLite in-memory or a database name ending with '_test'). "
+            f"Aborting test execution to prevent contamination of development or production database."
         )
 
 

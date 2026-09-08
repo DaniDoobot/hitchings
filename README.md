@@ -658,18 +658,53 @@ Durante el desarrollo inicial del Bloque 7E, antes de formalizar la regla de con
 
 ---
 
-## 18. Funcionalidades Deliberadamente Pendientes
+---
 
-Para respetar la delimitación estricta de fases, en este Bloque 7E **NO** se han implementado:
+## 18. Pipeline de Robustez de Evidencia v4 y Validación de Livronsa (Bloque 7F)
+
+### 1. Protocolo Extract-First y Preferencia de Cláusulas Cortas
+Tras evidenciarse en el Bloque 7E que el modelo podía incurrir en paráfrasis sutiles de una sola palabra al intentar citar oraciones compuestas extensas (caso *Livronsa* en v3), el Bloque 7F implementó los prompts v4 (`observatory_triage:v4` y `observatory_deep_analysis:v4`) bajo dos principios rectores:
+1. **Protocolo Extract-First (Citar primero, analizar después):** El LLM recibe instrucciones terminantes de localizar y extraer la cita literal exacta del texto fuente antes de redactar la justificación de triage, el resumen o los puntos clave.
+2. **Preferencia por Cláusulas Cortas (5 a 25 palabras):** Instrucción específica para seleccionar proposiciones o incisos continuos y precisos (orientativamente entre 20 y 180 caracteres), evitando unir fragmentos discontinuos, párrafos completos o cadenas de subordinadas que multiplican el riesgo de desajuste.
+3. **Cero Relajación del `GroundingValidator`:** El validador determinista de citas no sufrió ninguna relajación ni tolerancia difusa; mantuvo su verificación estricta carácter a carácter.
+
+### 2. Resultados de la Validación Controlada en *Livronsa* (C-60/25)
+La validación se ejecutó exclusivamente sobre la entrada de *Livronsa* (`27c1a107-ebfe-40d0-ba9e-d7d399c3c565`, 29.077 caracteres) mediante el script `scripts/run_v4_livronsa_validation.py`:
+
+| Dimensión | Livronsa v2 | Livronsa v3 | Livronsa v4 (Bloque 7F) |
+| :--- | :--- | :--- | :--- |
+| **Pipeline Version** | `v2` | `v3` | `v4` |
+| **Estado del Análisis** | `completed` | `failed` | **`completed`** |
+| **Score de Relevancia** | 95/100 (`relevant`) | 95/100 (`relevant`) | **95/100 (`relevant`)** |
+| **Confianza** | 0.95 | 0.95 | **0.98** |
+| **Verificación de Citas** | N/A (sin citas) | Falló en cita 1 de deep | **100.0% (10/10 citas verificadas)** |
+| **Citas Triage** | 0 | 2 | **2 citas** (140 y 205 caracteres) |
+| **Citas Summary** | 0 | 3 | **3 citas** (105, 196 y 205 caracteres) |
+| **Citas Key Points** | 0 | 4 | **5 citas** (todas verificadas) |
+| **Media caracteres / cita** | N/A | 321.4 chars | **205.2 chars** (min=105, max=286) |
+| **Media palabras / cita** | N/A | 48.2 words | **31.9 words** (min=18, max=49) |
+| **Llamadas API** | 2 | 2 | **2 (1 triage + 1 deep)** |
+| **Coste Incremental** | $0.019777 | $0.018243 | **$0.023601** (presupuesto máx: $0.05) |
+
+### 3. Preservación del Histórico y Contabilidad
+- La entrada histórica fallida de *Livronsa* v3 y el análisis v2 permanecen intactos en la base de datos PostgreSQL con propósitos de auditoría e investigación retrospectiva.
+- Total de prompts registrados en PostgreSQL: **8** (v1: 2, v2: 2, v3: 2, v4: 2), todos inmutables.
+- Total de llamadas registradas en PostgreSQL: **46** (45 completadas, 1 fallida v3).
+
+---
+
+## 19. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7F **NO** se han implementado:
 1. Análisis de las 59 Entries restantes sin procesar.
-2. Re-análisis del caso Livronsa (su fallo por paráfrasis detectada permanece como baseline de auditoría).
-3. Creación de prompts v4.
+2. Modificación de prompts v1, v2 o v3 históricos.
+3. Creación de prompts v5.
 4. Scheduler en segundo plano (Celery, APScheduler, cron).
 5. Interfaz gráfica o frontend.
 
 ---
 
-## 19. Roadmap
+## 20. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -684,7 +719,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7E **NO** se ha
 - [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales.
 - [x] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline, prompts v3 y validación controlada de 8 entries.
 - [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real.
-- [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene. *(Cerrado)*
+- [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene.
+- [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas). *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.

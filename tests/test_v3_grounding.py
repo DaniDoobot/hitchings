@@ -764,3 +764,87 @@ def test_prompt_immutability_enforced_on_seed_conflict(db_session: Session):
     # 4. Verify DB row was NOT modified
     db_session.refresh(existing_p)
     assert existing_p.config == original_config
+
+
+def test_v4_prompts_seeded_with_correct_configuration(db_session: Session):
+    """Bloque 7F: Prompts v4 must be properly seeded with extract-first protocol and correct configs."""
+    from scripts.seed_analysis_prompts import seed_analysis_prompts
+
+    seeded = seed_analysis_prompts(db=db_session)
+    assert len(seeded) == 8
+
+    triage_v4 = (
+        db_session.query(AnalysisPromptVersion)
+        .filter(AnalysisPromptVersion.code == "observatory_triage", AnalysisPromptVersion.version == 4)
+        .first()
+    )
+    assert triage_v4 is not None
+    assert triage_v4.stage == "triage"
+    assert triage_v4.response_schema_version == "v3"
+    assert triage_v4.active is True
+    assert triage_v4.config == {
+        "thinking_level": "low",
+        "max_output_tokens": 1024,
+        "temperature": 0.0,
+        "structured_output_schema": "TriageAnalysisResultV3",
+    }
+    assert "EXTRACT-FIRST" in triage_v4.system_prompt
+    assert "COPIA LITERAL VERBATIM AL 100%" in triage_v4.system_prompt
+    assert "CLÁUSULAS CORTAS" in triage_v4.system_prompt
+
+    deep_v4 = (
+        db_session.query(AnalysisPromptVersion)
+        .filter(AnalysisPromptVersion.code == "observatory_deep_analysis", AnalysisPromptVersion.version == 4)
+        .first()
+    )
+    assert deep_v4 is not None
+    assert deep_v4.stage == "deep_analysis"
+    assert deep_v4.response_schema_version == "v3"
+    assert deep_v4.active is True
+    assert deep_v4.config == {
+        "thinking_level": "medium",
+        "max_output_tokens": 4096,
+        "temperature": 0.0,
+        "structured_output_schema": "DeepAnalysisResultV3",
+    }
+    assert "EXTRACT-FIRST" in deep_v4.system_prompt
+    assert "COPIA LITERAL VERBATIM AL 100%" in deep_v4.system_prompt
+    assert "CLÁUSULAS CORTAS" in deep_v4.system_prompt
+
+
+def test_v4_prompt_immutability_enforced_on_seed_conflict(db_session: Session):
+    """Bloque 7F: Prompt immutability guard must protect v4 prompts from tampering."""
+    from scripts.seed_analysis_prompts import (
+        PromptVersionImmutabilityError,
+        PROMPT_DEFINITIONS,
+        seed_analysis_prompts,
+    )
+
+    seed_analysis_prompts(db=db_session)
+    deep_v4 = (
+        db_session.query(AnalysisPromptVersion)
+        .filter(AnalysisPromptVersion.code == "observatory_deep_analysis", AnalysisPromptVersion.version == 4)
+        .first()
+    )
+    assert deep_v4 is not None
+    original_config = dict(deep_v4.config)
+
+    deep_def_idx = next(
+        i for i, p in enumerate(PROMPT_DEFINITIONS)
+        if p["code"] == "observatory_deep_analysis" and p["version"] == 4
+    )
+    saved_def = dict(PROMPT_DEFINITIONS[deep_def_idx])
+    tampered_def = dict(saved_def)
+    tampered_def["config"] = {**saved_def["config"], "thinking_level": "high"}
+    PROMPT_DEFINITIONS[deep_def_idx] = tampered_def
+
+    try:
+        with pytest.raises(PromptVersionImmutabilityError) as exc_info:
+            seed_analysis_prompts(db=db_session)
+        assert "Immutability conflict for prompt version 'observatory_deep_analysis:v4'" in str(exc_info.value)
+    finally:
+        PROMPT_DEFINITIONS[deep_def_idx] = saved_def
+
+    db_session.refresh(deep_v4)
+    assert deep_v4.config == original_config
+

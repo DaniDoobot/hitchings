@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.db.session import SessionLocal
+from app.db.session import engine as app_engine
 from app.models.analysis import AnalysisCall, EntryAnalysis, AnalysisPromptVersion
 from app.models.entry import Entry
 from app.models.source import Source, SourceType
@@ -23,18 +23,20 @@ from tests.conftest import test_engine, verify_test_db_url_is_safe
 def test_pytest_uses_isolated_test_database():
     """Verify that test_engine is an in-memory SQLite database, completely isolated from PostgreSQL."""
     url = str(test_engine.url)
-    assert url == "sqlite:///:memory:" or ":memory:" in url or "test" in url.lower()
+    assert url == "sqlite:///:memory:" or ":memory:" in url
     assert test_engine.url.drivername.startswith("sqlite")
 
 
 def test_fail_closed_guard_rejects_unsafe_db_urls():
-    """Verify that verify_test_db_url_is_safe aborts on production/dev database URLs."""
-    # Safe test URLs
+    """Verify that verify_test_db_url_is_safe performs structural validation on database name."""
+    # 1. Safe test URLs
     verify_test_db_url_is_safe("sqlite:///:memory:")
+    verify_test_db_url_is_safe("sqlite://")
     verify_test_db_url_is_safe("postgresql+psycopg2://user:pass@localhost:5432/hitchings_test")
-    verify_test_db_url_is_safe("postgresql://user:pass@host:5432/my_test_db")
+    verify_test_db_url_is_safe("postgresql://user:pass@host:5432/test_hitchings")
+    verify_test_db_url_is_safe("postgresql://user:pass@host:5432/hitchings_tests")
 
-    # Unsafe / production URLs must raise RuntimeError without leaking secrets
+    # 2. Unsafe production/development URLs must be strictly rejected
     unsafe_urls = [
         "postgresql+psycopg2://hitchings:secretpass@localhost:5432/hitchings",
         "postgresql://admin:prodpass@db.production.internal:5432/hitchings_prod",
@@ -44,22 +46,33 @@ def test_fail_closed_guard_rejects_unsafe_db_urls():
         with pytest.raises(RuntimeError) as exc_info:
             verify_test_db_url_is_safe(bad_url)
         assert "SECURITY / LEDGER VIOLATION" in str(exc_info.value)
-        # Verify credentials are not printed in the error message
+        # Verify credentials are not leaked in error messages
         assert "secretpass" not in str(exc_info.value)
         assert "prodpass" not in str(exc_info.value)
 
+    # 3. URLs where 'test' is only in username, password, host, or query param must be REJECTED
+    deceptive_urls = [
+        "postgresql://test_user:pass@localhost:5432/hitchings",
+        "postgresql://user:test_pass@localhost:5432/hitchings",
+        "postgresql://user:pass@test-host.internal:5432/hitchings",
+        "postgresql://user:pass@localhost:5432/hitchings?env=test",
+    ]
+    for dec_url in deceptive_urls:
+        with pytest.raises(RuntimeError) as exc_info:
+            verify_test_db_url_is_safe(dec_url)
+        assert "SECURITY / LEDGER VIOLATION" in str(exc_info.value)
 
-def test_test_records_never_persist_to_real_postgresql(db_session: Session):
-    """Verify that records created in db_session (test DB) do NOT exist in PostgreSQL SessionLocal."""
-    # 1. Count existing records in real DB before test action
-    real_db = SessionLocal()
-    try:
-        initial_real_calls = real_db.query(AnalysisCall).count()
-        initial_real_eas = real_db.query(EntryAnalysis).count()
-    finally:
-        real_db.close()
 
-    # 2. Create a synthetic test entry, analysis, and call inside the test session
+def test_test_session_is_strictly_bound_to_isolated_engine(db_session: Session):
+    """Verify that db_session is bound strictly to test_engine and NOT the production/dev app_engine."""
+    # Ensure db_session is bound to test_engine
+    bind = db_session.get_bind()
+    assert bind is not app_engine
+    bind_engine = getattr(bind, "engine", bind)
+    assert str(bind_engine.url).startswith("sqlite")
+    assert bind.dialect.name == "sqlite"
+
+    # Create synthetic test entities inside test_engine
     src = Source(name="Synthetic Test Source", type=SourceType.WEBSITE, provider="native", url="https://synthetic.test/")
     db_session.add(src)
     db_session.flush()
@@ -80,7 +93,7 @@ def test_test_records_never_persist_to_real_postgresql(db_session: Session):
     ea = EntryAnalysis(
         entry_id=entry.id,
         matrix_id=matrix.id,
-        pipeline_version="v3",
+        pipeline_version="v4",
         status="completed",
         matrix_snapshot={"code": matrix.code, "name": matrix.name},
         matrix_snapshot_hash="synth_hash",
@@ -113,18 +126,7 @@ def test_test_records_never_persist_to_real_postgresql(db_session: Session):
     db_session.add(synthetic_call)
     db_session.commit()
 
-    # 3. Verify it exists in db_session (test DB)
-    assert db_session.query(AnalysisCall).filter(AnalysisCall.id == synthetic_call.id).first() is not None
-
-    # 4. Verify it DOES NOT exist in the real PostgreSQL database
-    real_db_check = SessionLocal()
-    try:
-        found_in_real = real_db_check.query(AnalysisCall).filter(AnalysisCall.id == synthetic_call.id).first()
-        assert found_in_real is None, "Contamination detected: synthetic test call was found in real PostgreSQL DB!"
-
-        current_real_calls = real_db_check.query(AnalysisCall).count()
-        current_real_eas = real_db_check.query(EntryAnalysis).count()
-        assert current_real_calls == initial_real_calls, "Real DB AnalysisCall count changed during test execution!"
-        assert current_real_eas == initial_real_eas, "Real DB EntryAnalysis count changed during test execution!"
-    finally:
-        real_db_check.close()
+    # Verify it exists in db_session (test DB)
+    saved = db_session.query(AnalysisCall).filter(AnalysisCall.id == synthetic_call.id).first()
+    assert saved is not None
+    assert saved.provider == "mock"
