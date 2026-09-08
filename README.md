@@ -721,16 +721,41 @@ Se implementó un planificador en modo estrictamente **dry-run** (sin llamadas a
 - **Con análisis v4 vigente:** 1 entrada (*Livronsa*).
 - **Pendientes de baseline v4:** 79 entradas (59 nunca analizadas + 20 analizadas previamente sin v4).
 - **Volumen textual pendiente:** 1.871.834 caracteres (65 texto completo, 14 resúmenes oficiales, 0 insuficientes).
-- **Estimación de coste orientativa (basada en históricos locales):**
-  - LOW: ~$0.6650 (relevancia 35%, 106 llamadas).
-  - EXPECTED: ~$0.7519 (relevancia 48%, 117 llamadas).
-  - HIGH: ~$1.0605 (relevancia 65%, 130 llamadas).
+- **Estimación dual de costes y límite de seguridad:** Véase Bloque 7G.1.
 
 ---
 
-## 20. Funcionalidades Deliberadamente Pendientes
+## 20. Auditoría de Pricing, Estimación Dual y Diagnóstico de IDs (Bloque 7G.1)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7G **NO** se han implementado:
+### 1. Auditoría de Tarifas de Gemini y Corrección de Divergencia
+- **Tarifas reales configuradas:** Se verificó que `Settings` en `app.core.config` y el cálculo de costes en `GeminiAPIProvider` han utilizado en todo momento las tarifas oficiales de **$0.75 / 1M tokens de entrada** y **$3.75 / 1M tokens de salida** (que rigen hasta el 2026-12-31, duplicándose a $1.50 / $7.50 a partir del 2027-01-01).
+- **Auditoría del ledger de llamadas:** Se recalcularon las 46 llamadas históricas persistidas en PostgreSQL con dichas tarifas, verificando que el total registrado de **$0.291798** coincide exactamente con la fórmula configurada (discrepancia máxima de $0.0000005 por llamada atribuible a redondeo flotante). La mención previa a $0.15/$0.60 fue únicamente una errata narrativa en un texto descriptivo del planner sin impacto en la contabilidad.
+- **Fuente única de verdad:** `scripts/plan_v4_backfill.py` se actualizó para obtener las tarifas dinámicamente de `get_settings()` sin ningún valor quemado (*hardcoded*).
+
+### 2. Modelo Dual de Estimación para las 79 Entradas Pendientes
+El planificador incorpora dos metodologías complementarias:
+1. **Método A (Coste Histórico Observado por Fuente):**
+   - LOW (35% relevancia): $0.6657 (~107 llamadas)
+   - EXPECTED (48% relevancia): $0.7525 (~117 llamadas)
+   - HIGH (65% relevancia): $1.0392 (~130 llamadas)
+2. **Método B (Modelo Fino por Conteo Textual y Tokens):**
+   - LOW (35% relevancia, 1500 out tokens): $0.7932
+   - EXPECTED (48% relevancia, 2000 out tokens): $0.9949
+   - HIGH (65% relevancia, 2800 out tokens): $1.3603
+- **Explicación de la divergencia (+32% en EXPECTED):** El benchmark histórico de 20 entradas incluía resoluciones del CAT breves (~200 caracteres de resumen). Sin embargo, entre las 59 entradas pendientes no analizadas figuran 5 sentencias del CAT EWCA enriquecidas con texto íntegro (55.000 a 84.000 caracteres, ~15k-22k tokens cada una). El Método B modela directamente esta carga textual real, por lo que constituye la previsión más precisa.
+- **Proyección a tarifas 2027 ($1.50 / $7.50):** LOW: $1.5863, EXPECTED: $1.9899, HIGH: $2.7206.
+- **Límite de seguridad duro (Fail-Closed Budget):** Se fija un techo de seguridad de **$2.0000** para autorizaciones futuras de ejecución del backfill.
+
+### 3. Aclaración Inequívoca de Identificadores (IDs)
+Se auditó y diferenció la semántica de identificadores para evitar confusiones de diagnóstico:
+- **`entry_id: c9e2a041-b66e-4e67-9d1b-090b6bfc6943`:** Noticia de la Comisión Europea ("Commission adopts EU Guidelines on exclusionary abuses of dominance"). Su análisis histórico de smoke test v2 es `analysis_id: 5ea42a63-adae-404b-b2e7-77aad0f4f043` (completed, score 95).
+- **`entry_id: c119efb6-ecde-48c6-9a04-490becb6f176`:** Resolución CAT 67 (*Dr. Rachael Kent v Apple*). Sus análisis históricos reales son `analysis_id: 255f9570-e3a9-4656-9da0-f2ad0d0fd1c4` (v2, stale por tener 32 chars) y `analysis_id: 3a16fccc-d1f9-4ab6-9a96-1885bb326c87` (v3, current con 15.522 chars).
+
+---
+
+## 21. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7G.1 **NO** se han implementado:
 1. Llamadas a Gemini o ejecución del backfill v4 (solo script de planificación dry-run).
 2. Modificación de prompts v1, v2, v3 o v4.
 3. Creación de prompts v5.
@@ -740,7 +765,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 7G **NO** se ha
 
 ---
 
-## 21. Roadmap
+## 22. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -757,7 +782,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7G **NO** se ha
 - [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real.
 - [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene.
 - [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas).
-- [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4. *(Cerrado)*
+- [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4.
+- [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.

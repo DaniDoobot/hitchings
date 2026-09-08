@@ -13,6 +13,8 @@ def test_default_settings() -> None:
     assert settings.BRIGHTDATA_SOFT_LIMIT == 4500
     assert settings.BRIGHTDATA_ALLOW_PAID_USAGE is False
     assert settings.APIFY_ENABLED is False
+    assert settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS == 0.75
+    assert settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS == 3.75
 
 
 def test_custom_settings_override() -> None:
