@@ -1,13 +1,14 @@
-"""Benchmark script: controlled AI analysis run on 20 selected Entries.
+"""Benchmark script: controlled AI analysis run on 20 unanalysed Entries.
 
-Selects the 5 most recent Entries per Source (deterministic) and runs the
+Selects the 5 most recent unanalysed Entries per Source (deterministic) and runs the
 triage -> deep pipeline against Gemini Developer API.
 
 SAFETY:
   - Requires --confirm-real-calls to make actual Gemini API calls.
   - Without that flag: shows preflight and sample selection only (dry-run mode).
   - ANALYSIS_PROVIDER must be 'gemini_api' for real calls.
-  - Budget hard stop: aborts before each new Entry if cost >= --max-usd.
+  - Budget hard stop: aborts before each new Entry if cost >= --max-usd (starts at $0.00 for this run).
+  - Metrics isolation: benchmark metrics are strictly isolated by benchmark_run_id.
 
 Usage:
     # Dry-run (no API calls, shows what would be done):
@@ -39,10 +40,11 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
-from app.models.analysis import AnalysisPromptVersion, EntryAnalysis
+from app.models.analysis import AnalysisCall, AnalysisPromptVersion, EntryAnalysis
 from app.models.entry import Entry
 from app.models.source import Source
 from app.models.tracking import TrackingMatrix
+from app.providers.ai.gemini_api import GeminiAPIProvider
 from app.services.analysis_pipeline_service import AnalysisPipelineService
 
 logging.basicConfig(
@@ -52,7 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger("benchmark")
 
 
-SAMPLE_STRATEGY = "latest_5_per_source"
+SAMPLE_STRATEGY = "latest_5_unanalysed_per_source"
 ENTRIES_PER_SOURCE = 5
 
 
@@ -85,26 +87,35 @@ def print_separator(char: str = "-", width: int = 100) -> None:
 # ---------------------------------------------------------------------------
 
 def select_sample(db: Session) -> list[Entry]:
-    """Select the 5 most recent Entries per Source, deterministically ordered."""
+    """Select the 5 most recent unanalysed Entries per Source, deterministically ordered."""
     sources = db.query(Source).order_by(Source.name).all()
     if not sources:
         logger.error("No Sources found in database.")
         return []
 
+    analysed_entry_ids_subquery = select(EntryAnalysis.entry_id).scalar_subquery()
+
     selected: list[Entry] = []
     for source in sources:
         entries = (
             db.query(Entry)
-            .filter(Entry.source_id == source.id)
+            .filter(
+                Entry.source_id == source.id,
+                ~Entry.id.in_(analysed_entry_ids_subquery)
+            )
             .options(joinedload(Entry.source))
-            .order_by(Entry.published_at.desc().nullslast(), Entry.created_at.desc())
+            .order_by(Entry.published_at.desc().nullslast(), Entry.created_at.desc(), Entry.id.asc())
             .limit(ENTRIES_PER_SOURCE)
             .all()
         )
         selected.extend(entries)
 
     selected.sort(
-        key=lambda e: (e.source.name if e.source else "", -(e.published_at.timestamp() if e.published_at else 0))
+        key=lambda e: (
+            e.source.name if e.source else "",
+            -(e.published_at.timestamp() if e.published_at else 0),
+            str(e.id)
+        )
     )
     return selected
 
@@ -136,26 +147,26 @@ def print_preflight(
     print_separator("=")
     print("  HITCHINGS - BENCHMARK PREFLIGHT")
     print_separator("=")
-    print(f"  Provider:               {settings.ANALYSIS_PROVIDER}")
-    print(f"  Model:                  {settings.GEMINI_MODEL}")
+    print(f"  Provider:                 {settings.ANALYSIS_PROVIDER}")
+    print(f"  Model:                    {settings.GEMINI_MODEL}")
     has_key = bool(settings.GEMINI_API_KEY.strip()) if settings.GEMINI_API_KEY else False
-    print(f"  API key configured:     {'YES' if has_key else 'NO (not configured)'}")
-    print(f"  Thinking TRIAGE:        {settings.ANALYSIS_TRIAGE_THINKING_LEVEL}")
-    print(f"  Thinking DEEP:          {settings.ANALYSIS_DEEP_THINKING_LEVEL}")
+    print(f"  API key configured:       {'YES' if has_key else 'NO (not configured)'}")
+    print(f"  Thinking TRIAGE:          {settings.ANALYSIS_TRIAGE_THINKING_LEVEL}")
+    print(f"  Thinking DEEP:            {settings.ANALYSIS_DEEP_THINKING_LEVEL}")
     print(f"  Max input chars (triage): {settings.ANALYSIS_TRIAGE_MAX_INPUT_CHARS:,}")
     print(f"  Max input chars (deep):   {settings.ANALYSIS_DEEP_MAX_INPUT_CHARS:,}")
     print_separator()
-    print(f"  Pricing (input):        ${settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
-    print(f"  Pricing (output):       ${settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
-    print(f"  Budget limit:           {fmt_usd(max_usd)}")
+    print(f"  Pricing (input):          ${settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
+    print(f"  Pricing (output):         ${settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
+    print(f"  Benchmark Budget limit:   {fmt_usd(max_usd)}")
     print_separator()
-    print(f"  Sample strategy:        {SAMPLE_STRATEGY} ({ENTRIES_PER_SOURCE} per Source)")
+    print(f"  Sample strategy:          {SAMPLE_STRATEGY} ({ENTRIES_PER_SOURCE} per Source)")
     total_chars = sum(len(e.content or "") for e in entries)
     max_chars = max((len(e.content or "") for e in entries), default=0)
-    print(f"  Entries selected:       {len(entries)}")
-    print(f"  Total content chars:    {total_chars:,}")
-    print(f"  Max document chars:     {max_chars:,}")
-    print(f"  Real calls mode:        {'YES [REAL API CALLS]' if real_calls else 'NO (dry-run)'}")
+    print(f"  Entries selected:         {len(entries)}")
+    print(f"  Total content chars:      {total_chars:,}")
+    print(f"  Max document chars:       {max_chars:,}")
+    print(f"  Real calls mode:          {'YES [REAL API CALLS]' if real_calls else 'NO (dry-run)'}")
     print_separator("=")
 
 
@@ -227,7 +238,7 @@ def resolve_matrix(db: Session) -> TrackingMatrix:
 
 def print_results_table(results: list[dict]) -> None:
     print_separator("=")
-    print("  BENCHMARK RESULTS")
+    print("  BENCHMARK RESULTS TABLE")
     print_separator("=")
     cols = (
         f"  {'#':<3} {'Source':<20} {'Score':>5} {'Status':<14} {'Conf':>5} "
@@ -258,38 +269,64 @@ def print_results_table(results: list[dict]) -> None:
     print_separator()
 
 
-def print_textual_results(results: list[dict]) -> None:
+def print_detailed_results(results: list[dict]) -> None:
+    print_separator("=")
+    print("  INDIVIDUAL DETAILED RESULTS")
+    print_separator("=")
     for r in results:
-        if r.get("ea_status") == "failed":
-            continue
-        relevance = r.get("relevance_status")
+        status = r.get("relevance_status")
+        idx = r["idx"]
+        src = r.get("source", "")
+        title = r.get("title", "")
+        ea_id = r.get("entry_analysis_id", "-")
+
         print_separator("-")
-        print(f"  [{r['idx']}] {r.get('source', '')} - {short_title(r.get('title'), 80)}")
-        print(f"      Score: {r.get('relevance_score')} | Status: {relevance} | "
-              f"Primary topic: {r.get('primary_topic') or '-'}")
+        print(f"  [{idx}/20] {src}")
+        print(f"  Title:              {title}")
+        print(f"  Entry ID:           {r.get('entry_id')}")
+        print(f"  EntryAnalysis ID:   {ea_id}")
+        print(f"  Status:             {r.get('ea_status')}")
+        print(f"  Relevance Score:    {r.get('relevance_score')}")
+        print(f"  Relevance Status:   {status}")
+        print(f"  Confidence:         {r.get('confidence')}")
+        print(f"  Primary Topic:      {r.get('primary_topic') or '-'}")
+        secondaries = [c for c in (r.get("topic_codes") or []) if c != r.get("primary_topic")]
+        print(f"  Secondary Topics:   {secondaries if secondaries else '[]'}")
+        print(f"  Reason:             {r.get('reason') or '-'}")
 
-        if relevance == "relevant":
-            reason = r.get("reason") or "-"
-            summary = r.get("summary") or "-"
-            key_points = r.get("key_points") or []
-            print(f"\n      Reason:  {reason}")
-            print(f"\n      Summary:\n      {summary}")
-            if key_points:
-                print("\n      Key points:")
-                for kp in key_points:
-                    print(f"        * {kp}")
-        elif relevance == "uncertain":
-            reason = r.get("reason") or "-"
-            topics = r.get("topic_codes") or []
-            print(f"\n      Reason:  {reason}")
-            print(f"      Topics:  {', '.join(topics) or '-'}")
+        print(f"\n  TRIAGE Metrics:")
+        print(f"    Input Tokens:           {r.get('triage_input_tokens', 0):,}")
+        print(f"    Output Text Tokens:     {r.get('triage_text_tokens', 0):,}")
+        print(f"    Output Thought Tokens:  {r.get('triage_thought_tokens', 0):,}")
+        print(f"    Output Billable Tokens: {r.get('triage_output_tokens', 0):,}")
+        print(f"    Cost:                   {fmt_usd(r.get('triage_cost', 0.0))}")
+        print(f"    Latency:                {fmt_ms(r.get('triage_latency_ms'))}")
+
+        if r.get("deep_called"):
+            print(f"\n  DEEP ANALYSIS Metrics:")
+            print(f"    Input Tokens:           {r.get('deep_input_tokens', 0):,}")
+            print(f"    Output Text Tokens:     {r.get('deep_text_tokens', 0):,}")
+            print(f"    Output Thought Tokens:  {r.get('deep_thought_tokens', 0):,}")
+            print(f"    Output Billable Tokens: {r.get('deep_output_tokens', 0):,}")
+            print(f"    Cost:                   {fmt_usd(r.get('deep_cost', 0.0))}")
+            print(f"    Latency:                {fmt_ms(r.get('deep_latency_ms'))}")
+            print(f"\n  Summary:\n  {r.get('summary') or '-'}")
+            print(f"\n  Key Points:")
+            for kp in (r.get("key_points") or []):
+                print(f"    * {kp}")
         else:
-            reason = r.get("reason") or "-"
-            print(f"\n      Reason:  {reason}")
-    print_separator("-")
+            print(f"\n  DEEP ANALYSIS: Skipped (status={status})")
+
+        print(f"\n  Total Entry Cost:   {fmt_usd(r.get('total_cost', 0.0))}")
+    print_separator("=")
 
 
-def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: bool) -> None:
+def print_benchmark_aggregates(
+    results: list[dict],
+    benchmark_run_id: str,
+    budget_limit: float,
+    budget_stopped: bool,
+) -> None:
     total = len(results)
     relevant = sum(1 for r in results if r.get("relevance_status") == "relevant")
     uncertain = sum(1 for r in results if r.get("relevance_status") == "uncertain")
@@ -297,9 +334,24 @@ def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: b
     failed = sum(1 for r in results if r.get("ea_status") == "failed")
     triage_calls = total
     deep_calls = sum(1 for r in results if r.get("deep_called"))
-    total_input_tokens = sum(r.get("triage_input_tokens", 0) + r.get("deep_input_tokens", 0) for r in results)
-    total_output_tokens = sum(r.get("triage_output_tokens", 0) + r.get("deep_output_tokens", 0) for r in results)
-    total_cost = sum(r.get("total_cost", 0.0) for r in results)
+
+    triage_in = sum(r.get("triage_input_tokens", 0) for r in results)
+    triage_txt = sum(r.get("triage_text_tokens", 0) for r in results)
+    triage_thk = sum(r.get("triage_thought_tokens", 0) for r in results)
+    triage_billable_out = sum(r.get("triage_output_tokens", 0) for r in results)
+    triage_cost = sum(r.get("triage_cost", 0.0) for r in results)
+
+    deep_in = sum(r.get("deep_input_tokens", 0) for r in results)
+    deep_txt = sum(r.get("deep_text_tokens", 0) for r in results)
+    deep_thk = sum(r.get("deep_thought_tokens", 0) for r in results)
+    deep_billable_out = sum(r.get("deep_output_tokens", 0) for r in results)
+    deep_cost = sum(r.get("deep_cost", 0.0) for r in results)
+
+    total_in = triage_in + deep_in
+    total_txt = triage_txt + deep_txt
+    total_thk = triage_thk + deep_thk
+    total_billable_out = triage_billable_out + deep_billable_out
+    total_cost = triage_cost + deep_cost
     avg_cost = total_cost / total if total else 0.0
 
     triage_latencies = [r["triage_latency_ms"] for r in results if r.get("triage_latency_ms")]
@@ -307,38 +359,87 @@ def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: b
     avg_triage_lat = sum(triage_latencies) / len(triage_latencies) if triage_latencies else 0
     avg_deep_lat = sum(deep_latencies) / len(deep_latencies) if deep_latencies else 0
 
-    cost_by_source: dict[str, float] = {}
-    for r in results:
-        src = r.get("source") or "unknown"
-        cost_by_source[src] = cost_by_source.get(src, 0.0) + r.get("total_cost", 0.0)
-
     print_separator("=")
-    print("  BENCHMARK AGGREGATES")
+    print("  BENCHMARK AGGREGATES (ISOLATED TO THIS RUN)")
     print_separator("=")
-    print(f"  Total analyses:        {total}")
-    print(f"  Relevant:              {relevant}")
-    print(f"  Uncertain:             {uncertain}")
-    print(f"  Not relevant:          {not_relevant}")
-    print(f"  Failed:                {failed}")
+    print(f"  Benchmark Run ID:            {benchmark_run_id}")
+    print(f"  Total Analyses Processed:    {total}")
+    print(f"    - Relevant:                {relevant}")
+    print(f"    - Uncertain:               {uncertain}")
+    print(f"    - Not Relevant:            {not_relevant}")
+    print(f"    - Failed:                  {failed}")
     print_separator()
-    print(f"  Triage calls:          {triage_calls}")
-    print(f"  Deep calls:            {deep_calls}")
+    print(f"  Total Calls:                 {triage_calls + deep_calls}")
+    print(f"    - Triage Calls:            {triage_calls}")
+    print(f"    - Deep Calls:              {deep_calls}")
     print_separator()
-    print(f"  Total input tokens:    {total_input_tokens:,}")
-    print(f"  Total output tokens:   {total_output_tokens:,}")
-    print(f"  Total estimated cost:  {fmt_usd(total_cost)}")
-    print(f"  Avg cost per Entry:    {fmt_usd(avg_cost)}")
-    print(f"  Avg triage latency:    {avg_triage_lat:.0f}ms")
-    print(f"  Avg deep latency:      {avg_deep_lat:.0f}ms")
+    print(f"  Tokens Breakdown:")
+    print(f"    - Input Tokens:            {total_in:,} (triage: {triage_in:,}, deep: {deep_in:,})")
+    print(f"    - Output Text Tokens:      {total_txt:,} (triage: {triage_txt:,}, deep: {deep_txt:,})")
+    print(f"    - Output Thought Tokens:   {total_thk:,} (triage: {triage_thk:,}, deep: {deep_thk:,})")
+    print(f"    - Billable Output Tokens:  {total_billable_out:,} (triage: {triage_billable_out:,}, deep: {deep_billable_out:,})")
+    print(f"    - Total Tokens:            {total_in + total_billable_out:,}")
     print_separator()
-    print("  Cost by Source:")
-    for src, cost in sorted(cost_by_source.items()):
-        print(f"    {src:<40} {fmt_usd(cost)}")
+    print(f"  Cost Breakdown:")
+    print(f"    - Triage Cost:             {fmt_usd(triage_cost)}")
+    print(f"    - Deep Cost:               {fmt_usd(deep_cost)}")
+    print(f"    - TOTAL BENCHMARK COST:    {fmt_usd(total_cost)}")
+    print(f"    - Average Cost per Entry:  {fmt_usd(avg_cost)}")
     print_separator()
-    print(f"  Budget limit:          {fmt_usd(budget_limit)}")
-    print(f"  Budget used:           {fmt_usd(total_cost)}")
+    print(f"  Latency Averages:")
+    print(f"    - Average Triage Latency:  {avg_triage_lat:.0f}ms")
+    print(f"    - Average Deep Latency:    {avg_deep_lat:.0f}ms")
+    print_separator()
+    print(f"  Benchmark Budget Limit:      {fmt_usd(budget_limit)}")
+    print(f"  Benchmark Budget Used:       {fmt_usd(total_cost)}")
     if budget_stopped:
         print("  [!] BUDGET LIMIT REACHED - benchmark stopped early")
+    print_separator("=")
+
+
+def print_cost_by_source(results: list[dict]) -> None:
+    print_separator("=")
+    print("  COST & METRICS BREAKDOWN BY SOURCE")
+    print_separator("=")
+
+    by_src: dict[str, list[dict]] = {}
+    for r in results:
+        src = r.get("source") or "Unknown"
+        by_src.setdefault(src, []).append(r)
+
+    print(f"  {'Source':<32} {'Entries':>7} {'In-Tokens':>10} {'Out-Text':>9} {'Thoughts':>9} {'Billable-Out':>13} {'Total Cost':>12} {'Avg/Entry':>11}")
+    print_separator()
+    for src, items in sorted(by_src.items()):
+        cnt = len(items)
+        s_in = sum(i.get("triage_input_tokens", 0) + i.get("deep_input_tokens", 0) for i in items)
+        s_txt = sum(i.get("triage_text_tokens", 0) + i.get("deep_text_tokens", 0) for i in items)
+        s_thk = sum(i.get("triage_thought_tokens", 0) + i.get("deep_thought_tokens", 0) for i in items)
+        s_billable_out = sum(i.get("triage_output_tokens", 0) + i.get("deep_output_tokens", 0) for i in items)
+        s_cost = sum(i.get("total_cost", 0.0) for i in items)
+        avg = s_cost / cnt if cnt else 0.0
+        print(
+            f"  {src[:30]:<32} {cnt:>7} {s_in:>10,} {s_txt:>9,} {s_thk:>9,} {s_billable_out:>13,} {fmt_usd(s_cost):>12} {fmt_usd(avg):>11}"
+        )
+    print_separator("=")
+
+
+def print_global_usage(db: Session) -> None:
+    """Query and display the global cumulative usage across all runs in PostgreSQL."""
+    calls = db.query(AnalysisCall).filter(AnalysisCall.status == "completed").all()
+    total_calls = len(calls)
+    total_in = sum(c.input_tokens or 0 for c in calls)
+    total_out = sum(c.output_tokens or 0 for c in calls)
+    total_cost = sum(float(c.estimated_cost_usd or 0) for c in calls)
+    ea_count = db.query(EntryAnalysis).count()
+
+    print_separator("=")
+    print("  GLOBAL DATABASE USAGE (Smoke Test + Benchmark Combined)")
+    print_separator("=")
+    print(f"  Total EntryAnalyses in DB:    {ea_count}")
+    print(f"  Total Completed Calls in DB:  {total_calls}")
+    print(f"  Total Input Tokens:           {total_in:,}")
+    print(f"  Total Output Tokens:          {total_out:,}")
+    print(f"  Total Estimated Cost:         {fmt_usd(total_cost)}")
     print_separator("=")
 
 
@@ -372,7 +473,7 @@ async def run_benchmark(
     # Select sample
     entries = select_sample(db)
     if not entries:
-        print("\n  ERROR: No entries found. Run ingestion first.")
+        print("\n  ERROR: No unanalysed entries found. All entries may already be analysed.")
         sys.exit(1)
 
     print_preflight(settings, entries, max_usd, real_calls)
@@ -400,8 +501,6 @@ async def run_benchmark(
     print(f"  Deep prompt:    {deep_prompt.code}:v{deep_prompt.version} [{deep_prompt.id}]")
     print(f"  Matrix:         {matrix.code} [{matrix.id}]")
 
-    # Initialize pipeline
-    from app.providers.ai.gemini_api import GeminiAPIProvider
     provider = GeminiAPIProvider(settings=settings)
     pipeline = AnalysisPipelineService(provider=provider)
 
@@ -446,6 +545,7 @@ async def run_benchmark(
             results.append({
                 "idx": idx,
                 "entry_id": str(entry.id),
+                "entry_analysis_id": None,
                 "source": entry.source.name if entry.source else "?",
                 "title": entry.title,
                 "relevance_score": None,
@@ -457,11 +557,15 @@ async def run_benchmark(
                 "summary": None,
                 "key_points": [],
                 "triage_input_tokens": 0,
+                "triage_text_tokens": 0,
+                "triage_thought_tokens": 0,
                 "triage_output_tokens": 0,
                 "triage_cost": 0.0,
                 "triage_latency_ms": None,
                 "deep_called": False,
                 "deep_input_tokens": 0,
+                "deep_text_tokens": 0,
+                "deep_thought_tokens": 0,
                 "deep_output_tokens": 0,
                 "deep_cost": 0.0,
                 "deep_latency_ms": None,
@@ -477,14 +581,21 @@ async def run_benchmark(
 
         triage_in = triage_call.input_tokens or 0 if triage_call else 0
         triage_out = triage_call.output_tokens or 0 if triage_call else 0
+        triage_meta = triage_call.call_metadata or {} if triage_call else {}
+        triage_txt = triage_meta.get("output_text_tokens", triage_out)
+        triage_thk = triage_meta.get("output_thought_tokens", 0)
         triage_cost = float(triage_call.estimated_cost_usd or 0) if triage_call else 0.0
         triage_lat = triage_call.latency_ms if triage_call else None
+
         deep_in = deep_call.input_tokens or 0 if deep_call else 0
         deep_out = deep_call.output_tokens or 0 if deep_call else 0
+        deep_meta = deep_call.call_metadata or {} if deep_call else {}
+        deep_txt = deep_meta.get("output_text_tokens", deep_out)
+        deep_thk = deep_meta.get("output_thought_tokens", 0)
         deep_cost = float(deep_call.estimated_cost_usd or 0) if deep_call else 0.0
         deep_lat = deep_call.latency_ms if deep_call else None
-        entry_total_cost = triage_cost + deep_cost
 
+        entry_total_cost = triage_cost + deep_cost
         accumulated_cost += entry_total_cost
 
         topic_codes = [t.topic.code for t in analysis.topics if t.topic]
@@ -493,6 +604,7 @@ async def run_benchmark(
         results.append({
             "idx": idx,
             "entry_id": str(entry.id),
+            "entry_analysis_id": str(analysis.id),
             "source": entry.source.name if entry.source else "?",
             "title": entry.title,
             "relevance_score": analysis.relevance_score,
@@ -504,11 +616,15 @@ async def run_benchmark(
             "summary": analysis.summary,
             "key_points": analysis.key_points or [],
             "triage_input_tokens": triage_in,
+            "triage_text_tokens": triage_txt,
+            "triage_thought_tokens": triage_thk,
             "triage_output_tokens": triage_out,
             "triage_cost": triage_cost,
             "triage_latency_ms": triage_lat,
             "deep_called": deep_call is not None,
             "deep_input_tokens": deep_in,
+            "deep_text_tokens": deep_txt,
+            "deep_thought_tokens": deep_thk,
             "deep_output_tokens": deep_out,
             "deep_cost": deep_cost,
             "deep_latency_ms": deep_lat,
@@ -521,16 +637,26 @@ async def run_benchmark(
             f"         -> {status_icon} score={analysis.relevance_score} "
             f"status={analysis.relevance_status} "
             f"cost={fmt_usd(entry_total_cost)} "
-            f"budget_used={fmt_usd(accumulated_cost)}"
+            f"run_total={fmt_usd(accumulated_cost)}"
         )
 
+    # 1. Summary table
     print_results_table(results)
-    print_textual_results(results)
-    print_aggregates(results, max_usd, budget_stopped)
 
-    print(f"\n  [OK] Benchmark complete. Benchmark run ID: {benchmark_run_id}")
-    print("  Review results above before running any additional analyses.")
-    print("  DO NOT analyze the remaining 60 entries until you have reviewed these results.")
+    # 2. Detailed individual reports
+    print_detailed_results(results)
+
+    # 3. Benchmark aggregates (isolated to this run)
+    print_benchmark_aggregates(results, benchmark_run_id, max_usd, budget_stopped)
+
+    # 4. Cost and metrics breakdown by source
+    print_cost_by_source(results)
+
+    # 5. Global database cumulative usage
+    print_global_usage(db)
+
+    print(f"\n  [OK] Benchmark run {benchmark_run_id} completed successfully.")
+    print("  DO NOT analyze the remaining 59 entries until these results have been reviewed.")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +682,7 @@ def main() -> None:
         "--max-usd",
         type=float,
         default=None,
-        help="Maximum USD budget. Defaults to ANALYSIS_BENCHMARK_MAX_USD from settings.",
+        help="Maximum USD budget for this run. Defaults to ANALYSIS_BENCHMARK_MAX_USD from settings.",
     )
     args = parser.parse_args()
 

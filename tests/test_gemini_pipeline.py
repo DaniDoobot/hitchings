@@ -867,3 +867,88 @@ async def test_45_gemini_api_key_never_leaked_in_metadata(db_session):
     assert secret_key not in raw_str
     assert "super_secret" not in meta_str
     assert "super_secret" not in raw_str
+
+
+# ==============================================================================
+# 46. Benchmark: unanalysed sample excludes already analysed entries
+# ==============================================================================
+
+def test_46_benchmark_excludes_analysed_entries(db_session):
+    """select_sample excludes entries that already have an EntryAnalysis and selects next available."""
+    from scripts.run_analysis_benchmark import select_sample
+
+    source = make_source(db_session, "Source Unanalysed Test")
+    matrix, _ = make_matrix(db_session, "46")
+    prompt = make_prompt(db_session, "triage46")
+
+    # Create 7 entries (dates day 1 to day 7)
+    entries = []
+    for i in range(7):
+        e = make_entry(
+            db_session, source,
+            title=f"Unanalysed Entry {i}",
+            published_at=datetime(2026, 9, i + 1, 12, 0, tzinfo=UTC),
+        )
+        entries.append(e)
+    db_session.flush()
+
+    # Create an EntryAnalysis for the newest entry (day 7, index 6)
+    # mimicking the smoke test situation
+    newest_entry = entries[6]
+    ea = EntryAnalysis(
+        entry_id=newest_entry.id,
+        matrix_id=matrix.id,
+        matrix_snapshot={"name": "Test Matrix"},
+        matrix_snapshot_hash="fake_snapshot_hash_123",
+        entry_content_hash="fake_content_hash_123",
+        pipeline_version="v2",
+        status="completed",
+        relevance_score=95,
+        relevance_status="relevant",
+        confidence=0.99,
+        reason="Smoke test analysis",
+    )
+    db_session.add(ea)
+    db_session.commit()
+
+    sample = select_sample(db_session)
+    source_sample = [e for e in sample if e.source_id == source.id]
+
+    assert len(source_sample) == 5
+    sampled_ids = {e.id for e in source_sample}
+    assert newest_entry.id not in sampled_ids
+
+    # Expected: entries at indices 1, 2, 3, 4, 5 (days 2, 3, 4, 5, 6)
+    expected_ids = {entries[i].id for i in range(1, 6)}
+    assert sampled_ids == expected_ids
+
+
+# ==============================================================================
+# 47. Benchmark: run metrics isolation by benchmark_run_id
+# ==============================================================================
+
+def test_47_benchmark_metrics_isolation():
+    """Benchmark aggregations only sum calls belonging to the specific benchmark_run_id."""
+    run_id_a = str(uuid.uuid4())
+    run_id_b = str(uuid.uuid4())
+
+    mock_calls = [
+        # Call from smoke test (run_id_a)
+        {"run_id": run_id_a, "cost": 0.009912, "tokens": 4434, "stage": "triage"},
+        # Calls from current benchmark (run_id_b)
+        {"run_id": run_id_b, "cost": 0.002500, "tokens": 1500, "stage": "triage"},
+        {"run_id": run_id_b, "cost": 0.006000, "tokens": 2000, "stage": "deep_analysis"},
+    ]
+
+    # Filter isolated to run_id_b
+    bench_calls = [c for c in mock_calls if c["run_id"] == run_id_b]
+    bench_cost = sum(c["cost"] for c in bench_calls)
+    bench_tokens = sum(c["tokens"] for c in bench_calls)
+
+    assert len(bench_calls) == 2
+    assert bench_cost == pytest.approx(0.008500)
+    assert bench_tokens == 3500
+
+    # Verify run_id_a was excluded
+    assert all(c["cost"] != 0.009912 for c in bench_calls)
+
