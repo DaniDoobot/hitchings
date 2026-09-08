@@ -636,18 +636,24 @@ Una evidencia solo es jurídicamente válida si el campo de origen (`source_fiel
 
 ### 3. Política Infranqueable de No-Eliminación de Llamadas de IA
 Toda llamada real facturable a un proveedor de IA constituye un hecho histórico e inmutable de auditoría:
-- **Prohibición de borrado:** Ninguna llamada a un LLM puede eliminarse de la base de datos PostgreSQL (`AnalysisCall`, `EntryAnalysis`, `EntryAnalysisTopic`), independientemente de que se trate de un smoke test, un benchmark, una prueba de validación, una llamada fallida o un reintento.
+- **Prohibición de borrado:** Ninguna llamada real a un LLM puede eliminarse de la base de datos PostgreSQL (`AnalysisCall`, `EntryAnalysis`, `EntryAnalysisTopic`), independientemente de que se trate de un smoke test, un benchmark, una prueba de validación, una llamada fallida o un reintento.
 - **Trazabilidad:** Las llamadas pueden clasificarse mediante metadatos (`call_metadata`: `validation_run`, `benchmark`, `smoke_test`, `obsolete`, `superseded`), pero su registro físico permanece inalterable.
-- **Contabilidad de Costes (Cost Accounting):**
-  - **Database Recorded Cost:** Suma actual de `AnalysisCall.estimated_cost_usd` en la base de datos PostgreSQL ($0.268197 tras Bloque 7E).
-  - **Known Historical API Cost:** Coste real acumulado en el proveedor API, incluyendo ejecuciones de desarrollo previas a la congelación de la política de no-borrado ($\ge \$0.484013$). La facturación externa del proveedor constituye la fuente definitiva para reconciliación contable.
+- **Terminología y Contabilidad de Costes (Cost Accounting):**
+  - **Database Recorded Estimated Cost:** Suma actual de `AnalysisCall.estimated_cost_usd` en PostgreSQL ($0.268197 tras Bloque 7E). Todos los valores de coste almacenados internamente son **estimaciones** computadas a partir de `usage_metadata` (tokens de entrada, salida y razonamiento) multiplicados por las tarifas configuradas.
+  - **Reconstructed Historical Estimated Cost:** Coste estimado acumulado de todas las llamadas API externas reales realizadas en el proyecto ($0.484013), incluyendo las corridas de desarrollo depuradas previamente.
+  - **Fuente Definitiva:** La facturación consolidada de Google Cloud / Google AI Studio es la única fuente jurídicamente vinculante y definitiva para conciliación contable externa.
 
 ### 4. Inmutabilidad Absoluta de Versiones de Prompts (`AnalysisPromptVersion`)
 - Toda versión de prompt registrada en PostgreSQL es estrictamente inmutable en todos sus campos materiales: `system_prompt`, `user_prompt_template`, `response_schema_version`, `stage` y `config` (`max_output_tokens`, `thinking_level`, `temperature`, esquemas de structured output).
 - `scripts/seed_analysis_prompts.py` evalúa la identidad material de cada versión existente; si detecta cualquier discrepancia, aborta con `PromptVersionImmutabilityError` en lugar de realizar una actualización silenciosa en base de datos.
 - Las versiones `v1`, `v2` y `v3` están permanentemente congeladas. Cualquier modificación futura (instrucciones, tokens, esquemas) requiere una nueva versión (`v4`).
 
-### 5. Registro de Incidencia de Desarrollo (Bloque 7E)
+### 5. Aislamiento Estricto de Tests y Protección Fail-Closed (Bloque 7E.2)
+- **Aislamiento de base de datos:** La suite de pruebas automatizadas (`pytest`) opera de manera 100% aislada sobre una base de datos SQLite en memoria (`sqlite:///:memory:`). Las pruebas nunca escriben ni modifican las tablas de PostgreSQL de desarrollo o producción.
+- **Guarda Fail-Closed (`verify_test_db_url_is_safe`):** Un fixture con ámbito de sesión inspecciona la URL de conexión antes de ejecutar cualquier prueba; si detecta una URL que no contenga `:memory:` o `test`, aborta la suite de pruebas inmediatamente antes de emitir cualquier comando DDL/DML, sin exponer contraseñas ni credenciales.
+- **Diferenciación ontológica:** Los artefactos sintéticos creados en tests (mocks, llamadas simuladas) no constituyen llamadas reales ni computan en el ledger de auditoría ni en las estimaciones de costes.
+
+### 6. Registro de Incidencia de Desarrollo (Bloque 7E)
 Durante el desarrollo inicial del Bloque 7E, antes de formalizar la regla de congelación absoluta, se ejecutó una corrida de validación inicial con `observatory_deep_analysis:v3` configurado con `max_output_tokens: 2048`. Al detectarse que el razonamiento del modelo (`thinking` en nivel `medium`) consumía parte de ese presupuesto y truncaba la salida en documentos extensos, se ajustó la configuración en la base de datos a `max_output_tokens: 4096` antes de relanzar la validación final. Dicha mutación en desarrollo queda documentada como antecedente técnico que motivó el endurecimiento definitivo de la regla de inmutabilidad y la política de no-borrado de auditoría.
 
 ---
@@ -677,7 +683,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7E **NO** se ha
 - [x] **Bloque 7C:** Auditoría de Grounding, taxonomía y consistencia del benchmark.
 - [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales.
 - [x] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline, prompts v3 y validación controlada de 8 entries.
-- [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real. *(Cerrado)*
+- [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real.
+- [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.

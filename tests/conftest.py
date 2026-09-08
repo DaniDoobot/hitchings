@@ -24,6 +24,30 @@ def compile_uuid_sqlite(type_, compiler, **kw):
     return "CHAR(36)"
 
 
+def verify_test_db_url_is_safe(url_str: str) -> None:
+    """Validate that a database URL strictly targets an isolated test environment.
+
+    Fail-closed:
+    Rejects any URL that does not explicitly target an in-memory SQLite database
+    or a dedicated database containing 'test' in its name/path.
+
+    Raises:
+        RuntimeError: if the URL does not match safe test patterns.
+    """
+    low = url_str.lower()
+    is_safe = (
+        low.startswith("sqlite:///:memory:")
+        or ":memory:" in low
+        or "test" in low
+    )
+    if not is_safe:
+        raise RuntimeError(
+            "SECURITY / LEDGER VIOLATION: Test database URL does not match safe test patterns. "
+            "Tests must strictly run against an isolated test database (e.g. SQLite in-memory or a database containing 'test'). "
+            "Aborting test execution to prevent contamination of development or production database."
+        )
+
+
 # In-memory test engine with StaticPool to share connection state
 test_engine = create_engine(
     "sqlite:///:memory:",
@@ -34,7 +58,13 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_
 
 
 @pytest.fixture(scope="session", autouse=True)
-def setup_test_db():
+def guard_test_database_isolation():
+    """Fail-closed guard: ensure test engine strictly points to an isolated test DB."""
+    verify_test_db_url_is_safe(str(test_engine.url))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_test_db(guard_test_database_isolation):
     """Create all database tables for the test session."""
     Base.metadata.create_all(bind=test_engine)
     yield
@@ -51,7 +81,8 @@ def db_session() -> Generator[Session, None, None]:
     yield session
 
     session.close()
-    transaction.rollback()
+    if transaction.is_active:
+        transaction.rollback()
     connection.close()
 
 
