@@ -367,8 +367,18 @@ PROMPT_DEFINITIONS = [
 ]
 
 
+class PromptVersionImmutabilityError(ValueError):
+    """Raised when an existing AnalysisPromptVersion differs materially from seed specification."""
+
+
 def seed_analysis_prompts(db: Optional[Session] = None) -> list[AnalysisPromptVersion]:
-    """Idempotently seed or update the default analysis prompt versions."""
+    """Idempotently seed the default analysis prompt versions.
+
+    Enforces strict immutability:
+    - If code+version does not exist: creates it.
+    - If code+version exists and all material fields match: no-op (returns existing).
+    - If code+version exists and ANY material field differs: raises PromptVersionImmutabilityError.
+    """
     close_db = False
     if db is None:
         db = SessionLocal()
@@ -402,12 +412,12 @@ def seed_analysis_prompts(db: Optional[Session] = None) -> list[AnalysisPromptVe
                 else:
                     err_msg = (
                         f"Immutability conflict for prompt version '{code}:v{version}' (id={existing.id}). "
-                        f"The existing prompt definition differs from the seed specification. "
+                        f"The existing prompt definition differs materially from the seed specification. "
                         f"Prompt versions are strictly immutable; create version {version + 1} (e.g. '{code}:v{version + 1}') "
                         f"instead of modifying an existing version."
                     )
                     logger.error(err_msg)
-                    raise ValueError(err_msg)
+                    raise PromptVersionImmutabilityError(err_msg)
             else:
                 logger.info("Creating new prompt version '%s:v%d'", code, version)
                 new_prompt = AnalysisPromptVersion(

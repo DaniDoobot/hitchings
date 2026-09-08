@@ -51,3 +51,6 @@ logs/
 
 # Database data (if mounted locally)
 postgres_data/
+
+# Scratch & temporary artifacts
+scratch*

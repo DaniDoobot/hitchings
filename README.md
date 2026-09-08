@@ -620,18 +620,50 @@ Para la fuente judicial del Competition Appeal Tribunal (CAT), se aplica una pol
 
 ---
 
-## 17. Funcionalidades Deliberadamente Pendientes
+## 17. Pipeline de Grounding Estricto v3 y Políticas de Auditoría e Inmutabilidad (Bloques 7E y 7E.1)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7D **NO** se han implementado:
-1. Llamadas masivas sobre las Entries restantes.
-2. Bloqueo en runtime del pipeline Gemini (se integrará junto con los prompts v3 en el Bloque 7E).
-3. OCR sobre documentos escaneados.
+### 1. Grounding Estricto y Verificación Determinista de Citas (`GroundingValidator`)
+El pipeline v3 (`observatory_triage:v3` y `observatory_deep_analysis:v3`) incorpora esquemas Pydantic con citas textuales obligatorias (`GroundingEvidence`). Cada evidencia extraída por el LLM se somete a una verificación determinista estricta en código:
+- **Cero tolerancia algorítmica:** No se emplean modelos, embeddings ni coincidencias difusas.
+- **Normalización simétrica de texto:** Unicode NFKC, comillas, guiones tipográficos, saltos de línea y normalización de guiones de corte de línea procedentes de PDFs (`(\w)\s*-\s*(\w)` $\to$ `\1-\2`).
+- **Política de fallos:** Cualquier discrepancia o alteración sutil (ej. sustituir *"with the result that"* por *"It follows that"*) dispara un `AnalysisGroundingError`, marcando el `AnalysisCall` y el `EntryAnalysis` con `status="failed"`.
+
+### 2. Contrato de Disponibilidad de Campos en el Input Real (`get_allowed_evidence_fields`)
+Una evidencia solo es jurídicamente válida si el campo de origen (`source_field`) fue **efectivamente suministrado al modelo** en el prompt de esa ejecución:
+- Si `Entry.content` está presente, `_build_content_section()` envía exclusivamente el contenido íntegro; el extracto (`excerpt`) **no** se envía en el prompt. En consecuencia, cualquier cita con `source_field="excerpt"` es rechazada automáticamente por el validador, impidiendo que el LLM justifique decisiones con campos no contenidos en su ventana de contexto.
+- Si `Entry.content` está ausente o vacío pero existe `Entry.excerpt`, el extracto sí forma parte del input y `source_field="excerpt"` es admitido.
+- `title` siempre está presente en el input. `raw_metadata` no constituye una fuente admitida de citas de evidencia sustantiva.
+
+### 3. Política Infranqueable de No-Eliminación de Llamadas de IA
+Toda llamada real facturable a un proveedor de IA constituye un hecho histórico e inmutable de auditoría:
+- **Prohibición de borrado:** Ninguna llamada a un LLM puede eliminarse de la base de datos PostgreSQL (`AnalysisCall`, `EntryAnalysis`, `EntryAnalysisTopic`), independientemente de que se trate de un smoke test, un benchmark, una prueba de validación, una llamada fallida o un reintento.
+- **Trazabilidad:** Las llamadas pueden clasificarse mediante metadatos (`call_metadata`: `validation_run`, `benchmark`, `smoke_test`, `obsolete`, `superseded`), pero su registro físico permanece inalterable.
+- **Contabilidad de Costes (Cost Accounting):**
+  - **Database Recorded Cost:** Suma actual de `AnalysisCall.estimated_cost_usd` en la base de datos PostgreSQL ($0.268197 tras Bloque 7E).
+  - **Known Historical API Cost:** Coste real acumulado en el proveedor API, incluyendo ejecuciones de desarrollo previas a la congelación de la política de no-borrado ($\ge \$0.484013$). La facturación externa del proveedor constituye la fuente definitiva para reconciliación contable.
+
+### 4. Inmutabilidad Absoluta de Versiones de Prompts (`AnalysisPromptVersion`)
+- Toda versión de prompt registrada en PostgreSQL es estrictamente inmutable en todos sus campos materiales: `system_prompt`, `user_prompt_template`, `response_schema_version`, `stage` y `config` (`max_output_tokens`, `thinking_level`, `temperature`, esquemas de structured output).
+- `scripts/seed_analysis_prompts.py` evalúa la identidad material de cada versión existente; si detecta cualquier discrepancia, aborta con `PromptVersionImmutabilityError` en lugar de realizar una actualización silenciosa en base de datos.
+- Las versiones `v1`, `v2` y `v3` están permanentemente congeladas. Cualquier modificación futura (instrucciones, tokens, esquemas) requiere una nueva versión (`v4`).
+
+### 5. Registro de Incidencia de Desarrollo (Bloque 7E)
+Durante el desarrollo inicial del Bloque 7E, antes de formalizar la regla de congelación absoluta, se ejecutó una corrida de validación inicial con `observatory_deep_analysis:v3` configurado con `max_output_tokens: 2048`. Al detectarse que el razonamiento del modelo (`thinking` en nivel `medium`) consumía parte de ese presupuesto y truncaba la salida en documentos extensos, se ajustó la configuración en la base de datos a `max_output_tokens: 4096` antes de relanzar la validación final. Dicha mutación en desarrollo queda documentada como antecedente técnico que motivó el endurecimiento definitivo de la regla de inmutabilidad y la política de no-borrado de auditoría.
+
+---
+
+## 18. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7E **NO** se han implementado:
+1. Análisis de las 59 Entries restantes sin procesar.
+2. Re-análisis del caso Livronsa (su fallo por paráfrasis detectada permanece como baseline de auditoría).
+3. Creación de prompts v4.
 4. Scheduler en segundo plano (Celery, APScheduler, cron).
 5. Interfaz gráfica o frontend.
 
 ---
 
-## 18. Roadmap
+## 19. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -643,8 +675,9 @@ Para respetar la delimitación estricta de fases, en este Bloque 7D **NO** se ha
 - [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista).
 - [x] **Bloque 7B:** Gemini Developer API Baseline: pipeline triage + deep analysis, benchmark controlado de 20 entries.
 - [x] **Bloque 7C:** Auditoría de Grounding, taxonomía y consistencia del benchmark.
-- [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales. *(Completado)*
-- [ ] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline y prompts v3.
+- [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales.
+- [x] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline, prompts v3 y validación controlada de 8 entries.
+- [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.

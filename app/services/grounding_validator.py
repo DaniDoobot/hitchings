@@ -74,15 +74,40 @@ def clean_quote_wrapper(quote: str) -> str:
     return q
 
 
+def get_allowed_evidence_fields(entry: Entry) -> set[str]:
+    """Determine the valid source fields that were actually provided in the model input.
+
+    Matches the prompt builder's _build_content_section contract:
+    - If entry.content is present and non-empty, only 'title' and 'content' were supplied to the model.
+      'excerpt' was NOT provided in the prompt and cannot be used as an evidence source.
+    - If entry.content is absent/empty and entry.excerpt is present and non-empty, 'title' and 'excerpt' were supplied.
+    - 'title' is supplied if present.
+    - Metadatas or other attributes are not valid evidence quote sources.
+    """
+    fields = set()
+    if entry.title and entry.title.strip():
+        fields.add("title")
+    if entry.content and entry.content.strip():
+        fields.add("content")
+    elif entry.excerpt and entry.excerpt.strip():
+        fields.add("excerpt")
+    return fields
+
+
 def validate_grounding_quote(
     evidence: GroundingEvidence,
     entry: Entry,
+    allowed_source_fields: Optional[set[str]] = None,
     max_quote_chars: int = 500,
 ) -> bool:
     """Verify a single GroundingEvidence quote against the specified entry field.
 
+    Enforces:
+    1. The source_field must be present in allowed_source_fields (model input availability).
+    2. Verbatim string matching against the referenced source field.
+
     Raises:
-        AnalysisGroundingError: if quote is empty, invalid field, or not found in source text.
+        AnalysisGroundingError: if quote is empty, invalid field, not in model input, or not found in source text.
     Returns:
         True if successfully verified.
     """
@@ -98,6 +123,15 @@ def validate_grounding_quote(
         raise AnalysisGroundingError(
             f"Grounding verification failed: quote exceeds maximum allowed length "
             f"({len(raw_quote)} chars > {max_quote_chars} chars): '{raw_quote[:80]}...'"
+        )
+
+    # 1. Verify field availability in actual model input
+    valid_fields = allowed_source_fields if allowed_source_fields is not None else get_allowed_evidence_fields(entry)
+    if field not in valid_fields:
+        raise AnalysisGroundingError(
+            f"Grounding verification failed: evidence references source_field='{evidence.source_field}', "
+            f"which was not present in the model input for this entry. "
+            f"Allowed source fields: {sorted(list(valid_fields))}."
         )
 
     # Resolve target text
@@ -144,6 +178,7 @@ def validate_grounding_quote(
 def validate_triage_evidence(
     evidence_list: Optional[Sequence[GroundingEvidence]],
     entry: Entry,
+    allowed_source_fields: Optional[set[str]] = None,
 ) -> None:
     """Validate all evidence items returned in a TRIAGE stage analysis.
 
@@ -155,14 +190,16 @@ def validate_triage_evidence(
             "Triage v3 grounding failed: at least one evidence quote is required."
         )
 
+    valid_fields = allowed_source_fields if allowed_source_fields is not None else get_allowed_evidence_fields(entry)
     for item in evidence_list:
-        validate_grounding_quote(item, entry)
+        validate_grounding_quote(item, entry, allowed_source_fields=valid_fields)
 
 
 def validate_deep_evidence(
     summary_evidence: Optional[Sequence[GroundingEvidence]],
     key_points: Optional[Sequence[KeyPointV3]],
     entry: Entry,
+    allowed_source_fields: Optional[set[str]] = None,
 ) -> None:
     """Validate all summary and key point evidence items in a DEEP stage analysis.
 
@@ -170,10 +207,12 @@ def validate_deep_evidence(
         AnalysisGroundingError: on missing summary evidence, missing key points,
         any key point lacking evidence quotes, or unverified quotes.
     """
+    valid_fields = allowed_source_fields if allowed_source_fields is not None else get_allowed_evidence_fields(entry)
+
     # 1. Summary evidence
     if summary_evidence:
         for item in summary_evidence:
-            validate_grounding_quote(item, entry)
+            validate_grounding_quote(item, entry, allowed_source_fields=valid_fields)
 
     # 2. Key points
     if not key_points:
@@ -188,4 +227,4 @@ def validate_deep_evidence(
                 f"does not contain any grounding evidence quote. At least 1 quote is required."
             )
         for ev in kp.evidence:
-            validate_grounding_quote(ev, entry)
+            validate_grounding_quote(ev, entry, allowed_source_fields=valid_fields)

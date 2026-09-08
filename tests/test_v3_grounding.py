@@ -178,11 +178,14 @@ def test_grounding_validator_exact_match(db_session: Session):
 
     ev_title = GroundingEvidence(source_field="title", quote="Commission fines cartel participants €45 million")
     ev_content = GroundingEvidence(source_field="content", quote="fined three producers of chemical products")
-    ev_excerpt = GroundingEvidence(source_field="excerpt", quote="fined three producers...")
 
     validate_grounding_quote(ev_title, entry)
     validate_grounding_quote(ev_content, entry)
-    validate_grounding_quote(ev_excerpt, entry)
+
+    # Excerpt is valid when entry has excerpt and no content (input contract)
+    entry_excerpt_only = make_entry(db_session, src, content="", excerpt="fined three producers...")
+    ev_excerpt = GroundingEvidence(source_field="excerpt", quote="fined three producers...")
+    validate_grounding_quote(ev_excerpt, entry_excerpt_only)
 
 
 def test_grounding_validator_normalization(db_session: Session):
@@ -210,7 +213,7 @@ def test_grounding_validator_invalid_field(db_session: Session):
 
     with pytest.raises(AnalysisGroundingError) as exc:
         validate_grounding_quote(ev, entry)
-    assert "unrecognized source_field" in str(exc.value)
+    assert "which was not present in the model input for this entry" in str(exc.value) or "unrecognized source_field" in str(exc.value)
 
 
 def test_grounding_validator_hallucinated_quote(db_session: Session):
@@ -619,3 +622,145 @@ def test_api_endpoint_returns_grounding_evidence_for_v3_and_none_for_v2(db_sessi
     assert data_v3["grounding_evidence"]["triage_evidence"][0]["quote"] == "Commission fines cartel"
     assert len(data_v3["grounding_evidence"]["summary_evidence"]) == 1
     assert len(data_v3["grounding_evidence"]["key_points_evidence"]) == 1
+
+
+# ==============================================================================
+# Bloque 7E.1: Grounding Input-Aware Field Availability Tests
+# ==============================================================================
+
+def test_grounding_input_aware_content_present_rejects_excerpt(db_session: Session):
+    """Test A: When entry.content is present, model input uses content but NOT excerpt.
+
+    Evidence with source_field='excerpt' must be REJECTED even if the quote is in entry.excerpt.
+    """
+    src = make_source(db_session, "FieldAvailA")
+    entry = make_entry(
+        db_session,
+        src,
+        title="Valid Title",
+        content="Full text of the antitrust decision with secret cartel evidence.",
+        excerpt="An excerpt containing unique excerpt text only.",
+    )
+
+    # Valid quote in content
+    ev_content = GroundingEvidence(source_field="content", quote="secret cartel evidence")
+    assert validate_grounding_quote(ev_content, entry) is True
+
+    # Quote from excerpt: must be REJECTED because excerpt was not supplied to model
+    ev_excerpt = GroundingEvidence(source_field="excerpt", quote="unique excerpt text only")
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev_excerpt, entry)
+    assert "which was not present in the model input for this entry" in str(exc_info.value)
+    assert "Allowed source fields: ['content', 'title']" in str(exc_info.value)
+
+
+def test_grounding_input_aware_content_absent_allows_excerpt(db_session: Session):
+    """Test B: When entry.content is absent/empty, model input uses excerpt.
+
+    Evidence with source_field='excerpt' must be VALID.
+    Evidence with source_field='content' must be REJECTED.
+    """
+    src = make_source(db_session, "FieldAvailB")
+    entry = make_entry(
+        db_session,
+        src,
+        title="Valid Title Without Content",
+        content="",
+        excerpt="The official summary describes the merger remedies accepted by CNMC.",
+    )
+
+    # Excerpt quote is valid
+    ev_excerpt = GroundingEvidence(source_field="excerpt", quote="merger remedies accepted by CNMC")
+    assert validate_grounding_quote(ev_excerpt, entry) is True
+
+    # Content quote is rejected because content was not provided
+    ev_content = GroundingEvidence(source_field="content", quote="merger remedies")
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev_content, entry)
+    assert "which was not present in the model input for this entry" in str(exc_info.value)
+    assert "Allowed source fields: ['excerpt', 'title']" in str(exc_info.value)
+
+
+def test_grounding_input_aware_title_always_valid(db_session: Session):
+    """Test C: Title is always sent to model in both triage and deep prompts.
+
+    Evidence with source_field='title' matching the title must be VALID.
+    """
+    src = make_source(db_session, "FieldAvailC")
+    entry = make_entry(
+        db_session,
+        src,
+        title="Antitrust Authority fines Google €100M",
+        content="Substantive decision text.",
+    )
+
+    ev_title = GroundingEvidence(source_field="title", quote="Antitrust Authority fines Google")
+    assert validate_grounding_quote(ev_title, entry) is True
+
+
+def test_grounding_input_aware_raw_metadata_rejected(db_session: Session):
+    """Test D: raw_metadata is NOT an allowed evidence field for legal grounding.
+
+    Evidence specifying source_field='raw_metadata' must be REJECTED.
+    """
+    src = make_source(db_session, "FieldAvailD")
+    entry = make_entry(
+        db_session,
+        src,
+        title="Some Title",
+        content="Some Content",
+    )
+
+    ev_meta = GroundingEvidence(source_field="raw_metadata", quote="Some Metadata Quote")
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev_meta, entry)
+    assert "which was not present in the model input for this entry" in str(exc_info.value)
+
+
+def test_prompt_immutability_enforced_on_seed_conflict(db_session: Session):
+    """Bloque 7E.1: Seed must reject material modification of existing prompt version.
+
+    Attempting to seed an existing prompt with a different config (e.g. max_output_tokens)
+    must raise PromptVersionImmutabilityError (ValueError) and leave DB row intact.
+    """
+    from scripts.seed_analysis_prompts import (
+        PromptVersionImmutabilityError,
+        PROMPT_DEFINITIONS,
+        seed_analysis_prompts,
+    )
+
+    # 1. First ensure prompts are seeded
+    seeded = seed_analysis_prompts(db=db_session)
+    assert len(seeded) >= 6
+
+    # 2. Find observatory_deep_analysis:v3 in DB
+    existing_p = (
+        db_session.query(AnalysisPromptVersion)
+        .filter(AnalysisPromptVersion.code == "observatory_deep_analysis", AnalysisPromptVersion.version == 3)
+        .first()
+    )
+    assert existing_p is not None
+    original_config = dict(existing_p.config)
+
+    # 3. Temporarily tamper with PROMPT_DEFINITIONS to simulate a developer trying to mutate v3 config
+    deep_def_idx = next(
+        i for i, p in enumerate(PROMPT_DEFINITIONS)
+        if p["code"] == "observatory_deep_analysis" and p["version"] == 3
+    )
+    saved_def = dict(PROMPT_DEFINITIONS[deep_def_idx])
+    tampered_def = dict(saved_def)
+    tampered_def["config"] = {**saved_def["config"], "max_output_tokens": 9999}
+    PROMPT_DEFINITIONS[deep_def_idx] = tampered_def
+
+    try:
+        with pytest.raises(PromptVersionImmutabilityError) as exc_info:
+            seed_analysis_prompts(db=db_session)
+        assert "Immutability conflict for prompt version 'observatory_deep_analysis:v3'" in str(exc_info.value)
+        assert "Prompt versions are strictly immutable" in str(exc_info.value)
+    finally:
+        # Restore definition
+        PROMPT_DEFINITIONS[deep_def_idx] = saved_def
+
+    # 4. Verify DB row was NOT modified
+    db_session.refresh(existing_p)
+    assert existing_p.config == original_config
