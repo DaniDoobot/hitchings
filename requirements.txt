@@ -11,8 +11,9 @@ sqlalchemy>=2.0.36
 alembic>=1.14.0
 psycopg[binary]>=3.2.0
 
-# HTML & Scraping
+# HTML & Scraping & PDF Extraction
 beautifulsoup4>=4.12.0
+pypdf>=6.0.0
 
 # AI Analysis (Bloque 7B)
 google-genai>=2.22.0,<3

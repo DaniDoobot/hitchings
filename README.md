@@ -586,20 +586,50 @@ python -m scripts.run_analysis_benchmark --confirm-real-calls [--max-usd 1.00]
 
 ---
 
-## 16. Funcionalidades Deliberadamente Pendientes
+## 16. Source Sufficiency y Enriquecimiento Selectivo de Fuentes (Bloque 7D)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7B **NO** se han implementado:
-1. Llamadas masivas sobre las 80 Entries (se procesará solo muestra de benchmark tras validación).
-2. Endpoint mutacional `POST /entries/{id}/analyze` o ejecución automática tras ingestas.
-3. Extracción de texto de documentos binarios PDF ni OCR.
-4. Scheduler en segundo plano (Celery, APScheduler, cron).
-5. Autenticación de usuarios finales ni JWT.
-6. Interfaz gráfica o frontend.
-7. Módulo 2 de análisis documental avanzado.
+Para garantizar un análisis riguroso y fundamentado (*grounded*), HITCHINGS incorpora un mecanismo determinista de evaluación de suficiencia documental (`SourceSufficiencyService`) previo al procesamiento por LLM.
+
+### Niveles de Suficiencia (`SourceSufficiencyLevel`):
+1. **`full` (Suficiencia Completa):** El documento contiene el texto íntegro oficial de la resolución o noticia:
+   - Sentencias y conclusiones completas de CURIA extraídas de InfoCuria.
+   - Notas de prensa y comunicados editoriales completos de la CNMC y de la Comisión Europea.
+   - Texto digital íntegro de resoluciones judiciales del CAT extraído de su PDF oficial.
+2. **`partial` (Suficiencia Parcial / Sumario Oficial Sustantivo):** Contiene un sumario procesal oficial redactado por el emisor que incluye hechos, partes, fechas preclusivas o pronunciamientos jurídicos concretos (ej. resúmenes procesales del CAT de 150 a 7.000 caracteres sobre conferencias de gestión procesal, órdenes paraguas o certificaciones de acciones de clase).
+3. **`insufficient` (Insuficiente):** El documento carece de cuerpo de texto (`content` vacío) o contiene exclusivamente un texto procesal genérico de una línea (ej. *"Ruling of the Tribunal on costs."* o *"Judgment of the Tribunal."*) sin hechos, fechas ni fundamentación sustantiva.
+
+### Estrategia de Enriquecimiento Selectivo de CAT:
+Para la fuente judicial del Competition Appeal Tribunal (CAT), se aplica una política escalonada de adquisición de contenido:
+```
+1. Sumario HTML oficial sustantivo (Prioridad 1)
+       ↓ (si es 'insufficient' o vacío)
+2. Descarga del PDF oficial enlazado en raw_metadata['judgment_pdf_url']
+       ↓
+3. Extracción de capa de texto digital nativa (vía pypdf)
+       ↓
+4. NO OCR (se rechaza el procesamiento si no existe capa de texto digital)
+```
+
+### Justificación de la Estrategia:
+- **Reducción de alucinaciones y no-grounding:** Evita que el modelo intente sintetizar un fallo o asignar responsabilidades a partir de titulares vacíos o avisos procesales genéricos de 30 caracteres.
+- **Máxima fidelidad documental:** Todo hecho, cuantía, fecha o criterio reflejado en el análisis procede directamente del texto oficial suministrado.
+- **Eficiencia en el consumo de tokens y costes de Gemini:** En resoluciones con un sumario oficial sustantivo de 200 a 2.000 caracteres (como CAT 65, 68 o 70), se utiliza directamente dicho sumario en lugar de enviar sentencias completas de 50 a 100 páginas en PDF, reduciendo el coste de triage/deep entre un 80% y un 95%.
+- **Preservación estricta de procedencia y trazabilidad:** Cuando una entrada es enriquecida desde su PDF oficial, se actualiza `Entry.content` y `Entry.content_hash`, pero se preserva intacto el hash histórico de los análisis previos (`EntryAnalysis.entry_content_hash`), permitiendo auditar cuándo una entrada fue analizada sobre una versión anterior del contenido.
 
 ---
 
-## 17. Roadmap
+## 17. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7D **NO** se han implementado:
+1. Llamadas masivas sobre las Entries restantes.
+2. Bloqueo en runtime del pipeline Gemini (se integrará junto con los prompts v3 en el Bloque 7E).
+3. OCR sobre documentos escaneados.
+4. Scheduler en segundo plano (Celery, APScheduler, cron).
+5. Interfaz gráfica o frontend.
+
+---
+
+## 18. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -608,8 +638,11 @@ Para respetar la delimitación estricta de fases, en este Bloque 7B **NO** se ha
 - [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition.
 - [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments.
 - [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions.
-- [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista). *(Completado)*
-- [x] **Bloque 7B:** Gemini Developer API Baseline: pipeline triage + deep analysis, benchmark controlado. *(Completado)*
+- [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista).
+- [x] **Bloque 7B:** Gemini Developer API Baseline: pipeline triage + deep analysis, benchmark controlado de 20 entries.
+- [x] **Bloque 7C:** Auditoría de Grounding, taxonomía y consistencia del benchmark.
+- [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales. *(Completado)*
+- [ ] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline y prompts v3.
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
