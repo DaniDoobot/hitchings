@@ -41,6 +41,8 @@ class MockAIProvider(BaseAIProvider):
         prompt_version: AnalysisPromptVersion,
         entry: Entry,
         matrix_snapshot: dict[str, Any],
+        extra_call_metadata: Optional[dict[str, Any]] = None,
+        triage_result: Optional[dict[str, Any]] = None,
     ) -> AIProviderResult:
         """Simulate analysis deterministically based on entry text and snapshot."""
         start_time = time.monotonic()

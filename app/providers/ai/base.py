@@ -30,12 +30,12 @@ class AIProviderResult:
 
 
 class BaseAIProvider(ABC):
-    """Abstract base class for all AI analysis providers (Mock, OpenAI, Anthropic, etc.)."""
+    """Abstract base class for all AI analysis providers (Mock, VertexAI, etc.)."""
 
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """Unique provider identifier (e.g. 'mock', 'openai', 'anthropic')."""
+        """Unique provider identifier (e.g. 'mock', 'vertex_ai', 'openai')."""
         pass
 
     @abstractmethod
@@ -44,6 +44,16 @@ class BaseAIProvider(ABC):
         prompt_version: AnalysisPromptVersion,
         entry: Entry,
         matrix_snapshot: dict[str, Any],
+        extra_call_metadata: Optional[dict[str, Any]] = None,
+        triage_result: Optional[dict[str, Any]] = None,
     ) -> AIProviderResult:
-        """Execute AI analysis on an entry using the given prompt version and matrix snapshot."""
+        """Execute AI analysis on an entry using the given prompt version and matrix snapshot.
+
+        Args:
+            prompt_version: The versioned prompt to execute (determines stage: triage/deep_analysis).
+            entry: The entry to analyze.
+            matrix_snapshot: Current tracking matrix snapshot dict.
+            extra_call_metadata: Optional additional metadata stored in AnalysisCall.call_metadata.
+            triage_result: For deep_analysis stage, the triage output dict for context injection.
+        """
         pass

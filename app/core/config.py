@@ -40,6 +40,31 @@ class Settings(BaseSettings):
     ANALYSIS_UNCERTAIN_MIN_SCORE: int = 40
     ANALYSIS_MONTHLY_ENTRY_LIMIT: int = 1000
 
+    # Vertex AI (Bloque 7B - First Real AI Provider)
+    # Authenticate locally with: gcloud auth application-default login
+    # Do NOT store API keys or service account JSON in the repository.
+    VERTEX_AI_PROJECT: str = ""
+    VERTEX_AI_LOCATION: str = "global"
+    VERTEX_AI_MODEL: str = "gemini-2.0-flash"
+
+    # Thinking levels for each pipeline stage
+    ANALYSIS_TRIAGE_THINKING_LEVEL: str = "low"
+    ANALYSIS_DEEP_THINKING_LEVEL: str = "medium"
+
+    # Maximum input characters per stage before raising AnalysisInputTooLarge
+    ANALYSIS_TRIAGE_MAX_INPUT_CHARS: int = 250000
+    ANALYSIS_DEEP_MAX_INPUT_CHARS: int = 250000
+
+    # Benchmark safety budget (USD). Hard stop before starting each new Entry.
+    ANALYSIS_BENCHMARK_MAX_USD: float = 1.00
+
+    # Vertex AI pricing estimates for benchmark cost calculations.
+    # These are configuration constants for gemini-2.0-flash as of 2026-09.
+    # Review and update if Google changes pricing or if you switch models.
+    # Unit: USD per 1,000,000 tokens.
+    VERTEX_INPUT_USD_PER_MILLION_TOKENS: float = 0.075
+    VERTEX_OUTPUT_USD_PER_MILLION_TOKENS: float = 0.30
+
 
 @lru_cache
 def get_settings() -> Settings:

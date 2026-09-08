@@ -29,6 +29,63 @@ class AIAnalysisResponsePayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Vertex AI Structured Output Schemas (Bloque 7B)
+# These are used as response_schema in google-genai GenerateContentConfig.
+# They define exactly what the model must produce per pipeline stage.
+# ---------------------------------------------------------------------------
+
+class TriageAnalysisResult(BaseModel):
+    """Structured output schema for the TRIAGE stage.
+
+    Used as Structured Output schema in Vertex AI calls.
+    The model must return valid JSON matching this schema.
+    """
+    relevance_score: int = Field(
+        ..., ge=0, le=100,
+        description="Puntuación de relevancia HITCHINGS de 0 (no relevante) a 100 (muy relevante)"
+    )
+    confidence: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Confianza en la clasificación de 0.0 a 1.0"
+    )
+    topic_codes: list[str] = Field(
+        default_factory=list,
+        description="Códigos de temas HITCHINGS aplicables. Usar únicamente los códigos proporcionados."
+    )
+    primary_topic_code: Optional[str] = Field(
+        None,
+        description="Código del tema principal. Debe ser uno de topic_codes. Null si topic_codes está vacío."
+    )
+    reason: str = Field(
+        ...,
+        description="Justificación breve y específica en castellano de la puntuación de relevancia asignada."
+    )
+
+
+class DeepAnalysisResult(BaseModel):
+    """Structured output schema for the DEEP ANALYSIS stage.
+
+    Only executed when relevance_status == 'relevant'.
+    Does NOT modify relevance_score, topics, or primary topic from triage.
+    """
+    summary: str = Field(
+        ...,
+        description=(
+            "Resumen jurídico preciso del documento en castellano. "
+            "Longitud orientativa: 150-300 palabras. No añadir relleno."
+        )
+    )
+    key_points: list[str] = Field(
+        ...,
+        description=(
+            "Lista de 3 a 6 puntos clave concretos y no redundantes en castellano. "
+            "Cada punto debe ser específico y útil para el observatorio HITCHINGS."
+        )
+    )
+
+
+
+# ---------------------------------------------------------------------------
 # Prompt Version API Schemas
 # ---------------------------------------------------------------------------
 

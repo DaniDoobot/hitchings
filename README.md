@@ -479,7 +479,7 @@ La suite completa (**91 tests**, 0 fallos) valida configuración, endpoints, mod
 
 ---
 
-## 17. Funcionalidades Deliberadamente Pendientes
+## 18. Funcionalidades Deliberadamente Pendientes
 
 Para respetar la delimitación estricta de fases, en este Bloque 7A **NO** se han implementado:
 1. Llamadas a modelos LLM externos de pago (OpenAI, Anthropic, Gemini, Vertex AI).
