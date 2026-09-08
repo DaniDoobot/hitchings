@@ -677,8 +677,9 @@ async def test_39_pipeline_deep_failure_preserves_triage(db_session):
 # 40. Disabled provider -> RuntimeError
 # ==============================================================================
 
-def test_40_pipeline_disabled_provider():
+def test_40_pipeline_disabled_provider(monkeypatch):
     """AnalysisService.get_provider() raises RuntimeError when ANALYSIS_PROVIDER=disabled."""
+    monkeypatch.setattr(get_settings(), "ANALYSIS_PROVIDER", "disabled")
     svc = AnalysisService()
     with pytest.raises(RuntimeError, match="disabled"):
         svc.get_provider()

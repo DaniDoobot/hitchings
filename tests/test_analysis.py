@@ -376,10 +376,10 @@ async def test_11_mock_ai_provider_invalid_format(db_session: Session) -> None:
 # Tests 12 - 13: AnalysisService Provider Resolution & Safety
 # ==============================================================================
 
-def test_12_analysis_service_provider_disabled() -> None:
+def test_12_analysis_service_provider_disabled(monkeypatch) -> None:
     """AnalysisService halts with RuntimeError if ANALYSIS_PROVIDER='disabled'."""
+    monkeypatch.setattr(get_settings(), "ANALYSIS_PROVIDER", "disabled")
     service = AnalysisService()
-    # Default is 'disabled'
     assert service.settings.ANALYSIS_PROVIDER == "disabled"
     with pytest.raises(RuntimeError) as exc_info:
         service.get_provider()
