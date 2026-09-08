@@ -30,12 +30,12 @@ class AIProviderResult:
 
 
 class BaseAIProvider(ABC):
-    """Abstract base class for all AI analysis providers (Mock, VertexAI, etc.)."""
+    """Abstract base class for all AI analysis providers (Mock, GeminiAPI, etc.)."""
 
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """Unique provider identifier (e.g. 'mock', 'vertex_ai', 'openai')."""
+        """Unique provider identifier (e.g. 'mock', 'gemini_api', 'openai')."""
         pass
 
     @abstractmethod

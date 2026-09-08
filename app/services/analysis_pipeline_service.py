@@ -50,7 +50,7 @@ class AnalysisPipelineService:
     """Orchestrates the two-stage triage → deep analysis pipeline.
 
     Usage:
-        pipeline = AnalysisPipelineService(provider=VertexAIProvider())
+        pipeline = AnalysisPipelineService(provider=GeminiAPIProvider())
         analysis = await pipeline.run_pipeline(
             entry_id=...,
             matrix_id=...,

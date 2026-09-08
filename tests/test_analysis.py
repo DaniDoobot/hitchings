@@ -715,7 +715,7 @@ def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
 
     After Bloque 7B, the seed creates 4 prompt versions:
       - observatory_triage v1, observatory_deep_analysis v1 (legacy/mock)
-      - observatory_triage v2, observatory_deep_analysis v2 (Vertex AI)
+      - observatory_triage v2, observatory_deep_analysis v2 (Gemini API)
     """
     # Run 1
     prompts_run1 = seed_analysis_prompts(db_session)

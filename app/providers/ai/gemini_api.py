@@ -1,11 +1,9 @@
-"""Vertex AI provider for HITCHINGS AI analysis pipeline.
+"""Gemini Developer API provider for HITCHINGS AI analysis pipeline.
 
-Uses google-genai SDK configured for Vertex AI (not Gemini Developer API).
-Authentication via Application Default Credentials (ADC).
-No API keys, no service account JSON files.
+Uses google-genai SDK configured for Gemini Developer API with API Key authentication.
+Designed for VPS deployment via Dokploy (API key as environment secret).
 
-Setup:
-    gcloud auth application-default login
+No GCP projects, no Vertex AI, no ADC credentials.
 """
 
 import json
@@ -26,15 +24,6 @@ from app.schemas.analysis import (
 
 logger = logging.getLogger(__name__)
 
-# Thinking budget tokens per level.
-# These are heuristic starting points; adjust as needed.
-THINKING_BUDGET_MAP: dict[str, int] = {
-    "none": 0,
-    "low": 512,
-    "medium": 4096,
-    "high": 16384,
-}
-
 
 class AnalysisInputTooLarge(ValueError):
     """Raised when entry content exceeds the configured maximum input character limit.
@@ -44,18 +33,21 @@ class AnalysisInputTooLarge(ValueError):
     """
 
 
-class VertexAIProvider(BaseAIProvider):
-    """Google Vertex AI provider using Gemini models via the google-genai SDK.
+class GeminiAPIProvider(BaseAIProvider):
+    """Google Gemini Developer API provider using Gemini models via the google-genai SDK.
 
     Responsibilities:
     - Build prompt content for triage or deep analysis stages.
-    - Call Vertex AI with Structured Output for reliable JSON responses.
-    - Extract real usage metadata (input/output/thought tokens).
+    - Call Gemini Developer API using an API key with Structured Output.
+    - Configure thinking level natively (low, medium, high).
+    - Extract real usage metadata (input, output, and thought tokens).
     - Compute estimated cost from configurable pricing rates.
     - Return AIProviderResult without touching the database.
 
     Does NOT:
+    - Use Vertex AI, ADC, GCP project IDs, or service accounts.
     - Persist anything to PostgreSQL (AnalysisService / AnalysisPipelineService do that).
+    - Expose or log the API key.
     - Implement retries for non-transient errors (schema failures, auth, perms, model not found).
     - Fall back to mock or any other provider.
     """
@@ -66,10 +58,10 @@ class VertexAIProvider(BaseAIProvider):
 
     @property
     def provider_name(self) -> str:
-        return "vertex_ai"
+        return "gemini_api"
 
     def _get_client(self) -> Any:
-        """Lazy-initialize the google-genai client configured for Vertex AI."""
+        """Lazy-initialize the google-genai client for Gemini Developer API."""
         if self._client is None:
             try:
                 from google import genai  # type: ignore[import-untyped]
@@ -79,30 +71,22 @@ class VertexAIProvider(BaseAIProvider):
                     "Run: pip install google-genai>=1.16.0"
                 ) from exc
 
-            project = self._settings.VERTEX_AI_PROJECT
-            if not project:
+            api_key = self._settings.GEMINI_API_KEY
+            if not api_key:
                 raise RuntimeError(
-                    "VERTEX_AI_PROJECT is not configured. "
-                    "Set it in .env or as an environment variable before running real analysis calls. "
-                    "Run 'gcloud config get-value project' to find your active GCP project."
+                    "GEMINI_API_KEY is not configured. "
+                    "Set GEMINI_API_KEY in .env or as an environment variable before running real analysis calls. "
+                    "Obtain a key from Google AI Studio / Gemini Developer API."
                 )
-            location = self._settings.VERTEX_AI_LOCATION or "global"
-            self._client = genai.Client(
-                vertexai=True,
-                project=project,
-                location=location,
-            )
+
+            # Initialize Client purely in Gemini Developer API mode (no vertexai=True, no project, no location)
+            self._client = genai.Client(api_key=api_key)
             logger.info(
-                "VertexAI client initialized (project=%s, location=%s, model=%s)",
-                project,
-                location,
-                self._settings.VERTEX_AI_MODEL,
+                "GeminiAPI client initialized (model=%s, provider=%s)",
+                self._settings.GEMINI_MODEL,
+                self.provider_name,
             )
         return self._client
-
-    def _thinking_budget(self, level: str) -> int:
-        """Return thinking budget tokens for the given level string."""
-        return THINKING_BUDGET_MAP.get(level.lower(), THINKING_BUDGET_MAP["low"])
 
     def _build_topics_block(self, snapshot: dict[str, Any]) -> str:
         """Format active topics from matrix snapshot into a readable block for the prompt."""
@@ -158,7 +142,6 @@ class VertexAIProvider(BaseAIProvider):
                 f"Extracto: {excerpt}"
             )
         else:
-            # No content, no excerpt — use title + raw_metadata if present
             meta_str = ""
             if entry.raw_metadata:
                 try:
@@ -185,10 +168,9 @@ class VertexAIProvider(BaseAIProvider):
             (system_text, user_text, input_chars)
         """
         max_chars = self._settings.ANALYSIS_TRIAGE_MAX_INPUT_CHARS
-        content_section, content_chars = self._build_content_section(entry, max_chars, "triage")
+        content_section, _ = self._build_content_section(entry, max_chars, "triage")
 
         topics_block = self._build_topics_block(snapshot)
-
         topic_codes_list = ", ".join(t.get("code", "") for t in snapshot.get("topics", []))
 
         published_at_str = (
@@ -263,30 +245,36 @@ class VertexAIProvider(BaseAIProvider):
         return prompt_version.system_prompt, user_text, input_chars
 
     def _calculate_cost(self, input_tokens: int, output_tokens: int) -> float:
-        """Calculate estimated cost in USD from configurable pricing rates."""
-        input_cost = (input_tokens * self._settings.VERTEX_INPUT_USD_PER_MILLION_TOKENS) / 1_000_000
-        output_cost = (output_tokens * self._settings.VERTEX_OUTPUT_USD_PER_MILLION_TOKENS) / 1_000_000
+        """Calculate estimated cost in USD from configurable Gemini Developer API pricing rates."""
+        input_cost = (input_tokens * self._settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS) / 1_000_000
+        output_cost = (output_tokens * self._settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS) / 1_000_000
         return round(input_cost + output_cost, 8)
 
-    def _extract_usage(self, response: Any) -> tuple[int, int, int]:
+    def _extract_usage(self, response: Any) -> tuple[int, int, int, int]:
         """Extract token counts from response usage_metadata.
 
         Returns:
-            (input_tokens, output_tokens_text, output_tokens_thoughts)
+            (input_tokens, output_tokens, output_text_tokens, output_thought_tokens)
 
-        Thought tokens are included in billable output tokens.
+        In Gemini Developer API, total_token_count represents the overall tokens billed.
+        Billable output tokens = total_token_count - prompt_token_count (or candidates + thoughts).
+        This guarantees no double-counting of thought tokens.
         """
         usage = getattr(response, "usage_metadata", None)
         if usage is None:
-            return 0, 0, 0
+            return 0, 0, 0, 0
 
         input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-        # candidates_token_count includes generated text tokens
         output_text_tokens = getattr(usage, "candidates_token_count", 0) or 0
-        # thoughts_token_count is present when thinking is enabled
         output_thought_tokens = getattr(usage, "thoughts_token_count", 0) or 0
+        total_token_count = getattr(usage, "total_token_count", 0) or 0
 
-        return input_tokens, output_text_tokens, output_thought_tokens
+        if total_token_count > 0 and input_tokens > 0:
+            output_tokens = max(0, total_token_count - input_tokens)
+        else:
+            output_tokens = output_text_tokens + output_thought_tokens
+
+        return input_tokens, output_tokens, output_text_tokens, output_thought_tokens
 
     async def analyze(
         self,
@@ -296,7 +284,7 @@ class VertexAIProvider(BaseAIProvider):
         extra_call_metadata: Optional[dict[str, Any]] = None,
         triage_result: Optional[dict[str, Any]] = None,
     ) -> AIProviderResult:
-        """Execute a single AI call (triage or deep) against Vertex AI.
+        """Execute a single AI call (triage or deep) against Gemini Developer API.
 
         Args:
             prompt_version: The versioned prompt to use (determines stage).
@@ -322,8 +310,6 @@ class VertexAIProvider(BaseAIProvider):
             thinking_level = "low"
             max_output_tokens = 1024
 
-        thinking_budget = self._thinking_budget(thinking_level)
-
         # Build prompt
         try:
             if stage == "triage":
@@ -341,7 +327,7 @@ class VertexAIProvider(BaseAIProvider):
             return AIProviderResult(
                 success=False,
                 provider_name=self.provider_name,
-                model=self._settings.VERTEX_AI_MODEL,
+                model=self._settings.GEMINI_MODEL,
                 input_chars=0,
                 error_type="AnalysisInputTooLarge",
                 error_message=str(exc),
@@ -349,15 +335,16 @@ class VertexAIProvider(BaseAIProvider):
                 call_metadata={"stage": stage, "thinking_level": thinking_level},
             )
 
-        # Execute Vertex AI call
+        # Execute Gemini Developer API call
         try:
             from google.genai import types as genai_types  # type: ignore[import-untyped]
 
             client = self._get_client()
-            model_name = self._settings.VERTEX_AI_MODEL
+            model_name = self._settings.GEMINI_MODEL
 
+            # Configure thinking using thinking_level natively supported by the SDK/model
             thinking_config = genai_types.ThinkingConfig(
-                thinking_budget=thinking_budget,
+                thinking_level=thinking_level.lower(),
             )
 
             generate_config = genai_types.GenerateContentConfig(
@@ -378,13 +365,13 @@ class VertexAIProvider(BaseAIProvider):
         except Exception as exc:
             latency = int((time.monotonic() - start_time) * 1000) or 1
             logger.error(
-                "VertexAI call failed (stage=%s, entry=%s): %s: %s",
+                "Gemini Developer API call failed (stage=%s, entry=%s): %s: %s",
                 stage, entry.id, type(exc).__name__, exc,
             )
             return AIProviderResult(
                 success=False,
                 provider_name=self.provider_name,
-                model=self._settings.VERTEX_AI_MODEL,
+                model=self._settings.GEMINI_MODEL,
                 input_chars=input_chars,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
@@ -392,7 +379,6 @@ class VertexAIProvider(BaseAIProvider):
                 call_metadata={
                     "stage": stage,
                     "thinking_level": thinking_level,
-                    "thinking_budget": thinking_budget,
                     **(extra_call_metadata or {}),
                 },
             )
@@ -400,9 +386,7 @@ class VertexAIProvider(BaseAIProvider):
         latency = int((time.monotonic() - start_time) * 1000) or 1
 
         # Extract usage
-        input_tokens, output_text_tokens, output_thought_tokens = self._extract_usage(response)
-        # Billable output = text + thought tokens
-        total_output_tokens = output_text_tokens + output_thought_tokens
+        input_tokens, total_output_tokens, output_text_tokens, output_thought_tokens = self._extract_usage(response)
 
         # Extract parsed response
         try:
@@ -411,20 +395,19 @@ class VertexAIProvider(BaseAIProvider):
             parsed = None
 
         if parsed is None:
-            # Try to get from text
             raw_text = ""
             try:
                 raw_text = response.text or ""
             except Exception:
                 pass
             logger.error(
-                "VertexAI returned no parsed response (stage=%s, entry=%s). Raw text: %.200s",
+                "Gemini API returned no parsed response (stage=%s, entry=%s). Raw text: %.200s",
                 stage, entry.id, raw_text,
             )
             return AIProviderResult(
                 success=False,
                 provider_name=self.provider_name,
-                model=self._settings.VERTEX_AI_MODEL,
+                model=self._settings.GEMINI_MODEL,
                 input_chars=input_chars,
                 output_chars=len(raw_text),
                 input_tokens=input_tokens,
@@ -437,23 +420,20 @@ class VertexAIProvider(BaseAIProvider):
                 call_metadata={
                     "stage": stage,
                     "thinking_level": thinking_level,
-                    "thinking_budget": thinking_budget,
                     "output_text_tokens": output_text_tokens,
                     "output_thought_tokens": output_thought_tokens,
-                    "pricing_input_usd_per_million": self._settings.VERTEX_INPUT_USD_PER_MILLION_TOKENS,
-                    "pricing_output_usd_per_million": self._settings.VERTEX_OUTPUT_USD_PER_MILLION_TOKENS,
+                    "pricing_input_usd_per_million": self._settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS,
+                    "pricing_output_usd_per_million": self._settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS,
                     "pricing_currency": "USD",
                     **(extra_call_metadata or {}),
                 },
             )
 
-        # Build AIProviderResult payload from parsed structured output
         estimated_cost = self._calculate_cost(input_tokens, total_output_tokens)
         output_chars = len(str(parsed))
 
         if stage == "triage":
             assert isinstance(parsed, TriageAnalysisResult)
-            # Convert flat topic_codes list to AIAnalysisTopicItem list
             topics: list[AIAnalysisTopicItem] = []
             for code in parsed.topic_codes:
                 topics.append(
@@ -461,7 +441,7 @@ class VertexAIProvider(BaseAIProvider):
                         topic_code=code,
                         is_primary=(code == parsed.primary_topic_code),
                         confidence=parsed.confidence,
-                        rationale=None,  # triage doesn't produce per-topic rationale
+                        rationale=None,
                     )
                 )
 
@@ -469,16 +449,15 @@ class VertexAIProvider(BaseAIProvider):
                 relevance_score=parsed.relevance_score,
                 confidence=parsed.confidence,
                 topics=topics,
-                summary=None,       # triage doesn't produce summary
-                key_points=[],      # triage doesn't produce key_points
+                summary=None,
+                key_points=[],
                 reason=parsed.reason,
             )
 
         else:
             assert isinstance(parsed, DeepAnalysisResult)
-            # Deep analysis doesn't produce score/topics — those come from triage
             payload = AIAnalysisResponsePayload(
-                relevance_score=0,    # placeholder; pipeline will preserve triage value
+                relevance_score=0,
                 confidence=None,
                 topics=[],
                 summary=parsed.summary,
@@ -487,9 +466,10 @@ class VertexAIProvider(BaseAIProvider):
             )
 
         raw_resp: dict[str, Any] = {
-            "model": self._settings.VERTEX_AI_MODEL,
+            "model": self._settings.GEMINI_MODEL,
             "stage": stage,
             "input_tokens": input_tokens,
+            "output_tokens": total_output_tokens,
             "output_text_tokens": output_text_tokens,
             "output_thought_tokens": output_thought_tokens,
         }
@@ -497,11 +477,10 @@ class VertexAIProvider(BaseAIProvider):
         call_meta: dict[str, Any] = {
             "stage": stage,
             "thinking_level": thinking_level,
-            "thinking_budget": thinking_budget,
             "output_text_tokens": output_text_tokens,
             "output_thought_tokens": output_thought_tokens,
-            "pricing_input_usd_per_million": self._settings.VERTEX_INPUT_USD_PER_MILLION_TOKENS,
-            "pricing_output_usd_per_million": self._settings.VERTEX_OUTPUT_USD_PER_MILLION_TOKENS,
+            "pricing_input_usd_per_million": self._settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS,
+            "pricing_output_usd_per_million": self._settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS,
             "pricing_currency": "USD",
         }
         if extra_call_metadata:
@@ -512,7 +491,7 @@ class VertexAIProvider(BaseAIProvider):
             payload=payload,
             raw_response=raw_resp,
             provider_name=self.provider_name,
-            model=self._settings.VERTEX_AI_MODEL,
+            model=self._settings.GEMINI_MODEL,
             input_chars=input_chars,
             output_chars=output_chars,
             input_tokens=input_tokens,

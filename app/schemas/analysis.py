@@ -29,7 +29,7 @@ class AIAnalysisResponsePayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Vertex AI Structured Output Schemas (Bloque 7B)
+# Gemini Developer API Structured Output Schemas (Bloque 7B)
 # These are used as response_schema in google-genai GenerateContentConfig.
 # They define exactly what the model must produce per pipeline stage.
 # ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ class AIAnalysisResponsePayload(BaseModel):
 class TriageAnalysisResult(BaseModel):
     """Structured output schema for the TRIAGE stage.
 
-    Used as Structured Output schema in Vertex AI calls.
+    Used as Structured Output schema in Gemini API calls.
     The model must return valid JSON matching this schema.
     """
     relevance_score: int = Field(

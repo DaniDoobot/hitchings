@@ -3,8 +3,8 @@
 Creates or updates:
 1. observatory_triage v1 (stage: triage) — legacy/mock pipeline
 2. observatory_deep_analysis v1 (stage: deep_analysis) — legacy/mock pipeline
-3. observatory_triage v2 (stage: triage) — Vertex AI Structured Output pipeline
-4. observatory_deep_analysis v2 (stage: deep_analysis) — Vertex AI Structured Output pipeline
+3. observatory_triage v2 (stage: triage) — Gemini API Structured Output pipeline
+4. observatory_deep_analysis v2 (stage: deep_analysis) — Gemini API Structured Output pipeline
 
 Execution:
     python -m scripts.seed_analysis_prompts
@@ -98,7 +98,7 @@ PROMPT_DEFINITIONS = [
         "active": True,
     },
     # -----------------------------------------------------------------------
-    # v2 Prompts — Vertex AI Structured Output pipeline (Bloque 7B)
+    # v2 Prompts — Gemini Developer API Structured Output pipeline (Bloque 7B)
     # These prompts are designed for:
     # - Two-stage pipeline (triage / deep_analysis separated)
     # - google-genai Structured Output (TriageAnalysisResult / DeepAnalysisResult)

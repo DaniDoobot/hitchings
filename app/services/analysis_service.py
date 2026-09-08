@@ -92,9 +92,9 @@ class AnalysisService:
             )
         elif provider_type == "mock":
             return MockAIProvider()
-        elif provider_type == "vertex_ai":
-            from app.providers.ai.vertex_ai import VertexAIProvider  # lazy import
-            return VertexAIProvider(settings=self.settings)
+        elif provider_type == "gemini_api":
+            from app.providers.ai.gemini_api import GeminiAPIProvider  # lazy import
+            return GeminiAPIProvider(settings=self.settings)
         else:
             raise ValueError(f"Unsupported AI provider: '{provider_type}'")
 

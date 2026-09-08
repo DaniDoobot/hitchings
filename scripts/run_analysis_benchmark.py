@@ -1,19 +1,19 @@
-﻿"""Benchmark script: controlled AI analysis run on 20 selected Entries.
+"""Benchmark script: controlled AI analysis run on 20 selected Entries.
 
 Selects the 5 most recent Entries per Source (deterministic) and runs the
-triage â†’ deep pipeline against Vertex AI.
+triage -> deep pipeline against Gemini Developer API.
 
 SAFETY:
-  - Requires --confirm-real-calls to make actual Vertex AI API calls.
+  - Requires --confirm-real-calls to make actual Gemini API calls.
   - Without that flag: shows preflight and sample selection only (dry-run mode).
-  - ANALYSIS_PROVIDER must be 'vertex_ai' for real calls.
+  - ANALYSIS_PROVIDER must be 'gemini_api' for real calls.
   - Budget hard stop: aborts before each new Entry if cost >= --max-usd.
 
 Usage:
     # Dry-run (no API calls, shows what would be done):
     python -m scripts.run_analysis_benchmark
 
-    # Real calls (requires ANALYSIS_PROVIDER=vertex_ai + ADC configured):
+    # Real calls (requires ANALYSIS_PROVIDER=gemini_api + GEMINI_API_KEY):
     python -m scripts.run_analysis_benchmark --confirm-real-calls [--max-usd 1.00]
 """
 
@@ -62,8 +62,8 @@ ENTRIES_PER_SOURCE = 5
 
 def short_title(title: Optional[str], max_len: int = 60) -> str:
     if not title:
-        return "(sin tÃ­tulo)"
-    return title[:max_len] + "â€¦" if len(title) > max_len else title
+        return "(sin título)"
+    return title[:max_len] + "..." if len(title) > max_len else title
 
 
 def fmt_usd(value: float) -> str:
@@ -72,7 +72,7 @@ def fmt_usd(value: float) -> str:
 
 def fmt_ms(value: Optional[int]) -> str:
     if value is None:
-        return "â€”"
+        return "-"
     return f"{value}ms"
 
 
@@ -103,7 +103,6 @@ def select_sample(db: Session) -> list[Entry]:
         )
         selected.extend(entries)
 
-    # Sort final list by source name then published_at desc for stable display
     selected.sort(
         key=lambda e: (e.source.name if e.source else "", -(e.published_at.timestamp() if e.published_at else 0))
     )
@@ -111,10 +110,7 @@ def select_sample(db: Session) -> list[Entry]:
 
 
 def check_no_prior_analyses(entries: list[Entry], db: Session) -> list[Entry]:
-    """Verify none of the selected entries already have EntryAnalysis records.
-
-    Returns list of entries that DO have existing analyses (should be empty).
-    """
+    """Verify none of the selected entries already have EntryAnalysis records."""
     entry_ids = [e.id for e in entries]
     existing = (
         db.query(EntryAnalysis)
@@ -137,30 +133,30 @@ def print_preflight(
     max_usd: float,
     real_calls: bool,
 ) -> None:
-    print_separator("â•")
-    print("  HITCHINGS â€” BENCHMARK PREFLIGHT")
-    print_separator("â•")
-    print(f"  Provider:       {settings.ANALYSIS_PROVIDER}")
-    print(f"  Model:          {settings.VERTEX_AI_MODEL}")
-    print(f"  Project:        {settings.VERTEX_AI_PROJECT or '(not set â€” will fail on real calls)'}")
-    print(f"  Location:       {settings.VERTEX_AI_LOCATION}")
-    print(f"  Thinking TRIAGE:{settings.ANALYSIS_TRIAGE_THINKING_LEVEL}")
-    print(f"  Thinking DEEP:  {settings.ANALYSIS_DEEP_THINKING_LEVEL}")
+    print_separator("=")
+    print("  HITCHINGS - BENCHMARK PREFLIGHT")
+    print_separator("=")
+    print(f"  Provider:               {settings.ANALYSIS_PROVIDER}")
+    print(f"  Model:                  {settings.GEMINI_MODEL}")
+    has_key = bool(settings.GEMINI_API_KEY.strip()) if settings.GEMINI_API_KEY else False
+    print(f"  API key configured:     {'YES' if has_key else 'NO (not configured)'}")
+    print(f"  Thinking TRIAGE:        {settings.ANALYSIS_TRIAGE_THINKING_LEVEL}")
+    print(f"  Thinking DEEP:          {settings.ANALYSIS_DEEP_THINKING_LEVEL}")
     print(f"  Max input chars (triage): {settings.ANALYSIS_TRIAGE_MAX_INPUT_CHARS:,}")
     print(f"  Max input chars (deep):   {settings.ANALYSIS_DEEP_MAX_INPUT_CHARS:,}")
     print_separator()
-    print(f"  Pricing (input):  ${settings.VERTEX_INPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
-    print(f"  Pricing (output): ${settings.VERTEX_OUTPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
-    print(f"  Budget limit:     {fmt_usd(max_usd)}")
+    print(f"  Pricing (input):        ${settings.GEMINI_INPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
+    print(f"  Pricing (output):       ${settings.GEMINI_OUTPUT_USD_PER_MILLION_TOKENS} / 1M tokens")
+    print(f"  Budget limit:           {fmt_usd(max_usd)}")
     print_separator()
-    print(f"  Sample strategy: {SAMPLE_STRATEGY} ({ENTRIES_PER_SOURCE} per Source)")
+    print(f"  Sample strategy:        {SAMPLE_STRATEGY} ({ENTRIES_PER_SOURCE} per Source)")
     total_chars = sum(len(e.content or "") for e in entries)
     max_chars = max((len(e.content or "") for e in entries), default=0)
-    print(f"  Entries selected: {len(entries)}")
-    print(f"  Total content chars: {total_chars:,}")
-    print(f"  Max document chars:  {max_chars:,}")
-    print(f"  Real calls mode: {'YES âš ï¸' if real_calls else 'NO (dry-run)'}")
-    print_separator("â•")
+    print(f"  Entries selected:       {len(entries)}")
+    print(f"  Total content chars:    {total_chars:,}")
+    print(f"  Max document chars:     {max_chars:,}")
+    print(f"  Real calls mode:        {'YES [REAL API CALLS]' if real_calls else 'NO (dry-run)'}")
+    print_separator("=")
 
 
 def print_sample_table(entries: list[Entry]) -> None:
@@ -183,14 +179,7 @@ def print_sample_table(entries: list[Entry]) -> None:
 # ---------------------------------------------------------------------------
 
 def resolve_prompts(db: Session) -> tuple[AnalysisPromptVersion, AnalysisPromptVersion]:
-    """Find the active v2 triage and deep analysis prompts.
-
-    Returns:
-        (triage_prompt, deep_prompt)
-
-    Raises:
-        SystemExit: if the prompts are not found.
-    """
+    """Find the active v2 triage and deep analysis prompts."""
     triage = db.execute(
         select(AnalysisPromptVersion).where(
             AnalysisPromptVersion.code == "observatory_triage",
@@ -237,9 +226,9 @@ def resolve_matrix(db: Session) -> TrackingMatrix:
 # ---------------------------------------------------------------------------
 
 def print_results_table(results: list[dict]) -> None:
-    print_separator("â•")
+    print_separator("=")
     print("  BENCHMARK RESULTS")
-    print_separator("â•")
+    print_separator("=")
     cols = (
         f"  {'#':<3} {'Source':<20} {'Score':>5} {'Status':<14} {'Conf':>5} "
         f"{'T-In':>8} {'T-Out':>8} {'T-Cost':>10} {'T-ms':>7} "
@@ -248,9 +237,9 @@ def print_results_table(results: list[dict]) -> None:
     print(cols)
     print_separator()
     for r in results:
-        score = str(r.get("relevance_score") or "â€”")
-        status = (r.get("relevance_status") or "â€”")[:13]
-        conf = f"{r['confidence']:.2f}" if r.get("confidence") is not None else "â€”"
+        score = str(r.get("relevance_score") or "-")
+        status = (r.get("relevance_status") or "-")[:13]
+        conf = f"{r['confidence']:.2f}" if r.get("confidence") is not None else "-"
         t_in = f"{r.get('triage_input_tokens', 0):,}"
         t_out = f"{r.get('triage_output_tokens', 0):,}"
         t_cost = fmt_usd(r.get("triage_cost", 0.0))
@@ -258,7 +247,7 @@ def print_results_table(results: list[dict]) -> None:
         deep_called = "YES" if r.get("deep_called") else "no"
         d_cost = fmt_usd(r.get("deep_cost", 0.0))
         total_cost = fmt_usd(r.get("total_cost", 0.0))
-        ea_status = (r.get("ea_status") or "â€”")[:11]
+        ea_status = (r.get("ea_status") or "-")[:11]
         source_name = (r.get("source") or "")[:18]
         title = short_title(r.get("title"), 40)
         print(
@@ -274,30 +263,30 @@ def print_textual_results(results: list[dict]) -> None:
         if r.get("ea_status") == "failed":
             continue
         relevance = r.get("relevance_status")
-        print_separator("â”€")
-        print(f"  [{r['idx']}] {r.get('source', '')} â€” {short_title(r.get('title'), 80)}")
+        print_separator("-")
+        print(f"  [{r['idx']}] {r.get('source', '')} - {short_title(r.get('title'), 80)}")
         print(f"      Score: {r.get('relevance_score')} | Status: {relevance} | "
-              f"Primary topic: {r.get('primary_topic') or 'â€”'}")
+              f"Primary topic: {r.get('primary_topic') or '-'}")
 
         if relevance == "relevant":
-            reason = r.get("reason") or "â€”"
-            summary = r.get("summary") or "â€”"
+            reason = r.get("reason") or "-"
+            summary = r.get("summary") or "-"
             key_points = r.get("key_points") or []
             print(f"\n      Reason:  {reason}")
             print(f"\n      Summary:\n      {summary}")
             if key_points:
                 print("\n      Key points:")
                 for kp in key_points:
-                    print(f"        â€¢ {kp}")
+                    print(f"        * {kp}")
         elif relevance == "uncertain":
-            reason = r.get("reason") or "â€”"
+            reason = r.get("reason") or "-"
             topics = r.get("topic_codes") or []
             print(f"\n      Reason:  {reason}")
-            print(f"      Topics:  {', '.join(topics) or 'â€”'}")
+            print(f"      Topics:  {', '.join(topics) or '-'}")
         else:
-            reason = r.get("reason") or "â€”"
+            reason = r.get("reason") or "-"
             print(f"\n      Reason:  {reason}")
-    print_separator("â”€")
+    print_separator("-")
 
 
 def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: bool) -> None:
@@ -318,15 +307,14 @@ def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: b
     avg_triage_lat = sum(triage_latencies) / len(triage_latencies) if triage_latencies else 0
     avg_deep_lat = sum(deep_latencies) / len(deep_latencies) if deep_latencies else 0
 
-    # Cost by source
     cost_by_source: dict[str, float] = {}
     for r in results:
         src = r.get("source") or "unknown"
         cost_by_source[src] = cost_by_source.get(src, 0.0) + r.get("total_cost", 0.0)
 
-    print_separator("â•")
+    print_separator("=")
     print("  BENCHMARK AGGREGATES")
-    print_separator("â•")
+    print_separator("=")
     print(f"  Total analyses:        {total}")
     print(f"  Relevant:              {relevant}")
     print(f"  Uncertain:             {uncertain}")
@@ -350,8 +338,8 @@ def print_aggregates(results: list[dict], budget_limit: float, budget_stopped: b
     print(f"  Budget limit:          {fmt_usd(budget_limit)}")
     print(f"  Budget used:           {fmt_usd(total_cost)}")
     if budget_stopped:
-        print("  âš ï¸  BUDGET LIMIT REACHED â€” benchmark stopped early")
-    print_separator("â•")
+        print("  [!] BUDGET LIMIT REACHED - benchmark stopped early")
+    print_separator("=")
 
 
 # ---------------------------------------------------------------------------
@@ -365,20 +353,19 @@ async def run_benchmark(
 ) -> None:
     settings = get_settings()
 
-    # Validate provider
+    # Validate provider and API key
     if real_calls:
-        if settings.ANALYSIS_PROVIDER.lower() != "vertex_ai":
+        if settings.ANALYSIS_PROVIDER.lower() != "gemini_api":
             print(
-                f"\n  ERROR: --confirm-real-calls requires ANALYSIS_PROVIDER=vertex_ai, "
+                f"\n  ERROR: --confirm-real-calls requires ANALYSIS_PROVIDER=gemini_api, "
                 f"but current value is '{settings.ANALYSIS_PROVIDER}'.\n"
-                "  Update .env and reload the settings cache."
+                "  Update .env and reload settings."
             )
             sys.exit(1)
-        if not settings.VERTEX_AI_PROJECT:
+        if not settings.GEMINI_API_KEY.strip():
             print(
-                "\n  ERROR: VERTEX_AI_PROJECT is not configured.\n"
-                "  Set VERTEX_AI_PROJECT=<your-gcp-project-id> in .env.\n"
-                "  Current active gcloud project can be checked with: gcloud config get-value project"
+                "\n  ERROR: GEMINI_API_KEY is not configured.\n"
+                "  Configure GEMINI_API_KEY in .env before executing real calls."
             )
             sys.exit(1)
 
@@ -392,7 +379,7 @@ async def run_benchmark(
     print_sample_table(entries)
 
     if not real_calls:
-        print("\n  DRY-RUN MODE â€” No Vertex AI calls will be made.")
+        print("\n  DRY-RUN MODE - No Gemini API calls will be made.")
         print("  Add --confirm-real-calls to execute the benchmark.")
         return
 
@@ -414,29 +401,28 @@ async def run_benchmark(
     print(f"  Matrix:         {matrix.code} [{matrix.id}]")
 
     # Initialize pipeline
-    from app.providers.ai.vertex_ai import VertexAIProvider
-    provider = VertexAIProvider(settings=settings)
+    from app.providers.ai.gemini_api import GeminiAPIProvider
+    provider = GeminiAPIProvider(settings=settings)
     pipeline = AnalysisPipelineService(provider=provider)
 
     benchmark_run_id = str(uuid.uuid4())
     print(f"\n  Benchmark run ID: {benchmark_run_id}")
-    print_separator("â•")
+    print_separator("=")
 
     results: list[dict] = []
     accumulated_cost: float = 0.0
     budget_stopped: bool = False
 
     for idx, entry in enumerate(entries, 1):
-        # Budget check BEFORE calling
         if accumulated_cost >= max_usd:
             print(
-                f"\n  âš ï¸  BUDGET LIMIT REACHED before Entry #{idx}. "
+                f"\n  [!] BUDGET LIMIT REACHED before Entry #{idx}. "
                 f"Accumulated: {fmt_usd(accumulated_cost)} / Limit: {fmt_usd(max_usd)}"
             )
             budget_stopped = True
             break
 
-        print(f"\n  [{idx}/{len(entries)}] {entry.source.name if entry.source else '?'} â€” {short_title(entry.title, 70)}")
+        print(f"\n  [{idx}/{len(entries)}] {entry.source.name if entry.source else '?'} - {short_title(entry.title, 70)}")
         print(f"         Content: {len(entry.content or ''):,} chars | Published: {entry.published_at}")
 
         extra_meta = {
@@ -484,7 +470,6 @@ async def run_benchmark(
             })
             continue
 
-        # Load calls for metrics
         db.refresh(analysis)
         calls = sorted(analysis.calls, key=lambda c: c.created_at)
         triage_call = next((c for c in calls if c.stage == "triage"), None)
@@ -502,7 +487,6 @@ async def run_benchmark(
 
         accumulated_cost += entry_total_cost
 
-        # Load topics for reporting
         topic_codes = [t.topic.code for t in analysis.topics if t.topic]
         primary_topic = next((t.topic.code for t in analysis.topics if t.is_primary and t.topic), None)
 
@@ -532,20 +516,19 @@ async def run_benchmark(
             "ea_status": analysis.status,
         })
 
-        status_icon = {"relevant": "âœ…", "uncertain": "âš ï¸", "not_relevant": "âŒ", None: "?"}.get(analysis.relevance_status, "?")
+        status_icon = {"relevant": "[OK]", "uncertain": "[!]", "not_relevant": "[X]", None: "?"}.get(analysis.relevance_status, "?")
         print(
-            f"         â†’ {status_icon} score={analysis.relevance_score} "
+            f"         -> {status_icon} score={analysis.relevance_score} "
             f"status={analysis.relevance_status} "
             f"cost={fmt_usd(entry_total_cost)} "
             f"budget_used={fmt_usd(accumulated_cost)}"
         )
 
-    # Print results
     print_results_table(results)
     print_textual_results(results)
     print_aggregates(results, max_usd, budget_stopped)
 
-    print(f"\n  âœ… Benchmark complete. Benchmark run ID: {benchmark_run_id}")
+    print(f"\n  [OK] Benchmark complete. Benchmark run ID: {benchmark_run_id}")
     print("  Review results above before running any additional analyses.")
     print("  DO NOT analyze the remaining 60 entries until you have reviewed these results.")
 
@@ -556,7 +539,7 @@ async def run_benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="HITCHINGS â€” Controlled AI analysis benchmark",
+        description="HITCHINGS - Controlled AI analysis benchmark (Gemini Developer API)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -565,8 +548,8 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Actually call Vertex AI. Without this flag, only preflight and sample "
-            "selection are shown (dry-run). Requires ANALYSIS_PROVIDER=vertex_ai."
+            "Actually call Gemini Developer API. Without this flag, only preflight and sample "
+            "selection are shown (dry-run). Requires ANALYSIS_PROVIDER=gemini_api."
         ),
     )
     parser.add_argument(
@@ -593,5 +576,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

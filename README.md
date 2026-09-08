@@ -479,20 +479,127 @@ La suite completa (**91 tests**, 0 fallos) valida configuración, endpoints, mod
 
 ---
 
-## 18. Funcionalidades Deliberadamente Pendientes
+## 15. Bloque 7B: Gemini Developer API — Primer Pipeline Real de IA
 
-Para respetar la delimitación estricta de fases, en este Bloque 7A **NO** se han implementado:
-1. Llamadas a modelos LLM externos de pago (OpenAI, Anthropic, Gemini, Vertex AI).
-2. Endpoint mutacional `POST /entries/{id}/analyze` o pipeline batch en background.
-3. Extracción de texto de documentos binarios PDF ni OCR.
-4. Scheduler en segundo plano (Celery, APScheduler, cron).
-5. Autenticación, JWT o control de acceso.
-6. Interfaz gráfica o frontend.
-7. Módulo de análisis documental (PDF, audio, exportación).
+El **Bloque 7B** integra la **Gemini Developer API** como primer proveedor real de análisis en HITCHINGS,
+construye el pipeline de dos etapas (triage → deep analysis) y establece la infraestructura de benchmark controlado.
+
+### Decisión Arquitectónica Definitiva
+
+```
+HITCHINGS (VPS / Dokploy)
+      ↓
+Gemini Developer API (Google AI Studio)
+      ↓
+GEMINI_API_KEY (Variable de entorno secreta)
+```
+
+- **Proveedor:** Google Gemini Developer API.
+- **Autenticación:** API Key (`GEMINI_API_KEY`) inyectada como variable de entorno secreta en Dokploy/VPS.
+- **NO Vertex AI:** Se descarta deliberadamente Vertex AI, Application Default Credentials (ADC), IAM de Google Cloud y proyectos de GCP para la ejecución del aplicativo.
+- **Despliegue futuro:** GitHub → Dokploy → VPS → Gemini Developer API.
+- **Módulo 2 (futuro):** Seguirá la misma arquitectura de Gemini Developer API con API Key.
+
+### Modelo y Pricing
+
+| Parámetro | Valor |
+|---|---|
+| Modelo | `gemini-3.8-flash` |
+| SDK | `google-genai >= 1.16.0` (inicializado con `api_key=GEMINI_API_KEY`) |
+| Structured Output | Sí (`TriageAnalysisResult` / `DeepAnalysisResult`) |
+| Thinking / Reasoning | Nativo (`thinking_level="low"` para triage, `"medium"` para deep) |
+| Pricing Input (oficial) | **$0.75 / 1M tokens** |
+| Pricing Output (oficial) | **$3.75 / 1M tokens** (incluye tokens de razonamiento) |
+| Context Window | 1.000.000 tokens |
+
+### Configuración (`.env`)
+
+```bash
+# Provider (disabled por defecto — fail-closed)
+ANALYSIS_PROVIDER=disabled
+
+# Gemini Developer API
+GEMINI_API_KEY=tu_api_key_aqui
+GEMINI_MODEL=gemini-3.8-flash
+
+# Thinking levels por etapa
+ANALYSIS_TRIAGE_THINKING_LEVEL=low
+ANALYSIS_DEEP_THINKING_LEVEL=medium
+
+# Límites de caracteres de entrada (salvaguarda anti-truncación)
+ANALYSIS_TRIAGE_MAX_INPUT_CHARS=250000
+ANALYSIS_DEEP_MAX_INPUT_CHARS=250000
+
+# Budget benchmark (USD)
+ANALYSIS_BENCHMARK_MAX_USD=1.00
+
+# Pricing configurable
+GEMINI_INPUT_USD_PER_MILLION_TOKENS=0.75
+GEMINI_OUTPUT_USD_PER_MILLION_TOKENS=3.75
+```
+
+### Pipeline de Dos Etapas
+
+```
+Entry
+  ↓
+TRIAGE (thinking_level=low, max_output=512)
+  → relevance_score (0-100)
+  → relevance_status: not_relevant / uncertain / relevant
+  → topic_codes + primary_topic_code
+  → reason (en castellano)
+  ↓
+Si not_relevant / uncertain → EntryAnalysis completed (sin deep)
+Si relevant:
+  ↓
+DEEP ANALYSIS (thinking_level=medium, max_output=2048)
+  → summary (150-300 palabras en castellano)
+  → key_points (3-6 puntos en castellano)
+  ↓
+EntryAnalysis completed
+```
+
+### Semántica de Fallos
+
+| Escenario | EntryAnalysis | Triage Call | Deep Call |
+|---|---|---|---|
+| Triage falla | `failed` | `failed` | no ejecutada |
+| Deep falla (triage OK) | `failed` | `completed` | `failed` (datos de triage preservados) |
+| Topic inventado / no matriz | `failed` | `failed` | no ejecutada |
+
+### Benchmark Controlado
+
+El benchmark se ejecuta bajo doble seguro:
+1. `ANALYSIS_PROVIDER=gemini_api`
+2. Flag explícito `--confirm-real-calls`
+
+```bash
+# Dry-run (100% no facturable — muestra preflight y selección determinista):
+python -m scripts.run_analysis_benchmark
+
+# Ejecución real (requiere GEMINI_API_KEY):
+python -m scripts.run_analysis_benchmark --confirm-real-calls [--max-usd 1.00]
+```
+
+**Muestra determinista:** 5 Entries más recientes por Source (20 en total).
+**Hard stop presupuestario:** Si el coste acumulado alcanza o supera `--max-usd` antes de procesar una Entry, el benchmark se detiene limpiamente.
 
 ---
 
-## 18. Roadmap
+## 16. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7B **NO** se han implementado:
+1. Llamadas masivas sobre las 80 Entries (se procesará solo muestra de benchmark tras validación).
+2. Endpoint mutacional `POST /entries/{id}/analyze` o ejecución automática tras ingestas.
+3. Extracción de texto de documentos binarios PDF ni OCR.
+4. Scheduler en segundo plano (Celery, APScheduler, cron).
+5. Autenticación de usuarios finales ni JWT.
+6. Interfaz gráfica o frontend.
+7. Módulo 2 de análisis documental avanzado.
+
+---
+
+## 17. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -502,9 +609,10 @@ Para respetar la delimitación estricta de fases, en este Bloque 7A **NO** se ha
 - [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments.
 - [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions.
 - [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista). *(Completado)*
-- [ ] **Bloque 7B:** Integración con proveedores LLM reales y pipeline de triage y análisis en profundidad.
+- [x] **Bloque 7B:** Gemini Developer API Baseline: pipeline triage + deep analysis, benchmark controlado. *(Completado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
 - [ ] **Futuro:** Módulo de análisis documental.
+
 

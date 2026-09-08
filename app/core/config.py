@@ -40,14 +40,14 @@ class Settings(BaseSettings):
     ANALYSIS_UNCERTAIN_MIN_SCORE: int = 40
     ANALYSIS_MONTHLY_ENTRY_LIMIT: int = 1000
 
-    # Vertex AI (Bloque 7B - First Real AI Provider)
-    # Authenticate locally with: gcloud auth application-default login
-    # Do NOT store API keys or service account JSON in the repository.
-    VERTEX_AI_PROJECT: str = ""
-    VERTEX_AI_LOCATION: str = "global"
-    VERTEX_AI_MODEL: str = "gemini-2.0-flash"
+    # Gemini Developer API (Bloque 7B - First Real AI Provider)
+    # Authenticate with API key from Google AI Studio / Gemini Developer API.
+    # In production (Dokploy/VPS), configure as an environment secret.
+    # Never store API keys in the repository.
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.8-flash"
 
-    # Thinking levels for each pipeline stage
+    # Thinking levels for each pipeline stage (low/medium/high)
     ANALYSIS_TRIAGE_THINKING_LEVEL: str = "low"
     ANALYSIS_DEEP_THINKING_LEVEL: str = "medium"
 
@@ -58,12 +58,13 @@ class Settings(BaseSettings):
     # Benchmark safety budget (USD). Hard stop before starting each new Entry.
     ANALYSIS_BENCHMARK_MAX_USD: float = 1.00
 
-    # Vertex AI pricing estimates for benchmark cost calculations.
-    # These are configuration constants for gemini-2.0-flash as of 2026-09.
+    # Gemini Developer API pricing estimates for benchmark cost calculations.
+    # Official pricing for gemini-3.8-flash (September 2026):
+    # $0.75 per 1M input tokens, $3.75 per 1M output tokens (includes reasoning).
     # Review and update if Google changes pricing or if you switch models.
     # Unit: USD per 1,000,000 tokens.
-    VERTEX_INPUT_USD_PER_MILLION_TOKENS: float = 0.075
-    VERTEX_OUTPUT_USD_PER_MILLION_TOKENS: float = 0.30
+    GEMINI_INPUT_USD_PER_MILLION_TOKENS: float = 0.75
+    GEMINI_OUTPUT_USD_PER_MILLION_TOKENS: float = 3.75
 
 
 @lru_cache
