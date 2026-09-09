@@ -979,17 +979,50 @@ En este bloque se ha completado la preparación técnica del backend FastAPI par
 
 ---
 
-## 28. Funcionalidades Deliberadamente Pendientes
+## 28. BLOQUE 8B.1 — Portal Cliente MVP: Estructura, Diseño y Conexión API
 
-Para respetar la delimitación estricta de fases, en este Bloque 8B.0 **NO** se han implementado:
-1. Construcción del frontend web (código React, Vue, HTML/CSS).
-2. Autenticación de usuarios, login o gestión de sesiones (fase posterior).
-3. Scheduler automático en segundo plano.
-4. Modificación de datos analíticos, históricos ni prompts.
+En este bloque se ha construido el portal frontend cliente para el Observatorio de Competencia, diseñado específicamente para profesionales jurídicos:
+
+### 1. Arquitectura y Stack Tecnológico
+- **SPA Moderna:** React 18 + TypeScript + Vite + Tailwind CSS + Lucide Icons.
+- **Enrutamiento:** React Router v6 con 3 rutas principales:
+  - `/` — **Cuadro de Mando:** KPIs del fondo documental (total, relevantes, en revisión, descartadas, actividad 7d/30d), materias jurídicas activas con barras de distribución, fuentes monitorizadas y últimas 5 resoluciones relevantes.
+  - `/observatorio` — **Explorador Jurisprudencial:** Listado completo con búsqueda textual (`q`), filtros combinados (calificación de relevancia, puntuación mínima, organismo emisor, materia jurídica con expansión en árbol, rango de fechas), ordenación bidireccional y paginación.
+  - `/observatorio/:entryId` — **Ficha Jurídica:** Resumen ejecutivo de alto contraste, puntos clave estructurados y bloque de **Evidencias Textuales Verificadas** (citas literales de la resolución oficial).
+- **Diseño Visual:** Estética sobria, institucional y legible, con paleta navy/slate y acentos dorados legales (`legal-gold`).
+
+### 2. Capa de Datos Dual (API Real / Mock Autónomo)
+- **Servicio Unificado:** [`src/services/observatoryApi.ts`](file:///C:/Users/danim/Proyectos/hitchings/src/services/observatoryApi.ts) desacopla totalmente los componentes de la procedencia de los datos.
+- **Detección Automática:**
+  - Si `VITE_API_BASE_URL` no está definida o si `VITE_USE_MOCK_DATA=true`, la aplicación opera en **modo autónomo** consumiendo [`src/data/mockObservatoryData.ts`](file:///C:/Users/danim/Proyectos/hitchings/src/data/mockObservatoryData.ts).
+  - Si `VITE_API_BASE_URL` está configurada (ej. `http://localhost:8000`), consume en tiempo real los endpoints de `/api/v1/observatory/*`.
+- **Filtros en Mock:** El dataset mock reproduce exactamente la semántica del backend (búsqueda en título/resumen/puntos clave, expansión jerárquica de temas padre a subtemas, filtros de fuente y fecha, ordenación y paginación).
+
+### 3. Puesta en Marcha del Frontend
+```bash
+# Instalación de dependencias (Bun o npm)
+bun install
+
+# Modo desarrollo (puerto 5173 por defecto)
+bun dev
+
+# Compilación de producción (TypeScript check + Vite build)
+bun run build
+```
 
 ---
 
-## 29. Roadmap
+## 29. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 8B.1 **NO** se han implementado:
+1. Autenticación de usuarios, login o gestión de sesiones (fase posterior).
+2. Modificación de datos analíticos, históricos ni prompts.
+3. Scheduler automático en segundo plano.
+4. Nuevos endpoints ni alteraciones del contrato API existente.
+
+---
+
+## 30. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1001,7 +1034,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 8B.0 **NO** se 
 - [x] **Bloques 7A a 7H.3:** Motor Analítico de IA y Grounding (Cerrado). 100% de cobertura (80/80 entradas con análisis vigente, validación verbatim de citas, prompts v6 y control estricto de costes).
 - [x] **Bloque 8A:** API de Consumo del Observatorio para el Portal Cliente (`/api/v1/observatory`). *(Cerrado)*
 - [x] **Bloque 8B.0:** Preparación del Backend para el Portal Web (CORS, Contrato API y Smoke Test HTTP). *(Cerrado)*
-- [ ] **Bloque 8B:** Portal frontend cliente del Observatorio.
+- [x] **Bloque 8B.1:** Portal Frontend Cliente MVP: Estructura, Diseño y Conexión API. *(Cerrado)*
 - [ ] **Bloque 9:** Automatización / programación (scheduler).
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.
