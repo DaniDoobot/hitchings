@@ -314,7 +314,7 @@ export const ObservatoryPage: React.FC = () => {
       {/* Main 2-Column Layout */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-8 items-start">
         {/* Left Filters Sidebar (Desktop) */}
-        <aside className="hidden md:block md:col-span-4 lg:col-span-3 bg-white rounded-lg border border-slate-200 p-5 shadow-sm space-y-6 sticky top-24">
+        <aside className="hidden md:block md:col-span-4 lg:col-span-3 bg-white rounded-lg border border-slate-200 p-5 shadow-sm space-y-6 sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto">
           <div className="flex items-center justify-between pb-3 border-b border-slate-100">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-800 flex items-center gap-2">
               <Filter className="w-3.5 h-3.5 text-navy-700" />
@@ -558,22 +558,38 @@ export const ObservatoryPage: React.FC = () => {
                   {/* Card Footer: Canonical Topics & Actions */}
                   <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {entry.canonical_primary_topic && (
-                        <TopicBadge
-                          name={entry.canonical_primary_topic.name}
-                          isPrimary
-                          onClick={() => updateFilter({ topic_code: entry.canonical_primary_topic!.code })}
-                        />
-                      )}
-                      {entry.canonical_topics
-                        .filter((t) => t.code !== entry.canonical_primary_topic?.code)
-                        .map((t) => (
-                          <TopicBadge
-                            key={t.code}
-                            name={t.name}
-                            onClick={() => updateFilter({ topic_code: t.code })}
-                          />
-                        ))}
+                      {(() => {
+                        const allTopics = [
+                          ...(entry.canonical_primary_topic
+                            ? [{ ...entry.canonical_primary_topic, isPrimary: true }]
+                            : []),
+                          ...entry.canonical_topics
+                            .filter((t) => t.code !== entry.canonical_primary_topic?.code)
+                            .map((t) => ({ ...t, isPrimary: false })),
+                        ];
+                        const visible = allTopics.slice(0, 3);
+                        const extraCount = allTopics.length - 3;
+                        return (
+                          <>
+                            {visible.map((t) => (
+                              <TopicBadge
+                                key={t.code}
+                                name={t.name}
+                                isPrimary={t.isPrimary}
+                                onClick={() => updateFilter({ topic_code: t.code })}
+                              />
+                            ))}
+                            {extraCount > 0 && (
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200"
+                                title={`${extraCount} materias adicionales`}
+                              >
+                                +{extraCount} más
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
 
                     <div className="flex items-center gap-3 ml-auto text-xs">
@@ -582,17 +598,18 @@ export const ObservatoryPage: React.FC = () => {
                           href={entry.url}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
+                          className="text-slate-500 hover:text-slate-800 inline-flex items-center gap-1.5 font-medium transition-colors"
+                          aria-label={`Acceder a la publicación original en nueva pestaña: ${entry.title}`}
                         >
-                          <span>Publicación original</span>
-                          <ExternalLink className="w-3 h-3" />
+                          <span>Acceder a la publicación original</span>
+                          <ExternalLink className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
                         </a>
                       )}
                       <Link
                         to={`/observatorio/${entry.entry_id}`}
                         className="px-3 py-1.5 bg-navy-900 hover:bg-navy-800 text-white rounded font-medium shadow-sm transition-colors"
                       >
-                        Ver análisis completo
+                        Ver análisis
                       </Link>
                     </div>
                   </div>

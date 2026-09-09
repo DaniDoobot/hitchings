@@ -1,4 +1,4 @@
-﻿import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { EntryDetailPage } from '../pages/EntryDetailPage';
@@ -125,5 +125,113 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(screen.getByText('95')).toBeInTheDocument();
     expect(screen.queryByText(/Rachael Kent/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/1433\/5\/7\/22/i)).not.toBeInTheDocument();
+  });
+
+  it('renders breadcrumb with clean "Detalle de publicación" instead of full long judicial title', async () => {
+    const sampleEntry = {
+      entry_id: 'test-breadcrumb-id',
+      title: 'Very Long Case Name That Should Not Clutter Breadcrumb Navigation',
+      source: { id: 'source-1', name: 'Court of Justice' },
+      published_at: '2026-09-01T10:00:00Z',
+      url: 'https://curia.europa.eu',
+      content_type: 'judgment',
+      relevance: { status: 'relevant' as const, score: 90 },
+      summary: 'Resumen de prueba.',
+      canonical_topics: [],
+      canonical_primary_topic: null,
+      key_points: ['Punto'],
+      evidence: { source: 'triage', summary_quotes: [], key_points: [] },
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce(sampleEntry);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/test-breadcrumb-id']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Breadcrumb must contain "Detalle de publicación"
+    expect(await screen.findByText('Detalle de publicación')).toBeInTheDocument();
+    // Breadcrumb container must not truncate the title into the breadcrumb span
+    const breadcrumbLinks = screen.getAllByRole('link');
+    expect(breadcrumbLinks.some(l => l.textContent === 'Inicio')).toBe(true);
+    expect(breadcrumbLinks.some(l => l.textContent === 'Observatorio')).toBe(true);
+  });
+
+  it('ensures Detail page renders all canonical topics without +N truncation', async () => {
+    const entryWithManyTopics = {
+      entry_id: 'many-topics-id',
+      title: 'Asunto con múltiples materias',
+      source: { id: 'source-1', name: 'CNMC' },
+      published_at: '2026-09-01T10:00:00Z',
+      url: 'https://example.org',
+      content_type: 'resolution',
+      relevance: { status: 'relevant' as const, score: 85 },
+      summary: 'Resumen con múltiples materias.',
+      canonical_topics: [
+        { code: 'topic1', name: 'Materia Uno' },
+        { code: 'topic2', name: 'Materia Dos' },
+        { code: 'topic3', name: 'Materia Tres' },
+        { code: 'topic4', name: 'Materia Cuatro' },
+        { code: 'topic5', name: 'Materia Cinco' },
+      ],
+      canonical_primary_topic: { code: 'topic1', name: 'Materia Uno' },
+      key_points: ['Punto'],
+      evidence: { source: 'triage', summary_quotes: [], key_points: [] },
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce(entryWithManyTopics);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/many-topics-id']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('Materia Uno')).toBeInTheDocument();
+    expect(screen.getByText('Materia Dos')).toBeInTheDocument();
+    expect(screen.getByText('Materia Tres')).toBeInTheDocument();
+    expect(screen.getByText('Materia Cuatro')).toBeInTheDocument();
+    expect(screen.getByText('Materia Cinco')).toBeInTheDocument();
+    // Ensure no "+N más" truncation exists in detail
+    expect(screen.queryByText(/\+\d+ más/)).not.toBeInTheDocument();
+  });
+
+  it('renders ExternalLink on original publication action with secure attributes', async () => {
+    const entryWithUrl = {
+      entry_id: 'url-id',
+      title: 'Asunto con URL externa',
+      source: { id: 'source-1', name: 'Organismo Oficial' },
+      published_at: '2026-09-01T10:00:00Z',
+      url: 'https://example.org/resolucion/999',
+      content_type: 'decision',
+      relevance: { status: 'relevant' as const, score: 88 },
+      summary: 'Resumen con URL.',
+      canonical_topics: [],
+      canonical_primary_topic: null,
+      key_points: ['Punto'],
+      evidence: { source: 'triage', summary_quotes: [], key_points: [] },
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce(entryWithUrl);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/url-id']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    const extLink = await screen.findByRole('link', { name: /acceder a la publicación original/i });
+    expect(extLink).toBeInTheDocument();
+    expect(extLink).toHaveAttribute('href', 'https://example.org/resolucion/999');
+    expect(extLink).toHaveAttribute('target', '_blank');
+    expect(extLink).toHaveAttribute('rel', 'noopener noreferrer');
   });
 });

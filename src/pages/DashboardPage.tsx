@@ -371,14 +371,22 @@ export const DashboardPage: React.FC = () => {
                 </p>
 
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100">
-                  <div className="flex flex-wrap gap-1.5">
-                    {entry.canonical_topics.map((t) => (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {entry.canonical_topics.slice(0, 3).map((t) => (
                       <TopicBadge
                         key={t.code}
                         name={t.name}
                         onClick={() => navigate(`/observatorio?topic_code=${t.code}`)}
                       />
                     ))}
+                    {entry.canonical_topics.length > 3 && (
+                      <span
+                        className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-slate-100 text-slate-600 border border-slate-200"
+                        title={`${entry.canonical_topics.length - 3} materias adicionales`}
+                      >
+                        +{entry.canonical_topics.length - 3} más
+                      </span>
+                    )}
                   </div>
 
                   <Link

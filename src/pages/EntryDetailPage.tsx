@@ -81,8 +81,8 @@ export const EntryDetailPage: React.FC = () => {
             Observatorio
           </Link>
           <span>/</span>
-          <span className="text-slate-700 font-medium truncate max-w-xs">
-            {entry.title}
+          <span className="text-slate-700 font-medium">
+            Detalle de publicación
           </span>
         </div>
 
@@ -132,7 +132,7 @@ export const EntryDetailPage: React.FC = () => {
         </div>
 
         {/* Stately Title */}
-        <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold font-serif text-slate-950 leading-tight mb-4">
+        <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold font-serif text-slate-950 leading-tight mb-4 break-words max-w-4xl">
           {entry.title}
         </h1>
 
@@ -167,9 +167,10 @@ export const EntryDetailPage: React.FC = () => {
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-4 py-2 bg-navy-950 hover:bg-navy-800 text-white rounded-md text-xs font-semibold shadow-sm transition-colors"
+              aria-label={`Acceder a la publicación original en nueva pestaña: ${entry.source.name}`}
             >
               <span>Acceder a la publicación original</span>
-              <ExternalLink className="w-3.5 h-3.5" />
+              <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
             </a>
           </div>
         )}
