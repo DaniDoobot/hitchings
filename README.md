@@ -10,7 +10,7 @@ En el futuro, HITCHINGS integrará dos grandes capacidades:
 
 ---
 
-## 2. Alcance Actual: BLOQUES 0 a 7H.2 (7H.2 Cerrado)
+## 2. Alcance Actual: BLOQUES 0 a 8A (8A Cerrado)
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
@@ -20,7 +20,8 @@ El proyecto cuenta con:
 - **BLOQUE 4:** Segunda fuente real institucional: **European Commission / DG Competition** (vía RSS oficial de Competition Policy con enriquecimiento de texto íntegro vía Press Corner API y node fallback con `EuropeanCommissionExtractor`).
 - **BLOQUE 5:** Tercera fuente real institucional y nuevo tipo de contenido: **Competition Appeal Tribunal (CAT)** / Resoluciones Judiciales (vía website HTML oficial con `CompetitionAppealTribunalExtractor`, extracción de Neutral Citations, multi-casos, PDFs originales enlazados y resúmenes oficiales normalizados como `judicial_decision`).
 - **BLOQUE 6:** Cuarta fuente real institucional y jurisprudencia comunitaria: **Tribunal de Justicia de la Unión Europea (TJUE / CURIA)** / Sentencias y Conclusiones (vía InfoCuria, identificador canónico ECLI, deduplicación exacta, texto íntegro y limpio).
-- **BLOQUE 7A:** Arquitectura y Persistencia del Análisis con IA: cimientos de modelado, inmutabilidad (`Entry` vs `EntryAnalysis`), versionado estricto de prompts (`AnalysisPromptVersion`), snapshots canónicos con hash SHA-256 de matrices y contenidos, asignación normalizada de temas con un único tema primario (`EntryAnalysisTopic`), auditoría técnica granular (`AnalysisCall`: tokens, latencia, costes USD), proveedor mock determinista (`MockAIProvider`) y política de seguridad de cero llamadas externas no autorizadas (`ANALYSIS_PROVIDER="disabled"`).
+- **BLOQUES 7A a 7H.3:** Motor Analítico y Grounding Completo (Cerrado). 100% de cobertura (80/80 entradas con análisis vigente, validación verbatim de citas sin falsos positivos, prompts v6 y control estricto de costes).
+- **BLOQUE 8A:** API de Consumo del Observatorio para el Portal Cliente (`/api/v1/observatory`): frontera estricta entre API técnica y de producto, semántica de `select_current_analysis`, topics canónicos, evidencia limpia y consultas optimizadas anti-N+1.
 
 
 ### Principio Arquitectónico Fundamental: Separación de Responsabilidades
@@ -912,19 +913,64 @@ Con la reparación de Gormsen, el observatorio alcanza **cobertura total**:
 
 ---
 
-## 26. Funcionalidades Deliberadamente Pendientes
+---
 
-Para respetar la delimitación estricta de fases, en este Bloque 7H.3 **NO** se han implementado:
-1. Reanálisis de las 77 entradas v4 ni las 2 entradas v5 para homogeneizar (se preserva la inmutabilidad y la eficiencia de costes).
-2. Modificación de prompts v1 a v6 (congelados e inmutables).
-3. Modificación del `GroundingValidator` (mantiene búsqueda verbatim continua sin elipsis).
-4. Limpieza o preprocesamiento de textos de entrada (`remove_headers`, etc.).
-5. Scheduler en segundo plano (Celery, APScheduler, cron).
-6. Interfaz gráfica o frontend.
+## 26. BLOQUE 8A — API de Consumo del Observatorio para el Portal Cliente
+
+En este bloque se ha construido la capa API orientada al producto final que consumirá el portal frontend del cliente, bajo el namespace `/api/v1/observatory`.
+
+### 1. Frontera Estricta entre API Técnica y API de Producto
+El cliente final no consume directamente tablas internas de auditoría ni modelos de debug:
+- **Oculto al cliente:** `pipeline_version`, `prompt_version`, `entry_content_hash`, `matrix_snapshot`, `matrix_snapshot_hash`, `raw_response`, llamadas individuales de `AnalysisCall`, costes en USD, tokens, modelos de IA y detalles de validación de grounding (`GroundingValidator`, `verified_pct`, etc.).
+- **Expuesto al cliente:** `Entry` + `Current Analysis` + `Canonical Topics` + `Source` + `Evidence` limpia estructurada.
+
+### 2. Semántica de Análisis Vigente (`select_current_analysis`)
+- Todos los endpoints del observatorio consumen exclusivamente el análisis vigente resuelto mediante `select_current_analysis()`.
+- Se descartan análisis fallidos, análisis obsoletos (*stale*) cuyo hash de contenido no coincida, y si existen múltiples versiones válidas, se selecciona la versión más reciente del pipeline (v6 > v5 > v4).
+- Las entradas sin análisis vigente quedan excluidas del listado de producto (y devuelven HTTP 404 en la vista de detalle).
+
+### 3. Endpoints Implementados
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/api/v1/observatory/entries` | Listado paginado de publicaciones con análisis vigente, soporte de filtros avanzados y ordenación. |
+| `GET` | `/api/v1/observatory/entries/{entry_id}` | Detalle completo de una publicación con evidencias textuales limpias (verbatim) derivadas del análisis deep (o triage fallback). |
+| `GET` | `/api/v1/observatory/sources` | Catálogo de fuentes disponibles para filtros, con recuento de publicaciones y fecha de última publicación. |
+| `GET` | `/api/v1/observatory/topics` | Taxonomía jerárquica activa de temas (padres y subtemas) de la matriz de seguimiento vigente. |
+| `GET` | `/api/v1/observatory/dashboard` | Indicadores clave (KPIs), tendencias de los últimos 7 y 30 días, distribución de relevancia, top temas canónicos, top fuentes y 5 publicaciones relevantes más recientes. |
+
+### 4. Filtros y Búsqueda
+- **Paginación:** `limit` (default 20, máx 100), `offset` (default 0). Validación estricta con HTTP 422.
+- **Ordenación:** `sort_by` (`published_at`, `relevance_score`) y `sort_order` (`asc`, `desc`). Whitelist estricta.
+- **Búsqueda textual (`q`):** Búsqueda *case-insensitive* completa (OR) a través de `title`, `excerpt`, `summary` y `key_points`.
+- **Rango temporal:** `date_from` y `date_to` (formato ISO `YYYY-MM-DD`, inclusivo), con normalización determinista a UTC tanto para datetimes con zona horaria como *naive*.
+- **Fuentes:** Filtro por `source_id` único o lista `source_ids`.
+- **Relevancia:** Filtro por `relevance_status` (`relevant`, `uncertain`, `not_relevant`) y `min_relevance_score` (0 a 100).
+- **Expansión jerárquica de temas (`topic_code`):** Al filtrar por un tema padre (ej. `private_enforcement`), el observatorio expande automáticamente la consulta mediante `expand_topic_code_filter()` para incluir todas las publicaciones etiquetadas con sus subtemas específicos (ej. `damages_actions`, `collective_actions`).
+
+### 5. Taxonomía Canónica en Respuestas
+- Para evitar redundancia conceptual, las respuestas eliminan categorías padre cuando un subtema específico de la misma rama ha sido asignado.
+- Si solo existe la categoría padre sin descendientes seleccionados, se preserva.
+- El contrato de temas cliente se simplifica a `{"code": "...", "name": "..."}`.
+
+### 6. Optimización Anti-N+1
+- Las consultas de listado y dashboard utilizan `selectinload` por lotes para `Entry.source`, `Entry.analyses`, `EntryAnalysis.topics` y `EntryAnalysisTopic.topic`.
+- Se evita expresamente la carga de `AnalysisCall` en las consultas de listado y dashboard, reservándose exclusivamente para la consulta puntual de detalle (`/entries/{entry_id}`).
+- La resolución del análisis vigente y los filtros se efectúan en memoria sobre las entidades precargadas, garantizando semántica exacta en el cómputo del `total` paginado.
 
 ---
 
-## 27. Roadmap
+## 27. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 8A **NO** se han implementado:
+1. Autenticación, control de acceso de usuarios ni login (se incorporarán en la fase frontend/auth).
+2. Frontend o interfaz web gráfica.
+3. Scheduler automático en segundo plano.
+4. Modificación de datos históricos, prompts o validadores analíticos.
+
+---
+
+## 28. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -932,25 +978,12 @@ Para respetar la delimitación estricta de fases, en este Bloque 7H.3 **NO** se 
 - [x] **Bloque 3:** Trazabilidad, histórico y robustez de ingestas (`IngestionRun`, frescura y observabilidad).
 - [x] **Bloque 4:** Ampliación de fuentes libres e institucionales: Comisión Europea / DG Competition.
 - [x] **Bloque 5:** Resoluciones Judiciales: Competition Appeal Tribunal (CAT) / Judgments.
-- [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Judgments and Opinions.
-- [x] **Bloque 7A:** Arquitectura y Persistencia del Análisis con IA (Modelos, snapshots, auditoría de llamadas, versionado de prompts y mock provider determinista).
-- [x] **Bloque 7B:** Gemini Developer API Baseline: pipeline triage + deep analysis, benchmark controlado de 20 entries.
-- [x] **Bloque 7C:** Auditoría de Grounding, taxonomía y consistencia del benchmark.
-- [x] **Bloque 7D:** Source Sufficiency y enriquecimiento selectivo de CAT vía PDFs oficiales.
-- [x] **Bloque 7E:** Evidence-grounded output, compuerta de suficiencia en pipeline, prompts v3 y validación controlada de 8 entries.
-- [x] **Bloque 7E.1:** Integridad de auditoría, prompt immutability y grounding del input real.
-- [x] **Bloque 7E.2:** Aislamiento estricto de tests, guarda fail-closed y ledger hygiene.
-- [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas).
-- [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4.
-- [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs.
-- [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4.
-- [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 run estimated cost, 391/391 citas 100% verificadas).
-- [x] **Bloque 7H.1:** Post-backfill integrity, failure forensics (100% analizadas las 3 fallidas, NoParsed por MAX_TOKENS), corrección de budget guard y planificador read-only de reintentos.
-- [x] **Bloque 7H.2:** V5 Capacity Hotfix y reparación controlada de fallidas (2/3 reparadas con éxito, 79/80 entries con análisis vigente, $0.100588 run estimated cost, 24/24 citas verificadas).
-- [x] **Bloque 7H.3:** V6 Contiguous-Evidence Hotfix y reparación final de Gormsen (80/80 entries con análisis vigente, 100% grounded baseline, $0.050166 run estimated cost, 12/12 citas verificadas). *(Cerrado)*
-- [ ] **Bloque 8:** Automatización / programación (scheduler).
-- [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
-- [ ] **Bloque 10:** Interfaz web.
+- [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Sentencias y Conclusiones.
+- [x] **Bloques 7A a 7H.3:** Motor Analítico de IA y Grounding (Cerrado). 100% de cobertura (80/80 entradas con análisis vigente, validación verbatim de citas, prompts v6 y control estricto de costes).
+- [x] **Bloque 8A:** API de Consumo del Observatorio para el Portal Cliente (`/api/v1/observatory`). *(Cerrado)*
+- [ ] **Bloque 8B:** Portal frontend cliente del Observatorio.
+- [ ] **Bloque 9:** Automatización / programación (scheduler).
+- [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.
 
 
