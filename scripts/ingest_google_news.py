@@ -121,6 +121,7 @@ def main() -> int:
         print(f"  Queries planificadas:{report.queries_planned}")
         print(f"  Queries ejecutadas:  {report.queries_executed}")
         print(f"  Queries fallidas:    {report.failed_queries}")
+        print(f"  Detenido por límite: {report.stopped_by_cap}")
         print(f"  Items observados:    {report.items_seen}")
         print(f"  Nuevas Entries:      {report.entries_created}")
         print(f"  Duplicados omitidos: {report.duplicates_count}")

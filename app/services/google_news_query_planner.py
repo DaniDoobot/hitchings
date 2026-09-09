@@ -120,39 +120,27 @@ class GoogleNewsQueryPlanner:
         target_entities.sort(key=lambda e: e.display_name)
 
         for ent in target_entities:
-            name = ent.display_name
-            # Resolve associated topic codes
+            clean_name = ent.display_name.replace('"', "").strip()
+            if not clean_name:
+                continue
+
+            # Resolve associated topic codes dynamically from DB relationships
             assoc_topic_codes = [
                 assoc.topic.code
                 for assoc in ent.topic_associations
                 if assoc.topic and assoc.topic.active
             ]
             primary_topic = assoc_topic_codes[0] if assoc_topic_codes else "competition_law_general"
+            topic_codes = assoc_topic_codes or [primary_topic]
 
-            if "Comisión Nacional de los Mercados y la Competencia" in name or "CNMC" in name:
-                if "es" in self.languages:
-                    add_query('CNMC competencia', "es", 95, ent, [primary_topic])
-                    add_query('"Comisión Nacional de los Mercados y la Competencia" competencia', "es", 90, ent, [primary_topic])
-            elif "European Commission" in name:
-                if "en" in self.languages:
-                    add_query('"European Commission" competition antitrust', "en", 95, ent, [primary_topic])
-                    add_query('"European Commission" merger clearance', "en", 85, ent, ["merger_control"])
-                if "es" in self.languages:
-                    add_query('"Comisión Europea" competencia', "es", 90, ent, [primary_topic])
-            elif "Competition Appeal Tribunal" in name or "CAT" in name:
-                if "en" in self.languages:
-                    add_query('"Competition Appeal Tribunal" judgment', "en", 90, ent, [primary_topic])
-            elif "Tribunal de Justicia de la Unión Europea" in name or "CURIA" in name or "TJUE" in name:
-                if "es" in self.languages:
-                    add_query('"Tribunal de Justicia de la Unión Europea" competencia', "es", 90, ent, [primary_topic])
-                if "en" in self.languages:
-                    add_query('"Court of Justice of the European Union" competition', "en", 90, ent, [primary_topic])
-            elif ent.entity_type == "organization":
-                # Known private enforcement litigation firms/entities
-                if "en" in self.languages:
-                    add_query(f'"{name}" competition cartel', "en", 75, ent, [primary_topic])
-                if "es" in self.languages:
-                    add_query(f'"{name}" cártel competencia', "es", 75, ent, [primary_topic])
+            # Priority tiering based purely on entity_type (no whitelist of entity names)
+            prio = 90 if ent.entity_type == "institution" else 75
+
+            # Generic multilingual competition discovery queries
+            if "es" in self.languages:
+                add_query(f'"{clean_name}" competencia', "es", prio, ent, topic_codes)
+            if "en" in self.languages:
+                add_query(f'"{clean_name}" competition', "en", prio, ent, topic_codes)
 
         # 2. Topic Discovery Queries (extracted from active TrackingTopic discovery_queries)
         for topic in topics:
@@ -167,7 +155,7 @@ class GoogleNewsQueryPlanner:
                 # Determine language heuristic of the discovery query string
                 is_spanish = any(
                     word in clean_template.lower()
-                    for word in ("competencia", "daños", "cártel", "acuerdos", "reclamación")
+                    for word in ("competencia", "daños", "cártel", "acuerdos", "reclamación", "resolución", "sanción", "tribunal", "derecho")
                 )
                 query_lang = "es" if is_spanish else "en"
 

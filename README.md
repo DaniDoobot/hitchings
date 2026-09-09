@@ -1194,35 +1194,47 @@ La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend re
 
 ---
 
-## 32. BLOQUE 9A — Google News como Fuente de Descubrimiento
+## 32. BLOQUE 9A & 9A.1 — Google News como Fuente de Descubrimiento y Hardening Semántico
 
 ### Objetivo y Principio Arquitectónico
 Incorporar **Google News** como canal complementario de descubrimiento (*discovery source*) para identificar noticias, resoluciones y novedades de Derecho de la Competencia publicadas en medios externos generalistas y especializados.
 
 Google News **NO** sustituye a las fuentes oficiales (CNMC, Comisión Europea, CAT, CURIA) ni actúa como el publisher de las noticias. Se modela dentro de la arquitectura existente como:
 - **`Source` canónica:** `type=SourceType.GOOGLE_NEWS` (`"google_news"`), `category="news_aggregator"`, `provider="native"`.
-- **`Entry`:** Conserva `discovery_source="Google News"` en `raw_metadata`, mientras que el medio de procedencia real se registra en `raw_metadata["publisher"]` (ej. *Cinco Días*, *The Objective*, *Financial Times*, *Garrigues*) y `author`.
+- **Semántica de Autor vs Publisher (`Entry.author = None`):** Los medios de prensa, despachos o portales son personas jurídicas o publicaciones (`publisher`), no autores individuales del texto. `Entry.author` se fija estrictamente en `None` a menos que exista un autor humano explícito; los datos del medio se preservan en `raw_metadata["publisher"]`, `raw_metadata["publisher_url"]` y `raw_metadata["publisher_domain"]`.
 
-### Planificador Determinista de Consultas (`GoogleNewsQueryPlanner`)
-Para evitar la combinatoria explosiva (38 entidades $\times$ 18 temas $\times$ idiomas), el planificador implementa una selección acotada y determinista:
-1. **Entidades Institucionales y Organizaciones:** Prioriza organismos de competencia (*CNMC*, *European Commission*, *CAT*, *TJUE*) y firmas de litigación privada (*Hausfeld*, *ESKARIAM*).
-2. **Consultas Temáticas Canónicas:** Utiliza las `discovery_queries` registradas en los `TrackingTopic` de mayor prioridad (`competition_law_general`, `private_enforcement`, `damages_actions`, `digital_competition_dma`).
-3. **Control de Idioma y Región:** Filtra y genera variantes en español (`es/ES`) e inglés (`en/GB`).
-4. **Criterio Determinista y Cap Estricto:** Ordena por `(priority DESC, query_text ASC)` y acota a un máximo de 20 consultas por defecto (con techo absoluto de 50).
+### Semántica de URLs y Consent Wall
+- **`google_news_url`:** Enlace de redirección propio del feed RSS de Google News (`news.google.com/rss/articles/...`). En la UE/UK, este enlace está sujeto al *consent wall* de Google. **No se intenta romper el consent wall** mediante automatizaciones frágiles ni scraping invasivo.
+- **`publisher_url`:** Corresponde al dominio raíz o página principal del medio (atributo `url` del elemento `<source>` del RSS de Google News, e.g. `https://www.ft.com`), **NO a la URL final del artículo**. Se almacena claramente documentado en `raw_metadata["publisher_url"]` y su forma normalizada en `raw_metadata["publisher_domain"]` (e.g. `ft.com`, `cnmc.es`).
 
-### Vía de Acceso, URLs y Limitación de Consent Wall
-- Se utiliza exclusivamente el feed RSS público de búsqueda de Google News (`https://news.google.com/rss/search?q={query}&hl={hl}&gl={gl}&ceid={ceid}`).
-- **Sin automatización de navegador, sin cookies ni sesiones personales.**
-- **Gestión de URLs:** En la UE/UK, seguir enlaces `news.google.com/rss/articles/...` redirige a la pantalla de consentimiento de Google (`consent.google.com`). Para evitar scraping frágil que viole políticas de acceso, se almacena la URL de Google News y se capturan el nombre y dominio base del medio (`source url="..."`) en `raw_metadata`.
+### Planificador 100% DB-Driven (`GoogleNewsQueryPlanner`)
+El planificador es completamente dinámico y no contiene listas blancas (*whitelists*) ni nombres de entidades hardcodeados en el código Python:
+1. **Entidades Dinámicas (`TrackedEntity`):** Carga todas las entidades activas de tipo `institution` (prioridad 90) y `organization` (prioridad 75) y genera consultas genéricas multilingües (`"{display_name}" competencia` para español y `"{display_name}" competition` para inglés), vinculándolas a sus códigos de temas asociados.
+2. **Consultas Temáticas de Base de Datos (`TrackingTopic.discovery_queries`):** Las cadenas de búsqueda temática provienen 100% de la configuración de la matriz de seguimiento en base de datos, sin términos de búsqueda fijados en el código.
+3. **Ordenación Determinista y Límites:** Ordena por `(priority DESC, query_text ASC)` y acota a un máximo de consultas determinista (`max_queries`, por defecto 20).
 
-### Deduplicación y Frontera con Fuentes Oficiales
-- **Normalización de URL:** Se eliminan parámetros de marketing (`utm_*`, `gclid`, `fbclid`, `oc`, `ref`) y fragmentos `#`.
-- **Deduplicación Cruzada:** Si Google News descubre una noticia cuya URL canónica o hash de contenido ya fue capturada previamente por una fuente oficial (o por Google News), la entrada se descarta como duplicada sin duplicar registros.
-- **Deduplicación Intra-Run:** Previene procesar el mismo artículo si coincide en múltiples queries del mismo lote.
+### Deduplicación Multicapa y Discovery Fingerprint
+El sistema implementa una estrategia de deduplicación conservadora para evitar colisiones cruzadas y re-ingestas:
+1. **Deduplicación Intra-Run:** Rastreo estricto de URLs canónicas, GUIDs del feed RSS y huellas calculadas en el lote.
+2. **Límite de `content_hash`:** El hash de ingestión clásico (`SHA256(url|title|excerpt)`) depende de la URL; dado que Google News genera URLs dinámicas en base64 diferentes de las URLs oficiales, el hash de contenido por sí solo no detecta duplicados entre distintas fuentes.
+3. **Huella de Descubrimiento (`compute_discovery_fingerprint`):**
+   $$\text{fingerprint} = \text{SHA256}(\text{publisher\_domain} + ":" + \text{normalize\_title}(\text{title}))$$
+   - `normalize_title`: Unicode NFKC, minúsculas, colapso de espacios y eliminación determinista de puntuación superficial. Sin stemming ni matching difuso agresivo.
+   - **Mismo medio + mismo título (o variación superficial):** Duplicado.
+   - **Distintos medios + mismo título (e.g. Reuters vs FT):** NO son duplicados (no hay sobre-deduplicación).
+   - **Mismo medio + títulos materialmente distintos:** NO son duplicados.
+4. **Deduplicación Cruzada con Fuentes Oficiales:** Si el `publisher_domain` coincide con el dominio de una fuente oficial registrada (e.g. `cnmc.es`, `catribunal.org.uk`, `curia.europa.eu`, `ec.europa.eu`) y existe una entrada previa con el mismo título normalizado, la publicación se descarta como duplicada.
 
 ### Contenido y Suficiencia Documental (`SourceSufficiencyService`)
-- En el Bloque 9A **NO** se realiza scraping automático del cuerpo completo de webs externas; las entradas se persisten con `content=None` y el snippet en `excerpt`.
-- Conforme al principio de rigor analítico, `SourceSufficiencyService.assess()` califica estas entradas como `insufficient` (o `partial`), impidiendo que sean enviadas a Gemini sin disponer del texto íntegro.
+- Las entradas descubiertas vía Google News se registran con `content=None` y el extracto en `excerpt`.
+- Conforme a los umbrales de suficiencia documental de HITCHINGS, `SourceSufficiencyService.assess()` evalúa estas entradas como **`insufficient`** (10/10), garantizando que nunca se envíen al motor analítico de Gemini sin disponer del texto completo.
+
+### Trazabilidad y Métricas de Ingestión (`IngestionRun`)
+Cada ejecución registra en `run_metadata`:
+- `queries_planned`: total de consultas planificadas.
+- `queries_executed`: consultas efectivamente lanzadas antes de alcanzar límites.
+- `stopped_by_cap`: booleano que certifica si la ingesta se detuvo anticipadamente al alcanzar el tope de nuevas entradas (`max_new_entries`).
+- `max_new_entries_cap`: límite configurado para la ejecución.
 
 ### CLI de Ingesta (`scripts/ingest_google_news.py`)
 
@@ -1253,6 +1265,7 @@ python -m scripts.ingest_google_news --confirm-real-calls --max-queries 5 --max-
 - [x] **Bloque 8C.1:** Autenticación Privada del Portal Cliente (sesiones server-side, cookies HttpOnly, CLI de provisión, protección de rutas). *(Cerrado)*
 - [x] **Bloque 8C.1A:** Security Cleanup y Auditoría de Credenciales (rotación QA, reset CLI interactivo, política de longitud). *(Cerrado)*
 - [x] **Bloque 9A:** Google News como Fuente de Descubrimiento (feed RSS público, query planner determinista, límites y dedupe). *(Cerrado)*
+- [x] **Bloque 9A.1:** Hardening de Google News: Semántica, Dedupe y Trazabilidad (author=None, discovery fingerprint, cross-source dedupe, planner DB-driven). *(Cerrado)*
 - [ ] **Bloque 9B:** Scheduler automático en segundo plano.
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.

@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import SessionLocal
 from app.models.entry import Entry
-from app.models.source import Source
+from app.models.source import Source, SourceType
 from app.services.ingestion_service import compute_ingestion_dedupe_hash
 from app.services.analysis_service import compute_analysis_input_hash
 from app.services.source_sufficiency_service import assess_source_sufficiency
@@ -194,6 +194,23 @@ def audit_ec_entry(entry: Entry) -> tuple[str, list[str]]:
     return "IDENTITY_OK", []
 
 
+def audit_google_news_entry(entry: Entry) -> tuple[str, list[str]]:
+    """Validate identity coherence for Google News discovery entries."""
+    title = entry.title or ""
+    url = entry.url or ""
+    reasons: list[str] = []
+
+    if not title or len(title) < 5:
+        reasons.append("Title is missing or suspiciously short")
+        return "IDENTITY_ERROR", reasons
+
+    if not url or not url.startswith("http"):
+        reasons.append("URL is missing or invalid")
+        return "IDENTITY_ERROR", reasons
+
+    return "IDENTITY_OK", []
+
+
 def run_inventory_audit(db: Session) -> dict[str, Any]:
     """Execute complete read-only audit across all entries."""
     entries = (
@@ -248,6 +265,8 @@ def run_inventory_audit(db: Session) -> dict[str, Any]:
             status, reasons = audit_curia_entry(e)
         elif "CNMC" in src_name:
             status, reasons = audit_cnmc_entry(e)
+        elif "Google News" in src_name or getattr(e.source, "type", None) == SourceType.GOOGLE_NEWS:
+            status, reasons = audit_google_news_entry(e)
         else:
             status, reasons = audit_ec_entry(e)
 

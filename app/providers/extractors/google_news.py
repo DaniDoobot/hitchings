@@ -22,7 +22,14 @@ _WHITESPACE_RE = re.compile(r"\s+")
 
 @dataclass
 class GoogleNewsItem:
-    """Structured representation of a news item extracted from Google News RSS."""
+    """Structured representation of a news item extracted from Google News RSS.
+    
+    URL Semantics:
+    - google_news_url: The Google News redirect link to the article.
+    - canonical_url: Normalized google_news_url used for identity tracking.
+    - publisher_url: The publisher root/homepage domain link from RSS `<source url="...">`.
+      NOTE: This is NOT the individual article URL, but the publisher's website root/domain.
+    """
     title: str
     google_news_url: str
     canonical_url: str
@@ -32,6 +39,12 @@ class GoogleNewsItem:
     publisher_url: Optional[str]
     excerpt: Optional[str]
     language: str
+
+    @property
+    def publisher_domain(self) -> str:
+        """Return clean, normalized publisher domain."""
+        from app.core.url_utils import extract_publisher_domain
+        return extract_publisher_domain(self.publisher_url or self.publisher)
 
 
 def clean_html_text(raw_html: str | None) -> str:

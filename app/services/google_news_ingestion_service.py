@@ -14,7 +14,12 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.url_utils import normalize_url
+from app.core.url_utils import (
+    compute_discovery_fingerprint,
+    extract_publisher_domain,
+    normalize_title,
+    normalize_url,
+)
 from app.models.entry import Entry
 from app.models.ingestion_run import IngestionRun, IngestionRunStatus
 from app.models.source import Source, SourceType
@@ -52,6 +57,7 @@ class GoogleNewsIngestionReport:
     entries_created: int
     duplicates_count: int
     failed_queries: int
+    stopped_by_cap: bool
     publishers_found: list[str]
     sample_created_entries: list[dict]
     latest_published_at: Optional[datetime]
@@ -149,6 +155,7 @@ class GoogleNewsIngestionService:
                 entries_created=0,
                 duplicates_count=0,
                 failed_queries=0,
+                stopped_by_cap=False,
                 publishers_found=[],
                 sample_created_entries=[],
                 latest_published_at=None,
@@ -186,6 +193,44 @@ class GoogleNewsIngestionService:
         # Deduplication within the run
         seen_in_run_urls: set[str] = set()
         seen_in_run_guids: set[str] = set()
+
+        # Pre-load official sources and their existing titles for generic cross-source deduplication
+        official_sources = (
+            db.query(Source)
+            .filter(Source.type != SourceType.GOOGLE_NEWS, Source.active == True)
+            .all()
+        )
+        official_source_titles: dict[str, set[str]] = {}
+        for os_source in official_sources:
+            src_domain = extract_publisher_domain(os_source.url)
+            if not src_domain:
+                continue
+            e_titles = db.query(Entry.title).filter(Entry.source_id == os_source.id).all()
+            titles_set = {normalize_title(t[0]) for t in e_titles if t[0]}
+            official_source_titles[src_domain] = titles_set
+            # Associate parent domains for known multi-level official endpoints
+            if src_domain.endswith(".ec.europa.eu"):
+                official_source_titles.setdefault("ec.europa.eu", set()).update(titles_set)
+            elif src_domain.endswith(".curia.europa.eu"):
+                official_source_titles.setdefault("curia.europa.eu", set()).update(titles_set)
+
+        # Pre-load existing discovery entries from DB to populate historical deduplication sets
+        existing_gn_entries = (
+            db.query(Entry.title, Entry.raw_metadata)
+            .filter(Entry.source_id == source.id)
+            .all()
+        )
+        seen_fingerprints: set[str] = set()
+        seen_domains_titles: set[tuple[str, str]] = set()
+        for e_title, e_meta in existing_gn_entries:
+            if not e_meta:
+                continue
+            fp = e_meta.get("discovery_fingerprint")
+            if fp:
+                seen_fingerprints.add(fp)
+            p_dom = e_meta.get("publisher_domain")
+            if p_dom and e_title:
+                seen_domains_titles.add((p_dom, normalize_title(e_title)))
 
         close_client = False
         if client is None:
@@ -238,16 +283,38 @@ class GoogleNewsIngestionService:
                     if item.published_at:
                         pub_dates.append(item.published_at)
 
-                    # 1. Intra-run deduplication
+                    # 1. Normalization & Fingerprint computation
                     canon_url = item.canonical_url or normalize_url(item.google_news_url)
+                    item_domain = item.publisher_domain
+                    norm_title = normalize_title(item.title)
+                    item_fp = compute_discovery_fingerprint(item_domain, item.title)
+
+                    # 2. Intra-run & GUID deduplication
                     if canon_url in seen_in_run_urls or (item.guid and item.guid in seen_in_run_guids):
                         total_duplicates += 1
                         continue
-                    seen_in_run_urls.add(canon_url)
-                    if item.guid:
-                        seen_in_run_guids.add(item.guid)
 
-                    # 2. Cross-source database deduplication (against ANY source: CNMC, EC, CAT, CURIA, etc.)
+                    # 3. Discovery fingerprint & (publisher_domain + normalized_title) deduplication
+                    # (Prevents re-ingesting same article under different Google News URLs)
+                    if item_fp in seen_fingerprints or (item_domain and (item_domain, norm_title) in seen_domains_titles):
+                        total_duplicates += 1
+                        continue
+
+                    # 4. Generic Cross-Source Official Source Deduplication
+                    # If publisher_domain matches an official Source (e.g. cnmc.es, catribunal.org.uk, curia.europa.eu, ec.europa.eu)
+                    # and an Entry with identical normalized title already exists for that official source, mark as duplicate.
+                    is_official_dup = False
+                    if item_domain:
+                        for off_dom, off_titles in official_source_titles.items():
+                            if item_domain == off_dom or item_domain.endswith("." + off_dom) or off_dom.endswith("." + item_domain):
+                                if norm_title in off_titles:
+                                    is_official_dup = True
+                                    break
+                    if is_official_dup:
+                        total_duplicates += 1
+                        continue
+
+                    # 5. Database URL & Identity hash deduplication
                     c_hash = compute_ingestion_dedupe_hash(item.title, item.google_news_url, item.excerpt)
                     ext_id = _make_bounded_external_id(item.guid, c_hash)
 
@@ -267,11 +334,22 @@ class GoogleNewsIngestionService:
                         total_duplicates += 1
                         continue
 
-                    # 3. Create and persist new discovery Entry
+                    # 6. Passed deduplication: register in tracking sets
+                    seen_in_run_urls.add(canon_url)
+                    seen_in_run_urls.add(item.google_news_url)
+                    if item.guid:
+                        seen_in_run_guids.add(item.guid)
+                    seen_fingerprints.add(item_fp)
+                    if item_domain and norm_title:
+                        seen_domains_titles.add((item_domain, norm_title))
+
+                    # 7. Create and persist new discovery Entry (author is strictly None, publisher is NOT author)
                     raw_meta = {
                         "discovery_source": "Google News",
                         "publisher": item.publisher,
                         "publisher_url": item.publisher_url,
+                        "publisher_domain": item_domain,
+                        "discovery_fingerprint": item_fp,
                         "google_news_url": item.google_news_url,
                         "guid": item.guid,
                         "discovery_query": q.query_text,
@@ -279,6 +357,7 @@ class GoogleNewsIngestionService:
                         "entity_id": str(q.entity_id) if q.entity_id else None,
                         "entity_name": q.entity_name,
                         "topic_codes": list(q.topic_codes),
+                        "language": item.language,
                     }
 
                     new_entry = Entry(
@@ -289,7 +368,7 @@ class GoogleNewsIngestionService:
                         title=item.title,
                         content=None,  # Discovery only: no full scraping in 9A
                         excerpt=item.excerpt,
-                        author=item.publisher[:255] if item.publisher else None,
+                        author=None,  # Strictly None: author is NOT publisher
                         published_at=item.published_at,
                         captured_at=datetime.now(timezone.utc),
                         language=item.language,
@@ -312,6 +391,7 @@ class GoogleNewsIngestionService:
 
             # Finalize IngestionRun
             finished_at = datetime.now(timezone.utc)
+            stopped_by_cap = total_created >= eff_max_new_entries
             run.finished_at = finished_at
             run.fetched_count = total_items_seen
             run.created_count = total_created
@@ -319,6 +399,12 @@ class GoogleNewsIngestionService:
             run.failed_count = failed_queries
             run.latest_published_at = max(pub_dates, default=None)
             run.oldest_published_at = min(pub_dates, default=None)
+            run.run_metadata = {
+                "queries_planned": len(planned_queries),
+                "queries_executed": queries_executed,
+                "stopped_by_cap": stopped_by_cap,
+                "max_new_entries_cap": eff_max_new_entries,
+            }
 
             if failed_queries == 0:
                 run.status = IngestionRunStatus.SUCCESS.value
@@ -346,6 +432,7 @@ class GoogleNewsIngestionService:
                 entries_created=total_created,
                 duplicates_count=total_duplicates,
                 failed_queries=failed_queries,
+                stopped_by_cap=stopped_by_cap,
                 publishers_found=sorted(list(publishers_set)),
                 sample_created_entries=sample_entries,
                 latest_published_at=run.latest_published_at,
