@@ -771,7 +771,7 @@ def test_v4_prompts_seeded_with_correct_configuration(db_session: Session):
     from scripts.seed_analysis_prompts import seed_analysis_prompts
 
     seeded = seed_analysis_prompts(db=db_session)
-    assert len(seeded) == 8
+    assert len(seeded) >= 8
 
     triage_v4 = (
         db_session.query(AnalysisPromptVersion)

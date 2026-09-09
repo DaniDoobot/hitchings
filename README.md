@@ -10,7 +10,7 @@ En el futuro, HITCHINGS integrará dos grandes capacidades:
 
 ---
 
-## 2. Alcance Actual: BLOQUES 0, 1, 2, 3, 4, 5, 6 y 7A
+## 2. Alcance Actual: BLOQUES 0 a 7H.2 (7H.2 Cerrado)
 
 El proyecto cuenta con:
 - **BLOQUE 0:** Base estructural, persistencia (PostgreSQL + SQLAlchemy 2.0 síncrono con psycopg v3, Alembic), configuración y contratos de proveedores.
@@ -841,19 +841,51 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
 
 ---
 
-## 24. Funcionalidades Deliberadamente Pendientes
+## 24. V5 Capacity Hotfix y Reparación Controlada (Bloque 7H.2)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7H.1 **NO** se han implementado:
-1. Reintentos automáticos ni llamadas a Gemini (0 llamadas realizadas).
-2. Modificación de prompts v1, v2, v3 o v4 ni creación de prompts v5.
-3. Creación de runner de reintentos con ejecución real.
-4. Normalización de elipsis (`...` o `…`) como wildcards en GroundingValidator.
+### 1. Diagnóstico y Hotfix V5
+- **Prompts v5 introducidos:**
+  - `observatory_triage:v5`: Materialmente idéntico a v4 (`thinking_level='low'`, `max_output_tokens=1024`).
+  - `observatory_deep_analysis:v5`: Materialmente idéntico a v4 pero con **ampliación de capacidad a `max_output_tokens=8192`** (`thinking_level='medium'`).
+- **GroundingValidator inalterado:** Cero relajación de reglas de grounding. Búsqueda verbatim continua estricta preservada sin comodines ni elipsis.
+- **Whitelist estricta de 3 entradas:** `ada5d125` (Gormsen / Meta), `4db3fa9a` (Sciallis / Fender CAT 56), `14e036d2` (Rowntree / PRS EWCA Civ 814).
+- **Presupuesto hard:** $0.25 USD con reserva dinámica conservadora (`calculate_conservative_reservation`).
+
+### 2. Resultados de la Ejecución Real (Run ID: `341cf679-6b87-48e3-9be7-8bbaaf66b56f`)
+- **Llamadas API realizadas:** 6 (3 Triage + 3 Deep Analysis).
+- **Resolución de fallos por capacidad (MAX_TOKENS):**
+  - `4db3fa9a` (CAT 56): **Completada con éxito** (score 95, 13 citas 100% verificadas, 3.192 tokens out, coste $0.018180).
+  - `14e036d2` (EWCA Civ 814): **Completada con éxito** (score 95, 11 citas 100% verificadas, 3.747 tokens out, coste $0.040540).
+  - *El incremento a 8k tokens resolvió definitivamente el truncamiento por razonamiento en deep analysis.*
+- **Entrada Gormsen (`ada5d125`):** Falló en validación de grounding debido a un salto de página con encabezado judicial interpuesto en medio de una frase larga (`AnalysisGroundingError`). Preservada como fallida según el protocolo fail-closed.
+- **Métricas de Evidencia (Entradas completadas v5):**
+  - Citas totales extraídas y validadas: 24 / 24 (100.0% de verificación estricta).
+  - Longitud media: 179.9 caracteres / 29.4 palabras.
+- **Coste del Run de Reparación:** **$0.100588 USD** (muy inferior al límite de $0.2500).
+- **Estado Actual del Observatorio:**
+  - DB recorded estimated cost: **$1.306138 USD**
+  - Reconstructed historical estimated cost: **$1.521954 USD**
+  - Cobertura de análisis vigentes (`select_current_analysis` sobre 80 Entries):
+    - `Current v5`: 2
+    - `Current v4`: 77
+    - `Total con análisis de producción vigente`: **79 / 80 (98.75%)**
+    - `Sin análisis vigente`: 1 (Gormsen)
+
+---
+
+## 25. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7H.2 **NO** se han implementado:
+1. Reintentos adicionales sobre Gormsen (se ejecutó exactamente una vez).
+2. Prompts v6 ni modificación de prompts v1-v5 (todos congelados e inmutables).
+3. Modificación del `GroundingValidator` (mantiene búsqueda verbatim continua sin elipsis).
+4. Análisis de nuevas fuentes o entradas.
 5. Scheduler en segundo plano (Celery, APScheduler, cron).
 6. Interfaz gráfica o frontend.
 
 ---
 
-## 25. Roadmap
+## 26. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -874,7 +906,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7H.1 **NO** se 
 - [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs.
 - [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4.
 - [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 run estimated cost, 391/391 citas 100% verificadas).
-- [x] **Bloque 7H.1:** Post-backfill integrity, failure forensics (100% analizadas las 3 fallidas, NoParsed por MAX_TOKENS), corrección de budget guard y planificador read-only de reintentos. *(Cerrado)*
+- [x] **Bloque 7H.1:** Post-backfill integrity, failure forensics (100% analizadas las 3 fallidas, NoParsed por MAX_TOKENS), corrección de budget guard y planificador read-only de reintentos.
+- [x] **Bloque 7H.2:** V5 Capacity Hotfix y reparación controlada de fallidas (2/3 reparadas con éxito, 79/80 entries con análisis vigente, $0.100588 run estimated cost, 24/24 citas verificadas). *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
