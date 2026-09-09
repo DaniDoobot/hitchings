@@ -181,7 +181,7 @@ export const EntryDetailPage: React.FC = () => {
         <div className="flex items-center gap-2 pb-3 mb-4 border-b border-slate-100">
           <Bookmark className="w-4 h-4 text-legal-gold" />
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900">
-            Resumen Ejecutivo Jurídico
+            Resumen Ejecutivo
           </h2>
         </div>
         <p className="text-base text-slate-800 leading-relaxed font-sans">
@@ -195,7 +195,7 @@ export const EntryDetailPage: React.FC = () => {
           <div className="flex items-center gap-2 pb-3 mb-5 border-b border-slate-100">
             <Sparkles className="w-4 h-4 text-legal-gold" />
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-900">
-              Puntos Clave del Pronunciamiento
+              Puntos Clave
             </h2>
           </div>
 
@@ -235,7 +235,7 @@ export const EntryDetailPage: React.FC = () => {
 
           <p className="text-xs text-slate-500 leading-relaxed">
             Extractos literales seleccionados del documento fuente que respaldan
-            el análisis jurídico y los criterios de relevancia establecidos.
+            el análisis y la valoración de relevancia establecida.
           </p>
 
           {/* Summary Quotes */}

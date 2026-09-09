@@ -38,7 +38,7 @@ export const RelevanceBadge: React.FC<RelevanceBadgeProps> = ({
   return (
     <span
       className={`inline-flex items-center rounded-full border shadow-sm transition-colors ${badgeClasses} ${sizeClasses}`}
-      title={`Estado analítico: ${label}${score !== undefined ? ` (Puntuación: ${score}/100)` : ''}`}
+      title={`Relevancia: ${label}${score !== undefined ? ` (Puntuación: ${score}/100)` : ''}`}
     >
       <Icon className={size === 'sm' ? 'w-3 h-3' : size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
       <span>{label}</span>

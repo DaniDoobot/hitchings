@@ -280,7 +280,7 @@ export const DashboardPage: React.FC = () => {
             </span>
           </div>
           <p className="text-xs text-slate-500 mb-5">
-            Volumen procesado e índice de relevancia detectado por organismo emisor.
+            Volumen procesado e índice de relevancia detectado por fuente monitorizada.
           </p>
 
           <div className="space-y-3">
@@ -294,7 +294,7 @@ export const DashboardPage: React.FC = () => {
                   {src.name}
                 </div>
                 <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>{src.publication_count} resoluciones</span>
+                  <span>{src.publication_count} publicaciones</span>
                   <span className="text-emerald-700 font-semibold">
                     {src.relevant_count} relevantes ({Math.round((src.relevant_count / (src.publication_count || 1)) * 100)}%)
                   </span>

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { EntryDetailPage } from '../pages/EntryDetailPage';
+import { ObservatoryPage } from '../pages/ObservatoryPage';
 import * as apiModule from '../services/observatoryApi';
 
 // Vite raw imports for structural source code checks
@@ -74,7 +75,7 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     );
 
     // Verify presence of heading
-    expect(await screen.findByText('Puntos Clave del Pronunciamiento')).toBeInTheDocument();
+    expect(await screen.findByText('Puntos Clave')).toBeInTheDocument();
 
     // All 5 key points must be rendered in DOM
     const matches1 = await screen.findAllByText(/Punto clave 1:/);
@@ -206,7 +207,7 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     const entryWithUrl = {
       entry_id: 'url-id',
       title: 'Asunto con URL externa',
-      source: { id: 'source-1', name: 'Organismo Oficial' },
+      source: { id: 'source-1', name: 'Fuente Monitorizada' },
       published_at: '2026-09-01T10:00:00Z',
       url: 'https://example.org/resolucion/999',
       content_type: 'decision',
@@ -233,5 +234,98 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(extLink).toHaveAttribute('href', 'https://example.org/resolucion/999');
     expect(extLink).toHaveAttribute('target', '_blank');
     expect(extLink).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('clearAllFilters removes all filter query params and resets offset to default', async () => {
+    const mockGetEntries = vi.spyOn(apiModule.observatoryApi, 'getEntries').mockResolvedValue({
+      items: [],
+      total: 0,
+      limit: 20,
+      offset: 0,
+    });
+    vi.spyOn(apiModule.observatoryApi, 'getSources').mockResolvedValue([
+      { id: 'source-1', name: 'CNMC', type: 'national_authority', entry_count: 5 },
+    ]);
+    vi.spyOn(apiModule.observatoryApi, 'getTopics').mockResolvedValue([
+      { code: 'abuse_dominance', name: 'Abuso de posición de dominio', parent_code: null, children: [] },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio?q=abuso&relevance_status=relevant&min_relevance_score=80&source_id=source-1&topic_code=abuse_dominance&date_from=2026-01-01&date_to=2026-09-01&offset=20']}>
+        <Routes>
+          <Route path="/observatorio" element={<ObservatoryPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Verify initial active filter pills are rendered
+    expect(await screen.findByText(/Texto:/)).toBeInTheDocument();
+    expect(screen.getByText(/Estado:/)).toBeInTheDocument();
+    expect(screen.getByText(/Puntuación ≥/)).toBeInTheDocument();
+
+    // Click "Restablecer todos"
+    const resetButton = screen.getByRole('button', { name: /restablecer todos/i });
+    fireEvent.click(resetButton);
+
+    // After reset, getEntries should be called with default/cleared params:
+    await waitFor(() => {
+      const lastCall = mockGetEntries.mock.calls[mockGetEntries.mock.calls.length - 1];
+      expect(lastCall[0]).toEqual(expect.objectContaining({
+        offset: 0,
+        limit: 20,
+        q: undefined,
+        relevance_status: undefined,
+        min_relevance_score: undefined,
+        source_id: undefined,
+        topic_code: undefined,
+        date_from: undefined,
+        date_to: undefined,
+      }));
+    });
+  });
+
+  it('ensures DashboardPage has no references to "Fuentes reguladoras" and renders neutral "Fuentes Monitorizadas"', () => {
+    expect(dashboardRaw).not.toMatch(/fuentes\s+reguladoras/i);
+    expect(dashboardRaw).toContain('Fuentes Monitorizadas');
+    expect(dashboardRaw).not.toContain('organismo emisor');
+  });
+
+  it('renders Livronsa source dynamically from API without hardcoding CNMC and without internal technical wording', async () => {
+    const livronsaEntry = {
+      entry_id: '27c1a107-ebfe-40d0-ba9e-d7d399c3c565',
+      title: 'Case C-60/25 [Livronsa] | Judgment',
+      source: { id: 'cjeu-id', name: 'Court of Justice of the European Union (CJEU)' },
+      published_at: '2026-09-03T09:00:00Z',
+      url: 'https://curia.europa.eu',
+      content_type: 'judgment',
+      relevance: { status: 'relevant' as const, score: 95 },
+      summary: 'Resumen jurídico de Livronsa en materia de competencia.',
+      canonical_topics: [{ code: 'abuse_dominance', name: 'Abuso de posición de dominio' }],
+      canonical_primary_topic: { code: 'abuse_dominance', name: 'Abuso de posición de dominio' },
+      key_points: ['Punto 1'],
+      evidence: { source: 'triage', summary_quotes: [], key_points: [] },
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce(livronsaEntry);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/27c1a107-ebfe-40d0-ba9e-d7d399c3c565']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Source from API is rendered
+    expect(await screen.findByText('Court of Justice of the European Union (CJEU)')).toBeInTheDocument();
+    // Must NOT attribute Livronsa to CNMC
+    expect(screen.queryByText('CNMC')).not.toBeInTheDocument();
+
+    // Must NOT contain internal technical wording
+    expect(screen.queryByText(/justificación técnica/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/criterio técnico/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/estado analítico/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/GroundingValidator/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/pipeline_version/i)).not.toBeInTheDocument();
   });
 });

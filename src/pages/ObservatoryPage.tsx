@@ -380,7 +380,7 @@ export const ObservatoryPage: React.FC = () => {
           {/* Source Selector */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-2">
-              Organismo / Fuente
+              Fuente monitorizada
             </label>
             <select
               value={sourceId}
@@ -690,7 +690,7 @@ export const ObservatoryPage: React.FC = () => {
               {/* Source */}
               <div>
                 <label className="block text-xs font-semibold uppercase text-slate-700 mb-2">
-                  Organismo / Fuente
+                  Fuente monitorizada
                 </label>
                 <select
                   value={sourceId}
