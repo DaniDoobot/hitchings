@@ -5,7 +5,12 @@ from typing import Optional, Any
 
 from app.models.analysis import AnalysisPromptVersion
 from app.models.entry import Entry
-from app.schemas.analysis import AIAnalysisResponsePayload, AIAnalysisTopicItem
+from app.schemas.analysis import (
+    AIAnalysisResponsePayload,
+    AIAnalysisTopicItem,
+    GroundingEvidence,
+    KeyPointV3,
+)
 from app.providers.ai.base import BaseAIProvider, AIProviderResult
 
 
@@ -145,7 +150,7 @@ class MockAIProvider(BaseAIProvider):
             elif primary_count == 0 and topics:
                 topics[0].is_primary = True
 
-        # Construct payload
+        # Construct payload with grounding evidence
         confidence = round(score / 100.0, 2)
         summary = f"Executive summary for: {(entry.title or 'Publication')[:120]}."
         key_points = [
@@ -155,6 +160,23 @@ class MockAIProvider(BaseAIProvider):
         ]
         reason = f"Deterministic evaluation score of {score} based on regulatory keyword analysis."
 
+        # Verbatim quote for strict grounding validation in v3/v6 prompts
+        if entry.title and entry.title.strip():
+            evidence_quote = entry.title.strip()[:40].strip()
+            source_field = "title"
+        elif entry.content and entry.content.strip():
+            evidence_quote = entry.content.strip()[:40].strip()
+            source_field = "content"
+        else:
+            evidence_quote = "Publication"
+            source_field = "title"
+
+        evidence_list = [GroundingEvidence(source_field=source_field, quote=evidence_quote)]
+        key_point_items = [
+            KeyPointV3(point=kp, evidence=evidence_list)
+            for kp in key_points
+        ]
+
         payload = AIAnalysisResponsePayload(
             relevance_score=score,
             confidence=confidence,
@@ -162,6 +184,9 @@ class MockAIProvider(BaseAIProvider):
             summary=summary,
             key_points=key_points,
             reason=reason,
+            evidence=evidence_list,
+            summary_evidence=evidence_list,
+            key_point_items=key_point_items,
         )
 
         output_chars = len(summary) + len(reason) + sum(len(kp) for kp in key_points)

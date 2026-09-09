@@ -1432,6 +1432,80 @@ python -m scripts.ingest_linkedin --entity "Hausfeld" --confirm-real-calls
 
 ---
 
+---
+
+## 34. Bloque 9D — Análisis Incremental Controlado de Nuevas Entries
+
+HITCHINGS incorpora una capa de orquestación analítica incremental (`IncrementalAnalysisPlanner` y `IncrementalAnalysisService`) que enlaza de manera determinista las etapas de ingestión con el motor de análisis de IA en producción (`v6`):
+
+```
+                       ┌──────────────────────────────────────────────┐
+                       │           INSPECCIÓN DEL BACKLOG            │
+                       │           (Total: 99 Entries en BD)          │
+                       └──────────────────────┬───────────────────────┘
+                                              │
+                     ┌────────────────────────┴────────────────────────┐
+                     ▼                                                 ▼
+        ¿Tiene análisis vigente?                        ¿Es suficiencia FULL y tiene texto?
+         (80 Históricas Oficiales)                        (9 Direct Web = FULL / 10 GNews = INSUFFICIENT)
+                     │                                                 │
+                     ▼                                                 ▼
+        [skip_already_current]                               ¿Cumple los requisitos?
+         (NO se reanalizan)                          ┌─────────────────┴─────────────────┐
+                                                     ▼                                   ▼
+                                            [skip_insufficient]                 [ELIGIBLE QUEUE]
+                                            (10 Google News)                    (9 Direct Web Blog Posts)
+                                                                                         │
+                                                                                         ▼
+                                                                        ┌─────────────────────────────────┐
+                                                                        │  ORQUESTACIÓN PIPELINE v6 (AI)  │
+                                                                        │  - Budget Guard ($0.50 cap)     │
+                                                                        │  - Stage 1: Triage v6           │
+                                                                        │  - Stage 2: Deep Analysis v6   │
+                                                                        │  - Grounding Evidence Validator │
+                                                                        └─────────────────────────────────┘
+```
+
+### 1. Criterios de Selección y Elegibilidad (`IncrementalAnalysisPlanner`)
+La selección de candidatos para análisis es agnóstica del tipo de fuente (`source_type`) y se basa estrictamente en la evidencia documental:
+1. **Comprobación de Análisis Vigente**: Si la entrada ya cuenta con un análisis completado cuyo `entry_content_hash` coincide con el hash del contenido actual, se marca como `already_current` y se excluye de la cola.
+2. **Detección de Contenido Desactualizado (`stale_reanalysis`)**: Si la entrada fue modificada tras su último análisis, se marca como candidata a reanálisis.
+3. **Filtro de Suficiencia (`SourceSufficiencyService`)**: Solo las entradas clasificadas con nivel `FULL` (contenido íntegro y sustantivo) son elegibles para análisis automático. Las entradas clasificadas como `INSUFFICIENT` o `PARTIAL` quedan excluidas.
+4. **Presencia de Contenido**: Entradas sin caracteres en `content` son excluidas como `insufficient` o `missing_content`.
+5. **Ordenación Determinista**: `published_at ASC NULLS LAST, entry_id ASC`.
+
+### 2. Garantías de Presupuesto y Fallo Aislado (`IncrementalAnalysisService`)
+- **Budget Guard Conservador**: Antes de ejecutar cada llamada (`triage` o `deep_analysis`), el servicio calcula una reserva conservadora de coste (`calculate_stage_reservation`). Si el gasto acumulado más la reserva supera el presupuesto autorizado (`INCREMENTAL_ANALYSIS_MAX_ESTIMATED_COST_USD`, por defecto \$0.50), la ejecución se detiene de forma limpia con `PipelineBudgetExceededError` sin perder los análisis completados previamente.
+- **Aislamiento de Fallos**: Si un análisis falla por motivos no críticos (ej. error transitorio de red), se registra el fallo en el reporte y la cola continúa con la siguiente entrada. Solo errores críticos de autenticación provocan parada inmediata.
+- **Pipeline de Producción `v6`**: Ejecuta estrictamente los prompts `observatory_triage:v6` y `observatory_deep_analysis:v6`, preservando la validación determinista de citas textuales continuas (`validate_triage_evidence` y `validate_deep_evidence`).
+
+### 3. CLI de Ejecución (`scripts/run_incremental_analysis.py`)
+```powershell
+# Modo DRY-RUN (por defecto: 0 llamadas a LLM, 0 escrituras en base de datos):
+python -m scripts.run_incremental_analysis
+
+# Ejecución real controlada de candidatos pendientes (límite y presupuesto acotados):
+python -m scripts.run_incremental_analysis --confirm-real-calls --limit 9 --max-estimated-cost-usd 0.50
+
+# Filtrado por entrada o fuente específica:
+python -m scripts.run_incremental_analysis --entry-id <UUID> --confirm-real-calls
+python -m scripts.run_incremental_analysis --source-id <UUID> --confirm-real-calls
+```
+
+### 4. Resultados de la Primera Ejecución Real (9 Direct Web Entries)
+- **Candidatas Ejecutadas**: 9 entradas de blogs jurídicos directos (*Almacén de Derecho*, *Chillin'Competition*, *Kluwer Competition Law Blog*).
+- **Llamadas Triage**: 9 llamadas ejecutadas con éxito.
+- **Clasificación de Relevancia**:
+  - 8 entradas relevantes (puntuaciones entre 78 y 98).
+  - 1 entrada no relevante (*CALL FOR SUBMISSIONS | Rubén Perea Writing Award 2027*, score 10; llamada deep omitida de forma determinista).
+- **Llamadas Deep Analysis**: 8 llamadas ejecutadas con éxito, todas superando la validación de evidencia textual continua.
+- **Coste Incremental de la Ejecución**: **\$0.154176** (muy por debajo del tope de \$0.50).
+- **Coste AI Total Acumulado en Base de Datos**: **\$1.510480**.
+- **Cobertura en el Observatorio**: 89 publicaciones con análisis vigente visualizables en `/api/v1/observatory/entries` y `/api/v1/observatory/dashboard`.
+- **Idempotencia Comprobada**: Una segunda ejecución en seco reporta 0 candidatos pendientes (89 `already_current`, 10 `insufficient`).
+
+---
+
 ## 35. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
@@ -1456,7 +1530,8 @@ python -m scripts.ingest_linkedin --entity "Hausfeld" --confirm-real-calls
 - [x] **Bloque 9C:** LinkedIn Discovery mediante Proveedor Externo (Bright Data primary, Apify fallback, planeador, cross-dedupe, control de costes). *(Cerrado)*
 - [x] **Bloque 9C.1:** Hardening de Identidad LinkedIn, Fallback No-Cookie y Migración (corrección identidad CNMC, harvestapi no-cookie actor, procedencia verificada). *(Cerrado)*
 - [x] **Bloque 9C.2:** Corrección Final del Fallback Apify y Replay Real de Migración 0006 (harvestapi/linkedin-profile-posts, normalización de endpoint, replay aislado 0005→0006). *(Cerrado)*
-- [ ] **Bloque 9D:** Pipeline continuo de ingesta / scheduler.
+- [x] **Bloque 9D:** Análisis Incremental Controlado de Nuevas Entries (planeador agnóstico, filtro de suficiencia FULL, budget guard \$0.50, pipeline v6, 9 direct web entries analizadas). *(Cerrado)*
+- [ ] **Bloque 9E:** Pipeline continuo de ingesta / scheduler.
 - [ ] **Futuro:** Módulo de análisis documental.
 
 

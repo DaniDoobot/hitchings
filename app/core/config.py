@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     LINKEDIN_TIMEOUT_SECONDS: float = 60.0
     LINKEDIN_MAX_POST_CHARS: int = 50_000
 
+    # Incremental Analysis (Bloque 9D - Post-Ingestion Analysis Orchestration)
+    INCREMENTAL_ANALYSIS_MAX_ESTIMATED_COST_USD: float = 0.50
+    INCREMENTAL_ANALYSIS_DEFAULT_LIMIT: int = 10
+
     @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
     @classmethod
     def assemble_languages(cls, v: Any) -> list[str]:
