@@ -50,16 +50,24 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql+psycopg://hitchings:hitchings@db:5432/hitchings"
 
-    # Bright Data (Reserved for future LinkedIn integration - Free-First policy)
+    # Bright Data (Social/anti-bot sources - Free-First policy)
     BRIGHTDATA_ENABLED: bool = False
     BRIGHTDATA_API_KEY: str = ""
+    BRIGHTDATA_API_TOKEN: str = ""
     BRIGHTDATA_MONTHLY_LIMIT: int = 5000
     BRIGHTDATA_SOFT_LIMIT: int = 4500
     BRIGHTDATA_ALLOW_PAID_USAGE: bool = False
+    BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/scrape"
+    BRIGHTDATA_LINKEDIN_DATASET_ID: str = "gd_lyy3tktm25m4avu764"
+    BRIGHTDATA_COST_PER_RECORD_USD: Optional[float] = None
 
-    # Apify (Reserved for future fallback - Free-First policy)
+    # Apify (Alternative/fallback social scraping - Free-First policy)
     APIFY_ENABLED: bool = False
     APIFY_API_KEY: str = ""
+    APIFY_API_TOKEN: str = ""
+    APIFY_LINKEDIN_ENDPOINT: str = "https://api.apify.com/v2/acts"
+    APIFY_LINKEDIN_ACTOR_ID: str = "curious_coder/linkedin-post-search-scraper"
+    APIFY_COST_PER_RECORD_USD: Optional[float] = None
 
     # AI Analysis (Bloque 7A - Architecture & Persistence Foundation)
     ANALYSIS_PROVIDER: str = "disabled"
@@ -115,6 +123,16 @@ class Settings(BaseSettings):
     DIRECT_WEB_MAX_RESPONSE_BYTES: int = 5_000_000
     DIRECT_WEB_MAX_CONTENT_CHARS: int = 250_000
 
+    # LinkedIn Discovery (Bloque 9C - Provider Discovery)
+    LINKEDIN_DISCOVERY_ENABLED: bool = False
+    LINKEDIN_PRIMARY_PROVIDER: str = "brightdata"
+    LINKEDIN_FALLBACK_PROVIDER: str = "apify"
+    LINKEDIN_MAX_ENTITIES_PER_RUN: int = 10
+    LINKEDIN_MAX_POSTS_PER_ENTITY: int = 5
+    LINKEDIN_MAX_NEW_ENTRIES_PER_RUN: int = 25
+    LINKEDIN_TIMEOUT_SECONDS: float = 60.0
+    LINKEDIN_MAX_POST_CHARS: int = 50_000
+
     @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
     @classmethod
     def assemble_languages(cls, v: Any) -> list[str]:
@@ -134,6 +152,16 @@ class Settings(BaseSettings):
         elif isinstance(v, (list, tuple, set)):
             return [str(i).strip().lower() for i in v if str(i).strip()]
         return ["es", "en"]
+
+    @property
+    def brightdata_token(self) -> str:
+        """Return configured Bright Data token (checking both BRIGHTDATA_API_TOKEN and BRIGHTDATA_API_KEY)."""
+        return (self.BRIGHTDATA_API_TOKEN or self.BRIGHTDATA_API_KEY).strip()
+
+    @property
+    def apify_token(self) -> str:
+        """Return configured Apify token (checking both APIFY_API_TOKEN and APIFY_API_KEY)."""
+        return (self.APIFY_API_TOKEN or self.APIFY_API_KEY).strip()
 
 
 @lru_cache

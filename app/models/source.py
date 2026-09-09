@@ -24,6 +24,7 @@ class SourceType(str, enum.Enum):
     GOOGLE_NEWS = "google_news"
     INSTITUTIONAL = "institutional"
     BLOG = "blog"
+    LINKEDIN = "linkedin"
     LINKEDIN_PROFILE = "linkedin_profile"
     LINKEDIN_COMPANY = "linkedin_company"
     LINKEDIN_SEARCH = "linkedin_search"

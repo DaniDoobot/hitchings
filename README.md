@@ -1325,7 +1325,83 @@ Para evitar confusiones en la atribución de autoría y propiedad del canal, se 
 ---
 
 
-## 34. Roadmap
+---
+
+## 34. Descubrimiento en LinkedIn mediante Proveedor Externo (BLOQUE 9C)
+
+### 1. Principio y Decisión Arquitectónica
+El Bloque 9C incorpora **LinkedIn** como canal de descubrimiento (*discovery source*) para seguir publicaciones públicas de interés sobre Derecho de la Competencia realizadas por firmas, expertos, organizaciones e instituciones.
+
+Se aplican principios de seguridad e integridad categóricos:
+- **PROVEEDOR PRINCIPAL**: **Bright Data** (Web Scraper API / Dataset API).
+- **PROVEEDOR FALLBACK**: **Apify** (Actor execution API).
+- **NO SCRAPING PROPIO DE LINKEDIN**: Queda terminantemente prohibido el uso de Playwright, Selenium, cookies de sesión personales, credenciales de usuario o evasión de protecciones anti-bot contra LinkedIn. Toda la interacción técnica externa se delega en proveedores especializados.
+- **DISCOVERY SOURCE (NO SUFICIENCIA INMEDIATA)**: Los posts de LinkedIn son señales de descubrimiento temprano. **NO se envían automáticamente a Gemini** en 9C (0 Gemini calls).
+
+### 2. Documentación Oficial y APIs Consultadas
+- **Bright Data**:
+  - `https://docs.brightdata.com/api-reference/scrapers/social-media-apis/linkedin-posts-discover-by-profile-url`
+  - `https://docs.brightdata.com/api-reference/scrapers/social-media-apis/linkedin-posts-discover-by-company-url`
+  - Método: `POST https://api.brightdata.com/datasets/v3/scrape?dataset_id=gd_lyy3tktm25m4avu764` con `Authorization: Bearer <token>`.
+- **Apify**:
+  - `https://docs.apify.com/api/v2`
+  - Método: `POST https://api.apify.com/v2/acts/{actorId}/run-sync-get-dataset-items` con `Authorization: Bearer <token>`.
+
+### 3. Verificación Estricta de Identidad y Metadatos
+Para evitar falsos positivos por homónimos, el sistema **nunca inventa URLs** ni asume patrones como `linkedin.com/in/nombre-apellido`.
+- Las URLs oficiales verificadas se persisten en `TrackedEntity.metadata_`:
+  `{"linkedin_url": "https://www.linkedin.com/company/...", "linkedin_entity_type": "organization|person"}`.
+- Subconjunto piloto verificado: **Hausfeld**, **ESKARIAM**, **CNMC**, **European Commission**.
+- Entidades personales o sin enlace oficial verificado son ignoradas deterministamente por el planificador hasta que se valide su URL oficial.
+
+### 4. Planificador Determinista (`LinkedInDiscoveryPlanner`)
+- Filtra únicamente entidades activas con `metadata["linkedin_url"]` verificado.
+- Deduplica URLs de entrada.
+- Ordena deterministamente: Instituciones (90) > Organizaciones (80) > Personas (70), desempate por nombre alfabético.
+- Aplica límite de entidades (`LINKEDIN_MAX_ENTITIES_PER_RUN`, por defecto 10).
+
+### 5. Política de Fallback Fail-Closed
+- **Fallos de Autenticación (401/403)**: Fallan de forma cerrada (*fail-closed* con `LinkedInAuthError`). **NUNCA** disparan fallback a Apify para no consumir otro proveedor por un error de credenciales.
+- **Fallos Recuperables (Timeout, 5xx, 429)**: Si Apify está configurado con token válido, se dispara el fallback y se anota `fallback_used = True` y `fallback_reason`.
+- **Aislamiento de Errores**: El fallo en una entidad no detiene el procesamiento de las restantes.
+
+### 6. Modelado de Source y Entry
+- **Source Canónica**: `name="LinkedIn"`, `type=SourceType.LINKEDIN` (`"linkedin"`), `provider="external"`, `tracked_entity_id=None`.
+- **Título Técnico**: `LinkedIn — {author_name} — {YYYY-MM-DD}` (documentado como título técnico determinista).
+- **Atribución de Autor**: `Entry.author` registra el autor real devuelto por el post. El contexto de la entidad vigilada se preserva en `raw_metadata["tracked_entity_id"]` y `raw_metadata["tracked_entity_name"]`.
+
+### 7. Deduplicación Cruzada entre Proveedores (Cross-Dedupe)
+El proveedor **no forma parte de la identidad** del post. Si Bright Data descubre un post con URL $X$ y posteriormente Apify devuelve la misma URL $X$, el sistema lo reconoce de forma unívoca como duplicado, manteniendo una única `Entry` en base de datos.
+
+### 8. Privacidad y Minimización de Datos
+Conforme a los principios de minimización de datos:
+- Solo se almacenan textos públicos, autores y métricas de engagement agregadas (likes, comments, reposts).
+- Se descartan datos de contacto personales, emails, teléfonos o volcados masivos del proveedor.
+- El texto del post se acota a `LINKEDIN_MAX_POST_CHARS` (50.000 caracteres).
+
+### 9. Control de Costes y Trazabilidad (`ProviderUsage`)
+- Cada ejecución registra un `IngestionRun` con métricas operativas completas.
+- El uso comercial se contabiliza en la tabla `provider_usage` por período mensual (`YYYY-MM`) para cada proveedor (`brightdata` y `apify`).
+- Si no hay una tarifa unitaria configurada expresamente en variables de entorno, `estimated_provider_cost` permanece en `None` (nunca se inventa un coste de \$0 para proveedores comerciales).
+
+### 10. CLI de Descubrimiento (`scripts/ingest_linkedin.py`)
+```powershell
+# Modo DRY-RUN (por defecto: 0 llamadas de red, 0 escrituras en BD):
+python -m scripts.ingest_linkedin
+
+# Registro idempotente de la Source canónica y metadatos verificados:
+python -m scripts.ingest_linkedin --seed-source --seed-verified-metadata
+
+# Ejecución real controlada (requiere flags y tokens configurados):
+python -m scripts.ingest_linkedin --confirm-real-calls
+
+# Smoke individual para una entidad específica:
+python -m scripts.ingest_linkedin --entity "Hausfeld" --confirm-real-calls
+```
+
+---
+
+## 35. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1345,7 +1421,8 @@ Para evitar confusiones en la atribución de autoría y propiedad del canal, se 
 - [x] **Bloque 9A.1:** Hardening de Google News: Semántica, Dedupe y Trazabilidad (author=None, discovery fingerprint, cross-source dedupe, planner DB-driven). *(Cerrado)*
 - [x] **Bloque 9A.2:** Verificación Final de Matching de Dominios (jerarquías multinivel, spoofing defense). *(Cerrado)*
 - [x] **Bloque 9B:** Webs y Fuentes de Referencia Directas (adaptadores específicos, registry, extracción limpia de cuerpo, cruce con Google News). *(Cerrado)*
-- [ ] **Bloque 9C:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [x] **Bloque 9B.1:** Hardening Semántico de Sources Directas (separación de propiedad de fuente y autores de artículos). *(Cerrado)*
+- [x] **Bloque 9C:** LinkedIn Discovery mediante Proveedor Externo (Bright Data primary, Apify fallback, planeador, cross-dedupe, control de costes). *(Cerrado)*
 - [ ] **Bloque 9D:** Pipeline continuo de ingesta / scheduler.
 - [ ] **Futuro:** Módulo de análisis documental.
 
