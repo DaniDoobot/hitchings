@@ -49,6 +49,16 @@ from app.services.source_sufficiency_service import assess_source_sufficiency
 logger = logging.getLogger(__name__)
 
 
+class PipelineBudgetExceededError(Exception):
+    """Raised when a pipeline stage cannot proceed due to budget reservation limits."""
+    pass
+
+
+class PipelineStopRequestedError(Exception):
+    """Raised when pipeline must halt before a stage due to SIGINT or user stop request."""
+    pass
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -84,6 +94,7 @@ class AnalysisPipelineService:
         db: Session,
         pipeline_version: str = "v2",
         extra_call_metadata: Optional[dict[str, Any]] = None,
+        before_stage_hook: Optional[Any] = None,
     ) -> EntryAnalysis:
         """Execute the full triage → deep pipeline for a single Entry.
 
@@ -154,6 +165,16 @@ class AnalysisPipelineService:
         db.add(analysis)
         db.flush()  # get analysis.id for FK in AnalysisCall
 
+        # Pre-triage hook (e.g. budget reservation, stop request)
+        if before_stage_hook is not None:
+            try:
+                hook_res = before_stage_hook("triage", entry, triage_prompt, analysis)
+                if hasattr(hook_res, "__await__"):
+                    await hook_res
+            except (PipelineBudgetExceededError, PipelineStopRequestedError):
+                db.rollback()
+                raise
+
         # 4. TRIAGE STAGE
         analysis, triage_call, triage_parsed = await self._run_triage(
             analysis=analysis,
@@ -188,6 +209,24 @@ class AnalysisPipelineService:
 
         # 5. DEEP ANALYSIS (only for 'relevant' entries with sufficient sources)
         if analysis.relevance_status == "relevant":
+            if before_stage_hook is not None:
+                try:
+                    hook_res = before_stage_hook("deep_analysis", entry, deep_prompt, analysis)
+                    if hasattr(hook_res, "__await__"):
+                        await hook_res
+                except (PipelineBudgetExceededError, PipelineStopRequestedError) as stop_exc:
+                    triage_call.call_metadata = {
+                        **(triage_call.call_metadata or {}),
+                        "deep_skipped": True,
+                        "deep_skipped_reason": "budget_limit" if isinstance(stop_exc, PipelineBudgetExceededError) else "stop_requested",
+                    }
+                    analysis.status = "incomplete"
+                    analysis.reason = (analysis.reason or "") + f" [DEEP SKIPPED: {stop_exc}]"
+                    analysis.completed_at = utc_now()
+                    db.commit()
+                    db.refresh(analysis)
+                    return analysis
+
             analysis = await self._run_deep(
                 analysis=analysis,
                 entry=entry,

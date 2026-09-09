@@ -769,19 +769,73 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
 
 ---
 
-## 22. Funcionalidades Deliberadamente Pendientes
+---
 
-Para respetar la delimitación estricta de fases, en este Bloque 7G.2 **NO** se han implementado:
-1. Llamadas a Gemini o ejecución del backfill v4 (solo scripts analíticos de planificación y preflight).
-2. Modificación de prompts v1, v2, v3 o v4.
-3. Creación de prompts v5.
-4. Alteración o borrado de `EntryAnalysisTopic` o `EntryAnalysis` históricos.
-5. Scheduler en segundo plano (Celery, APScheduler, cron).
-6. Interfaz gráfica o frontend.
+## 22. Runner Resumible y Backfill Real V4 (Bloque 7H)
+
+### 1. Arquitectura del Runner de Backfill (`scripts/run_v4_backfill.py`)
+- **Ejecución estrictamente secuencial y determinista:** Orden de fuentes prioritario: (1) CNMC, (2) European Commission, (3) Competition Appeal Tribunal, (4) CURIA. Ordenación por `published_at DESC nullslast` y `entry.id ASC`.
+- **Preflight exhaustivo de 5 fases:**
+  1. Auditoría completa de identidad e inventario (`IDENTITY_OK`: 80/80, 0 colisiones).
+  2. Comprobación de cero análisis v4 pendientes o en ejecución.
+  3. Verificación de configuración de proveedor (`gemini_api`), modelo (`gemini-3.8-flash`), API Key y tarifas oficiales vigentes ($0.75 / $3.75 por 1M tokens).
+  4. Verificación de versiones activas de prompts (`observatory_triage:v4`, `observatory_deep_analysis:v4`) y matriz de seguimiento activa (`HITCHINGS-v0.1`).
+  5. Verificación de integridad y concordancia numérica de la base de datos PostgreSQL.
+- **Guardas fail-closed de presupuesto y parada:**
+  - Reserva conservadora pre-call antes de Triage y antes de Deep (piso de $0.0400).
+  - Presupuesto duro autorizado: $2.0000; aviso de umbral al 75%: $1.5000.
+  - Reglas de parada sistémica: parada inmediata ante fallo de autenticación/API key, ante 2 fallos consecutivos de grounding, ante 3 fallos totales de grounding, o ante 2 fallos consecutivos de parseo estructurado.
+  - Manejador de señal `SIGINT` (Ctrl+C) con interrupción limpia entre etapas o llamadas.
+  - Soporte para reanudación idempotente mediante `--resume-run-id <UUID>`.
+
+### 2. Resultados de la Ejecución Real del Backfill V4
+- **Run ID:** `2c73e471-acc3-40c7-9fc3-77fa1e7d0df1`.
+- **Duración total:** 595.6 segundos (~9.93 minutos).
+- **Entries procesadas:** 79 de 79 intentadas.
+- **Análisis v4 completados:** 76 en este run (+ 1 previo de *Livronsa* = 77 vigentes en el repositorio).
+- **Análisis v4 fallidos:** 3 (registrados permanentemente en PostgreSQL; fail-closed sin auto-reintentos):
+  - `ada5d125` (*Dr Liza Lovdahl Gormsen v Meta*): `AnalysisGroundingError` en Deep Analysis (el modelo truncó una cita con `...` en lugar de texto literal; detectado y bloqueado por el validador estricto).
+  - `4db3fa9a` (*Elisabetta Sciallis v Fender*): `NoParsedResponse` en Deep Analysis.
+  - `14e036d2` (*Mr David Alexander de Horne Rowntree v PRS*): `NoParsedResponse` en Deep Analysis.
+- **Llamadas API realizadas:** 110 (79 Triage + 31 Deep Analysis; 107 completadas, 3 fallidas).
+- **Consumo de tokens del run:**
+  - Input tokens: 739.576
+  - Output tokens: 95.749 (visibles y razonamiento)
+- **Métricas de Evidencia y Grounding (Citas literales):**
+  - Total de citas extraídas: 391
+  - Total de citas validadas por `GroundingValidator`: 391 (100.0% de tasa de verificación).
+  - Longitud media: 128.5 caracteres / 19.8 palabras.
+  - Citas > 180 caracteres: 72 (18.4%).
+  - Citas > 25 palabras: 98 (25.1%).
+  - Longitud máxima de cita: 394 caracteres.
+- **Contabilidad y Precisión Presupuestaria:**
+  - Coste real del Run: **$0.913752 USD** (frente a previsión EXPECTED de $0.9949 del token-model: 91.8% de precisión).
+  - Presupuesto remanente: $1.086248 USD (consumido el 45.7% del límite de $2.0000; nunca se alcanzó el aviso del 75%).
+  - Coste registrado acumulado en PostgreSQL: $1.205550 USD (anterior: $0.291798).
+  - Coste histórico reconstruido (incluyendo llamadas depuradas en 7E.2): $1.421366 USD.
+- **Subsunción Canónica de Taxonomía:**
+  - De los 76 análisis completados, 38 presentaban redundancia padre-hijo bruta en los tópicos asignados por el LLM (50.0%).
+  - La capa canónica (`canonicalize_analysis_topics`) eliminó el 100% de las redundancias: **0 redundancias canónicas** subsistentes.
+- **Distribución Final de Análisis Vigentes (`select_current_analysis` sobre 80 Entries):**
+  - `Current v4`: 77 / 80 (96.25%).
+  - `Current v3`: 0 / 80.
+  - `Current v2`: 0 / 80.
+  - `Sin análisis vigente`: 3 / 80 (las 3 fallidas de CAT que nunca antes habían sido analizadas).
 
 ---
 
-## 23. Roadmap
+## 23. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7H **NO** se han implementado:
+1. Reintentos automáticos de las 3 Entries fallidas.
+2. Modificación de prompts v1, v2, v3 o v4 ni creación de prompts v5.
+3. Concurrencia paralela en llamadas a la API de Gemini (mantenido secuencial por seguridad).
+4. Scheduler en segundo plano (Celery, APScheduler, cron).
+5. Interfaz gráfica o frontend.
+
+---
+
+## 24. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -800,10 +854,12 @@ Para respetar la delimitación estricta de fases, en este Bloque 7G.2 **NO** se 
 - [x] **Bloque 7F:** V4 Evidence Robustness: extract-first, cláusulas cortas y validación exitosa en Livronsa (100% citas verificadas).
 - [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4.
 - [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs.
-- [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4. *(Cerrado)*
+- [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4.
+- [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 coste real, 391/391 citas 100% verificadas). *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
 - [ ] **Futuro:** Módulo de análisis documental.
+
 
 
