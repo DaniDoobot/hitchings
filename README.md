@@ -1347,12 +1347,19 @@ Se aplican principios de seguridad e integridad categóricos:
   - `https://docs.apify.com/api/v2`
   - Método: `POST https://api.apify.com/v2/acts/{actorId}/run-sync-get-dataset-items` con `Authorization: Bearer <token>`.
 
-### 3. Verificación Estricta de Identidad y Metadatos
-Para evitar falsos positivos por homónimos, el sistema **nunca inventa URLs** ni asume patrones como `linkedin.com/in/nombre-apellido`.
-- Las URLs oficiales verificadas se persisten en `TrackedEntity.metadata_`:
-  `{"linkedin_url": "https://www.linkedin.com/company/...", "linkedin_entity_type": "organization|person"}`.
+### 3. Verificación Estricta de Identidad y Metadatos (Hardening 9C.1)
+Para evitar falsos positivos por homónimos o páginas erróneas, el sistema **nunca inventa URLs** ni asume patrones no contrastados:
+- **Auditoría de Identidad CNMC**: Se descartó categóricamente `https://www.linkedin.com/company/cnmc` (perteneciente a una inmobiliaria irlandesa, *Capital North Management Company*). La URL canónica verificada del regulador español es:
+  `https://www.linkedin.com/company/cnmc-comision-nacional-de-los-mercados-y-la-competencia` (con dominio oficial contrastado `cnmc.es`).
+- **Trazabilidad y Procedencia Completa en `TrackedEntity.metadata_`**:
+  - `linkedin_url`: URL oficial canónica.
+  - `linkedin_entity_type`: `organization` o `person`.
+  - `linkedin_url_verified`: `True`.
+  - `linkedin_url_verified_at`: Timestamp ISO de verificación (ej. `2026-09-09T14:45:00Z`).
+  - `linkedin_url_verification_method`: `public_linkedin_page_identity_and_official_domain`.
+  - `linkedin_declared_website`: Dominio web institucional comprobado (`cnmc.es`, `commission.europa.eu`, `eskariam.com`, `hausfeld.com`).
 - Subconjunto piloto verificado: **Hausfeld**, **ESKARIAM**, **CNMC**, **European Commission**.
-- Entidades personales o sin enlace oficial verificado son ignoradas deterministamente por el planificador hasta que se valide su URL oficial.
+- Entidades personales o sin enlace contrastado son ignoradas deterministamente por el planificador hasta su verificación formal.
 
 ### 4. Planificador Determinista (`LinkedInDiscoveryPlanner`)
 - Filtra únicamente entidades activas con `metadata["linkedin_url"]` verificado.
@@ -1360,13 +1367,17 @@ Para evitar falsos positivos por homónimos, el sistema **nunca inventa URLs** n
 - Ordena deterministamente: Instituciones (90) > Organizaciones (80) > Personas (70), desempate por nombre alfabético.
 - Aplica límite de entidades (`LINKEDIN_MAX_ENTITIES_PER_RUN`, por defecto 10).
 
-### 5. Política de Fallback Fail-Closed
-- **Fallos de Autenticación (401/403)**: Fallan de forma cerrada (*fail-closed* con `LinkedInAuthError`). **NUNCA** disparan fallback a Apify para no consumir otro proveedor por un error de credenciales.
-- **Fallos Recuperables (Timeout, 5xx, 429)**: Si Apify está configurado con token válido, se dispara el fallback y se anota `fallback_used = True` y `fallback_reason`.
-- **Aislamiento de Errores**: El fallo en una entidad no detiene el procesamiento de las restantes.
+### 5. Proveedor Fallback Apify 100% No-Cookie (`harvestapi/linkedin-post-search`)
+- **Actor Veteado**: En sustitución de actores que requerían cookies de sesión (`li_at`), se adoptó **`harvestapi/linkedin-post-search`** (5M+ ejecuciones, mantenido activamente, coste \$0.002/registro).
+- **Garantía No-Cookie**: Ejecuta búsquedas públicas de publicaciones mediante parámetro `authorUrls` sin requerir cookies, credenciales de usuario ni cuentas de LinkedIn.
+- **Política Fail-Closed**:
+  - **Fallos de Autenticación (401/403)**: Fallan de forma cerrada (*fail-closed* con `LinkedInAuthError`). **NUNCA** disparan fallback a Apify para evitar agotar créditos alternativos por problemas de API token.
+  - **Fallos Recuperables (Timeout, 5xx, 429)**: Si Apify está configurado con token válido, se dispara el fallback y se anota `fallback_used = True` y `fallback_reason`.
+  - **Aislamiento de Errores**: El fallo en una entidad no detiene el procesamiento de las restantes.
 
-### 6. Modelado de Source y Entry
-- **Source Canónica**: `name="LinkedIn"`, `type=SourceType.LINKEDIN` (`"linkedin"`), `provider="external"`, `tracked_entity_id=None`.
+### 6. Modelado de Source, Entry y Migración 0006
+- **Source Canónica**: `name="LinkedIn"`, `type=SourceType.LINKEDIN` (`"linkedin"`), `provider="external"`, `tracked_entity_id=None`. Representa el canal general de descubrimiento en la plataforma LinkedIn (análogo a `google_news`), reservándose `linkedin_company` / `linkedin_profile` para flujos directos vinculados a una única entidad.
+- **Verificación de Migración `0006_add_linkedin_source_type`**: Se verificó formalmente en un esquema aislado de PostgreSQL que la migración Alembic añade `'linkedin'` al tipo ENUM `sourcetype` de forma idempotente y segura sin requerir `ALTER TYPE` manual.
 - **Título Técnico**: `LinkedIn — {author_name} — {YYYY-MM-DD}` (documentado como título técnico determinista).
 - **Atribución de Autor**: `Entry.author` registra el autor real devuelto por el post. El contexto de la entidad vigilada se preserva en `raw_metadata["tracked_entity_id"]` y `raw_metadata["tracked_entity_name"]`.
 
@@ -1389,7 +1400,7 @@ Conforme a los principios de minimización de datos:
 # Modo DRY-RUN (por defecto: 0 llamadas de red, 0 escrituras en BD):
 python -m scripts.ingest_linkedin
 
-# Registro idempotente de la Source canónica y metadatos verificados:
+# Registro idempotente de la Source canónica y metadatos verificados (con procedencia completa):
 python -m scripts.ingest_linkedin --seed-source --seed-verified-metadata
 
 # Ejecución real controlada (requiere flags y tokens configurados):
@@ -1423,6 +1434,7 @@ python -m scripts.ingest_linkedin --entity "Hausfeld" --confirm-real-calls
 - [x] **Bloque 9B:** Webs y Fuentes de Referencia Directas (adaptadores específicos, registry, extracción limpia de cuerpo, cruce con Google News). *(Cerrado)*
 - [x] **Bloque 9B.1:** Hardening Semántico de Sources Directas (separación de propiedad de fuente y autores de artículos). *(Cerrado)*
 - [x] **Bloque 9C:** LinkedIn Discovery mediante Proveedor Externo (Bright Data primary, Apify fallback, planeador, cross-dedupe, control de costes). *(Cerrado)*
+- [x] **Bloque 9C.1:** Hardening de Identidad LinkedIn, Fallback No-Cookie y Migración (corrección identidad CNMC, harvestapi no-cookie actor, procedencia verificada). *(Cerrado)*
 - [ ] **Bloque 9D:** Pipeline continuo de ingesta / scheduler.
 - [ ] **Futuro:** Módulo de análisis documental.
 

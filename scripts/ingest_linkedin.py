@@ -38,21 +38,37 @@ VERIFIED_LINKEDIN_PILOT_ENTITIES = [
         "name": "Hausfeld",
         "linkedin_url": "https://www.linkedin.com/company/hausfeld",
         "linkedin_entity_type": "organization",
+        "linkedin_url_verified": True,
+        "linkedin_url_verified_at": "2026-09-09T14:45:00Z",
+        "linkedin_url_verification_method": "public_linkedin_page_identity_and_official_domain",
+        "linkedin_declared_website": "hausfeld.com",
     },
     {
         "name": "ESKARIAM",
         "linkedin_url": "https://www.linkedin.com/company/eskariam",
         "linkedin_entity_type": "organization",
+        "linkedin_url_verified": True,
+        "linkedin_url_verified_at": "2026-09-09T14:45:00Z",
+        "linkedin_url_verification_method": "public_linkedin_page_identity_and_official_domain",
+        "linkedin_declared_website": "eskariam.com",
     },
     {
         "name": "Comisión Nacional de los Mercados y la Competencia",
-        "linkedin_url": "https://www.linkedin.com/company/cnmc",
+        "linkedin_url": "https://www.linkedin.com/company/cnmc-comision-nacional-de-los-mercados-y-la-competencia",
         "linkedin_entity_type": "organization",
+        "linkedin_url_verified": True,
+        "linkedin_url_verified_at": "2026-09-09T14:45:00Z",
+        "linkedin_url_verification_method": "public_linkedin_page_identity_and_official_domain",
+        "linkedin_declared_website": "cnmc.es",
     },
     {
         "name": "European Commission",
         "linkedin_url": "https://www.linkedin.com/company/european-commission",
         "linkedin_entity_type": "organization",
+        "linkedin_url_verified": True,
+        "linkedin_url_verified_at": "2026-09-09T14:45:00Z",
+        "linkedin_url_verification_method": "public_linkedin_page_identity_and_official_domain",
+        "linkedin_declared_website": "commission.europa.eu",
     },
 ]
 
@@ -67,12 +83,15 @@ def seed_verified_metadata(db) -> int:
 
         if entity:
             current_meta = dict(entity.metadata_ or {})
-            if (
-                current_meta.get("linkedin_url") != pilot["linkedin_url"]
-                or current_meta.get("linkedin_entity_type") != pilot["linkedin_entity_type"]
-            ):
-                current_meta["linkedin_url"] = pilot["linkedin_url"]
-                current_meta["linkedin_entity_type"] = pilot["linkedin_entity_type"]
+            needs_update = False
+            for k, v in pilot.items():
+                if k == "name":
+                    continue
+                if current_meta.get(k) != v:
+                    current_meta[k] = v
+                    needs_update = True
+
+            if needs_update:
                 entity.metadata_ = current_meta
                 updated += 1
                 logger.info("Updated verified LinkedIn metadata for '%s'", pilot["name"])

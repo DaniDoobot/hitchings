@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     APIFY_API_KEY: str = ""
     APIFY_API_TOKEN: str = ""
     APIFY_LINKEDIN_ENDPOINT: str = "https://api.apify.com/v2/acts"
-    APIFY_LINKEDIN_ACTOR_ID: str = "curious_coder/linkedin-post-search-scraper"
+    APIFY_LINKEDIN_ACTOR_ID: str = "harvestapi/linkedin-post-search"
     APIFY_COST_PER_RECORD_USD: Optional[float] = None
 
     # AI Analysis (Bloque 7A - Architecture & Persistence Foundation)

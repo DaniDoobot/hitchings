@@ -53,10 +53,11 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
             "Content-Type": "application/json",
             "User-Agent": "HITCHINGS/1.0",
         }
+        # harvestapi/linkedin-post-search input schema (100% no-cookies)
         payload = {
-            "urls": [target_url],
-            "limit": limit,
+            "authorUrls": [target_url],
             "maxPosts": limit,
+            "sortBy": "date",
         }
 
         logger.info(
@@ -131,24 +132,41 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
 
         posts: list[LinkedInDiscoveredPost] = []
         for item in items[:limit]:
-            post_url = item.get("url") or item.get("postUrl")
+            post_url = item.get("linkedinUrl") or item.get("url") or item.get("postUrl")
             if not post_url or not isinstance(post_url, str):
                 continue
 
-            post_id = str(item.get("urn") or item.get("id") or item.get("post_id") or "")
-            text = item.get("text") or item.get("content") or item.get("postContent") or ""
-            author = (
-                item.get("author")
-                or item.get("authorName")
-                or item.get("authorFullName")
-                or entity_name
-                or "LinkedIn Author"
-            )
-            author_profile_url = item.get("authorProfileUrl") or item.get("authorUrl") or target_url
+            post_id = str(item.get("id") or item.get("urn") or item.get("post_id") or "")
+            text = item.get("content") or item.get("text") or item.get("postContent") or ""
 
-            # Parse publication timestamp safely
+            # Author extraction (supports both harvestapi dict format and string format)
+            author_val = item.get("author")
+            if isinstance(author_val, dict):
+                author = (
+                    author_val.get("name")
+                    or author_val.get("publicIdentifier")
+                    or entity_name
+                    or "LinkedIn Author"
+                )
+                author_profile_url = author_val.get("linkedinUrl") or target_url
+            else:
+                author = str(
+                    author_val
+                    or item.get("authorName")
+                    or item.get("authorFullName")
+                    or entity_name
+                    or "LinkedIn Author"
+                )
+                author_profile_url = item.get("authorProfileUrl") or item.get("authorUrl") or target_url
+
+            # Publication timestamp (supports harvestapi postedAt dict and ISO strings)
             published_at = None
-            date_str = item.get("postedAt") or item.get("publishedAt") or item.get("date")
+            posted_at_val = item.get("postedAt")
+            if isinstance(posted_at_val, dict):
+                date_str = posted_at_val.get("date")
+            else:
+                date_str = posted_at_val or item.get("publishedAt") or item.get("date")
+
             if date_str and isinstance(date_str, str):
                 try:
                     clean_date = date_str.replace("Z", "+00:00")
@@ -156,17 +174,26 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
                 except Exception:
                     published_at = None
 
-            # Engagement metrics
-            engagement = {
-                "likes": item.get("likesCount") or item.get("numLikes"),
-                "comments": item.get("commentsCount") or item.get("numComments"),
-                "reposts": item.get("repostsCount") or item.get("numReposts"),
-            }
+            # Engagement metrics (supports harvestapi engagement dict and scalar fields)
+            eng_val = item.get("engagement")
+            if isinstance(eng_val, dict):
+                engagement = {
+                    "likes": eng_val.get("likes"),
+                    "comments": eng_val.get("comments"),
+                    "reposts": eng_val.get("shares") or eng_val.get("reposts"),
+                }
+            else:
+                engagement = {
+                    "likes": item.get("likesCount") or item.get("numLikes"),
+                    "comments": item.get("commentsCount") or item.get("numComments"),
+                    "reposts": item.get("sharesCount") or item.get("repostsCount"),
+                }
 
-            # Privacy & Data Minimization
+            # Privacy & Data Minimization: strictly whitelist useful metadata fields
             sanitized_meta = {
                 "provider": self.provider_name,
                 "actor_id": self.settings.APIFY_LINKEDIN_ACTOR_ID,
+                "item_type": item.get("type"),
                 "actor_run_id": item.get("actorRunId"),
             }
             sanitized_meta = {k: v for k, v in sanitized_meta.items() if v is not None}

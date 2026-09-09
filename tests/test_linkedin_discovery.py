@@ -167,21 +167,28 @@ def test_brightdata_provider_rate_limit_and_timeout(monkeypatch):
 
 MOCK_APIFY_ITEMS = [
     {
-        "url": "https://www.linkedin.com/posts/hausfeld_antitrust-litigation-activity-7123456789",
-        "urn": "7123456789",
-        "authorName": "Hausfeld",
-        "authorProfileUrl": "https://www.linkedin.com/company/hausfeld",
-        "text": "Groundbreaking developments in European private enforcement and cartel damages litigation.",
-        "postedAt": "2026-03-15T14:30:00Z",
-        "likesCount": 42,
-        "commentsCount": 5,
-        "repostsCount": 8,
+        "id": "7123456789",
+        "linkedinUrl": "https://www.linkedin.com/posts/hausfeld_antitrust-litigation-activity-7123456789",
+        "content": "Groundbreaking developments in European private enforcement and cartel damages litigation.",
+        "author": {
+            "name": "Hausfeld",
+            "linkedinUrl": "https://www.linkedin.com/company/hausfeld",
+        },
+        "postedAt": {
+            "date": "2026-03-15T14:30:00Z",
+        },
+        "engagement": {
+            "likes": 42,
+            "comments": 5,
+            "shares": 8,
+        },
+        "type": "post",
     }
 ]
 
 
 def test_apify_provider_success(monkeypatch):
-    """Verify Apify fallback provider executes sync run endpoint and parses items."""
+    """Verify Apify fallback provider executes sync run endpoint and parses harvestapi items."""
     settings = get_settings()
     monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
     monkeypatch.setattr(settings, "APIFY_LINKEDIN_ACTOR_ID", "mock-actor-xyz")
@@ -206,12 +213,51 @@ def test_apify_provider_success(monkeypatch):
 
     assert "mock-actor-xyz/run-sync-get-dataset-items" in captured_request["url"]
     assert captured_request["headers"]["authorization"] == "Bearer mock-apify-token"
+    assert captured_request["body"]["authorUrls"] == ["https://www.linkedin.com/company/hausfeld"]
+    assert captured_request["body"]["maxPosts"] == 5
+    assert captured_request["body"]["sortBy"] == "date"
     assert len(posts) == 1
     p = posts[0]
     assert p.provider == "apify"
     assert p.provider_item_id == "7123456789"
     assert p.author_name == "Hausfeld"
     assert p.engagement["likes"] == 42
+    assert p.engagement["reposts"] == 8
+    assert p.text == "Groundbreaking developments in European private enforcement and cartel damages litigation."
+
+
+def test_apify_payload_contains_no_cookies(monkeypatch):
+    """Verify that Apify LinkedIn provider payload never contains cookies, passwords, or personal tokens."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
+
+    captured_request = {}
+
+    def mock_transport_handler(request: httpx.Request):
+        captured_request["headers"] = dict(request.headers)
+        captured_request["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = ApifyLinkedInProvider()
+
+    provider.discover_posts(
+        target_url="https://www.linkedin.com/company/hausfeld",
+        client=client,
+        limit=5,
+    )
+
+    body = captured_request["body"]
+    headers = captured_request["headers"]
+
+    # Assert no cookie fields in payload
+    forbidden_keys = {"cookie", "cookies", "li_at", "session", "password", "username", "login", "jsessionid"}
+    for k in body.keys():
+        assert k.lower() not in forbidden_keys, f"Forbidden key '{k}' found in Apify payload"
+
+    # Assert no cookie header
+    assert "cookie" not in [h.lower() for h in headers.keys()]
+    assert "harvestapi" in settings.APIFY_LINKEDIN_ACTOR_ID
 
 
 def test_apify_provider_auth_error_and_timeout(monkeypatch):
@@ -500,3 +546,31 @@ def test_provider_usage_accounting(db_session: Session, monkeypatch):
     ).scalar_one()
 
     assert usage.records_used == 2
+
+
+def test_cnmc_incorrect_url_rejected_and_canonical_validated(db_session: Session):
+    """Regression test (Bloque 9C.1): Ensure 'company/cnmc' is rejected and canonical URL is validated.
+
+    'https://www.linkedin.com/company/cnmc' belongs to Capital North Management Company.
+    The Spanish regulator must strictly use the canonical URL:
+    'https://www.linkedin.com/company/cnmc-comision-nacional-de-los-mercados-y-la-competencia'
+    with declared official domain 'cnmc.es'.
+    """
+    from scripts.ingest_linkedin import VERIFIED_LINKEDIN_PILOT_ENTITIES
+
+    cnmc_pilot = next(
+        p for p in VERIFIED_LINKEDIN_PILOT_ENTITIES
+        if "CNMC" in p["name"] or "Mercados" in p["name"]
+    )
+
+    # Assert wrong handle is explicitly rejected
+    assert cnmc_pilot["linkedin_url"] != "https://www.linkedin.com/company/cnmc"
+    assert "capital" not in cnmc_pilot["linkedin_url"].lower()
+
+    # Assert canonical URL and domain
+    assert cnmc_pilot["linkedin_url"] == "https://www.linkedin.com/company/cnmc-comision-nacional-de-los-mercados-y-la-competencia"
+    assert cnmc_pilot["linkedin_declared_website"] == "cnmc.es"
+    assert cnmc_pilot["linkedin_url_verified"] is True
+    assert cnmc_pilot["linkedin_url_verification_method"] == "public_linkedin_page_identity_and_official_domain"
+    assert cnmc_pilot["linkedin_url_verified_at"] is not None
+
