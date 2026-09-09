@@ -81,6 +81,12 @@ export class ObservatoryApiService {
     }
   }
 
+  private checkUnauthorized(res: Response) {
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hitchings:unauthorized'));
+    }
+  }
+
   public isUsingMock(): boolean {
     return this.isMockMode;
   }
@@ -121,7 +127,10 @@ export class ObservatoryApiService {
       return JSON.parse(JSON.stringify(MOCK_DASHBOARD));
     }
 
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/dashboard`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/dashboard`, {
+      credentials: 'include',
+    });
+    this.checkUnauthorized(res);
     if (!res.ok) {
       throw new Error(`Error al obtener dashboard: HTTP ${res.status}`);
     }
@@ -136,7 +145,10 @@ export class ObservatoryApiService {
       return JSON.parse(JSON.stringify(MOCK_SOURCES));
     }
 
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/sources`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/sources`, {
+      credentials: 'include',
+    });
+    this.checkUnauthorized(res);
     if (!res.ok) {
       throw new Error(`Error al obtener fuentes: HTTP ${res.status}`);
     }
@@ -151,7 +163,10 @@ export class ObservatoryApiService {
       return JSON.parse(JSON.stringify(MOCK_TOPICS));
     }
 
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/topics`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/topics`, {
+      credentials: 'include',
+    });
+    this.checkUnauthorized(res);
     if (!res.ok) {
       throw new Error(`Error al obtener taxonomía: HTTP ${res.status}`);
     }
@@ -167,7 +182,10 @@ export class ObservatoryApiService {
     }
 
     const query = this.buildQueryParams(params);
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries?${query.toString()}`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries?${query.toString()}`, {
+      credentials: 'include',
+    });
+    this.checkUnauthorized(res);
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
       throw new Error(errBody.detail || `Error al consultar publicaciones: HTTP ${res.status}`);
@@ -187,7 +205,10 @@ export class ObservatoryApiService {
       return JSON.parse(JSON.stringify(entry));
     }
 
-    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries/${entryId}`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries/${entryId}`, {
+      credentials: 'include',
+    });
+    this.checkUnauthorized(res);
     if (res.status === 404) {
       throw new Error(`Publicación no encontrada o sin análisis vigente (ID: ${entryId})`);
     }

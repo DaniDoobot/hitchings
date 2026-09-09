@@ -1,4 +1,4 @@
-﻿"""Client-facing Observatory API endpoints (BLOQUE 8A).
+"""Client-facing Observatory API endpoints (BLOQUE 8A).
 
 All endpoints operate under the /api/v1/observatory namespace.
 Exclusively product-facing:
@@ -18,6 +18,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.v1.endpoints.auth import get_current_user
 from app.db.session import get_db
 from app.schemas.observatory import (
     ObservatoryDashboard,
@@ -28,7 +29,11 @@ from app.schemas.observatory import (
 )
 from app.services import observatory_query_service as service
 
-router = APIRouter(prefix="/observatory", tags=["Observatory Client API"])
+router = APIRouter(
+    prefix="/observatory",
+    tags=["Observatory Client API"],
+    dependencies=[Depends(get_current_user)],
+)
 
 
 # ---------------------------------------------------------------------------

@@ -1052,7 +1052,119 @@ Para respetar la delimitación estricta de fases, en este Bloque 8B.2 **NO** se 
 
 ---
 
-## 31. Roadmap
+## 31. BLOQUE 8C.1 — Autenticación Privada del Portal Cliente
+
+### Objetivo
+
+Convertir el portal del Observatorio en una aplicación privada: solo usuarios autorizados provistos por el administrador pueden acceder al Dashboard, Observatorio y Detalle.
+
+### Modelo de Seguridad
+
+| Elemento | Decisión |
+|---|---|
+| Sesiones | Server-side (`auth_sessions` en PostgreSQL). No JWT, no localStorage. |
+| Cookie | `HttpOnly=True`, `SameSite=Lax`, `Secure=False` en dev (configurable). |
+| Hash de contraseña | Argon2id (`argon2-cffi`), tiempo de hashing ~100ms. |
+| Token de sesión | 32 bytes aleatorios vía `secrets.token_bytes`. Se almacena en BD como SHA-256. |
+| TTL | Configurable `AUTH_SESSION_TTL_HOURS` (defecto: 24h). |
+| Rate limiter | Ventana deslizante en memoria: 5 intentos fallidos / min por IP. |
+| Timing-safe | `dummy_verify_password()` se ejecuta siempre aunque el usuario no exista, para mitigar enumeración de usuarios por tiempo de respuesta. |
+| Signup | Ninguno. Usuarios solo mediante CLI administrativo. |
+
+### Nuevos Modelos de Base de Datos
+
+```text
+users:
+  id (UUID PK), email (unique), display_name,
+  password_hash (Argon2id), is_active, created_at, last_seen_at
+
+auth_sessions:
+  id (UUID PK), user_id (FK users), token_hash (SHA-256),
+  created_at, expires_at, revoked_at, last_seen_at
+```
+
+Migración: `0005_users_and_auth_sessions`.
+
+### Endpoints de Autenticación
+
+| Método | Ruta | Descripción | Auth |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | Inicio de sesión. Devuelve `UserPublic` y establece cookie HttpOnly. | Público |
+| `GET` | `/api/v1/auth/me` | Devuelve el usuario autenticado actual. | Sesión válida |
+| `POST` | `/api/v1/auth/logout` | Revoca la sesión en BD y elimina la cookie del navegador. | Sesión válida |
+
+**Endpoints protegidos:** Todos los endpoints bajo `/api/v1/observatory/*` requieren sesión válida. Si no hay cookie o la sesión está expirada o revocada, devuelven `HTTP 401`.
+
+**Endpoints públicos:** `/health` y `/health/db` permanecen siempre accesibles sin autenticación.
+
+### Provisión de Usuarios (CLI Administrativo)
+
+```powershell
+# Crear usuario interactivamente (pide contraseña de forma segura via getpass):
+python -m scripts.create_user --email usuario@ejemplo.com --display-name "Nombre Visible"
+
+# Con contraseña inline (útil en automatización interna):
+python -m scripts.create_user --email usuario@ejemplo.com --display-name "Nombre Visible" --password "Contraseña_Segura_2026!"
+```
+
+El script es completamente **idempotente** — rechaza duplicar cuentas existentes sin modificar silenciosamente datos previos.
+
+### Variables de Entorno Adicionales
+
+```bash
+# Autenticación (8C.1)
+AUTH_COOKIE_NAME=hitchings_session
+AUTH_SESSION_TTL_HOURS=24
+AUTH_COOKIE_SECURE=false         # true en producción HTTPS
+AUTH_COOKIE_DOMAIN=              # vacío en dev; fijar a dominio de prod
+```
+
+### Protecciones de Frontend
+
+- **`ProtectedRoute`:** Wrapper de React Router que verifica el estado de autenticación (`checking` → espera, `unauthenticated` → `/login`, `authenticated` → renderiza ruta).
+- **`AuthContext`:** Proveedor global con `login`, `logout` y escucha del evento `hitchings:unauthorized` emitido por `observatoryApi` ante cualquier `HTTP 401` en las rutas protegidas.
+- **`LoginPage`:** Vista institucional sobria con campo de email y contraseña, retroalimentación de error en caso de credenciales inválidas y redirección automática a la ruta de origen tras el login.
+- **`AppLayout`:** Muestra el nombre visible y email del usuario autenticado más el botón de cierre de sesión.
+- **`credentials: 'include'`:** Configurado en todos los `fetch` de `observatoryApi` y `authApi` para que el navegador adjunte la cookie de sesión en cada petición.
+
+### Verificación E2E (11/11 Checks)
+
+La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend real + PostgreSQL real:
+
+| # | Check | Resultado |
+|---|---|---|
+| 1 | Acceso no autenticado a `/` redirige a `/login` | ✅ |
+| 2 | Credenciales incorrectas → mensaje de error visible | ✅ |
+| 3 | Credenciales válidas → login y redirección al Dashboard | ✅ |
+| 4 | Dashboard muestra métricas reales (80 publicaciones) | ✅ |
+| 5 | `document.cookie` vacío — cookie no accesible desde JS (HttpOnly) | ✅ |
+| 6 | Cookie CDP: `httpOnly=true`, `sameSite=Lax` | ✅ |
+| 7 | Observatorio carga con 20 publicaciones paginadas reales | ✅ |
+| 8 | Detalle de entrada se renderiza con contenido real de BD | ✅ |
+| 9 | Logout → sesión revocada en BD, redirige a `/login` | ✅ |
+| 10 | Acceso post-logout a `/` redirige a `/login` | ✅ |
+| 11 | Todos los checks superados simultáneamente | ✅ |
+
+### Estado Final tras Bloque 8C.1
+
+| Métrica | Valor |
+|---|---|
+| Backend tests | 245 pasando |
+| Frontend tests | 32 pasando (5 suites) |
+| Build | OK |
+| Migración Alembic | `0005_users_and_auth_sessions (head)` |
+| Sources | 4 |
+| Entries | 80 |
+| EntryAnalysis | 113 |
+| AnalysisCalls | 164 |
+| PromptVersions | 12 |
+| Coste acumulado | $1.356304 |
+| Users | 1 (QA local) |
+| AuthSessions | Variable (ciclo natural) |
+
+---
+
+## 32. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1066,6 +1178,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 8B.2 **NO** se 
 - [x] **Bloque 8B.0:** Preparación del Backend para el Portal Web (CORS, Contrato API y Smoke Test HTTP). *(Cerrado)*
 - [x] **Bloque 8B.1:** Portal Frontend Cliente MVP: Estructura, Diseño y Conexión API. *(Cerrado)*
 - [x] **Bloque 8B.2:** Hardening del Frontend y Conexión Real Frontend ↔ Backend. *(Cerrado)*
+- [x] **Bloque 8C.1:** Autenticación Privada del Portal Cliente (sesiones server-side, cookies HttpOnly, CLI de provisión, protección de rutas). *(Cerrado)*
 - [ ] **Bloque 9:** Automatización / programación (scheduler).
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.

@@ -17,6 +17,10 @@ from app.models.analysis import (
     EntryAnalysisTopic,
     AnalysisCall,
 )
+from app.models.user import (
+    User,
+    AuthSession,
+)
 
 __all__ = [
     "Base",
@@ -34,4 +38,6 @@ __all__ = [
     "EntryAnalysis",
     "EntryAnalysisTopic",
     "AnalysisCall",
+    "User",
+    "AuthSession",
 ]

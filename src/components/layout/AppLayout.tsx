@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
   Compass,
   Menu,
   X,
   Scale,
+  LogOut,
 } from 'lucide-react';
 import { observatoryApi } from '../../services/observatoryApi';
+import { useAuth } from '../../context/AuthContext';
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -15,8 +17,15 @@ interface AppLayoutProps {
 
 export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const { user, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const isMock = observatoryApi.isUsingMock();
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login');
+  };
 
   const navItems = [
     { name: 'Cuadro de Mando', path: '/', icon: LayoutDashboard },
@@ -55,38 +64,63 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
             </div>
 
             {/* Desktop Navigation Links */}
-            <nav className="hidden md:flex items-center gap-1">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const active = isActive(item.path);
-                return (
-                  <Link
-                    key={item.path}
-                    to={item.path}
-                    className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium transition-all ${
-                      active
-                        ? 'bg-navy-800 text-white shadow-inner font-semibold'
-                        : 'text-navy-200 hover:text-white hover:bg-navy-900'
-                    }`}
-                  >
-                    <Icon className={`w-4 h-4 ${active ? 'text-legal-gold' : 'text-navy-400'}`} />
-                    <span>{item.name}</span>
-                  </Link>
-                );
-              })}
-            </nav>
+            <div className="hidden md:flex items-center gap-6">
+              <nav className="flex items-center gap-1">
+                {navItems.map((item) => {
+                  const Icon = item.icon;
+                  const active = isActive(item.path);
+                  return (
+                    <Link
+                      key={item.path}
+                      to={item.path}
+                      className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-sm font-medium transition-all ${
+                        active
+                          ? 'bg-navy-800 text-white shadow-inner font-semibold'
+                          : 'text-navy-200 hover:text-white hover:bg-navy-900'
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 ${active ? 'text-legal-gold' : 'text-navy-400'}`} />
+                      <span>{item.name}</span>
+                    </Link>
+                  );
+                })}
+              </nav>
 
-            {/* Right DEV Badge (Visible ONLY in development mode, never in production) */}
-            {import.meta.env.DEV && (
-              <div className="hidden sm:flex items-center">
-                <span
-                  className="text-[10px] font-mono px-2 py-0.5 rounded bg-navy-900 text-navy-400 border border-navy-800 select-none"
-                  title={isMock ? 'DEV: Modo Mock activo' : 'DEV: Backend conectado'}
-                >
-                  DEV {isMock ? '(mock)' : ''}
-                </span>
+              {/* User profile & Logout */}
+              <div className="flex items-center gap-3 pl-4 border-l border-navy-800">
+                {import.meta.env.DEV && (
+                  <span
+                    className="text-[10px] font-mono px-2 py-0.5 rounded bg-navy-900 text-navy-400 border border-navy-800 select-none"
+                    title={isMock ? 'DEV: Modo Mock activo' : 'DEV: Backend conectado'}
+                  >
+                    DEV {isMock ? '(mock)' : ''}
+                  </span>
+                )}
+
+                {user && (
+                  <div className="flex items-center gap-2.5">
+                    <div className="text-right">
+                      <span className="block text-xs font-medium text-white truncate max-w-[140px]">
+                        {user.display_name}
+                      </span>
+                      <span className="block text-[10px] text-navy-400 truncate max-w-[140px]">
+                        {user.email}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleLogout}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-navy-300 hover:text-white hover:bg-navy-800 transition-colors"
+                      title="Cerrar sesión"
+                      aria-label="Cerrar sesión"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Salir</span>
+                    </button>
+                  </div>
+                )}
               </div>
-            )}
+            </div>
 
             {/* Mobile Menu Button */}
             <div className="flex md:hidden">
@@ -104,7 +138,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
 
         {/* Mobile Navigation Drawer */}
         {mobileMenuOpen && (
-          <div className="md:hidden border-t border-navy-800 bg-navy-950 px-4 pt-2 pb-4 space-y-1">
+          <div className="md:hidden border-t border-navy-800 bg-navy-950 px-4 pt-2 pb-4 space-y-2">
             {navItems.map((item) => {
               const Icon = item.icon;
               const active = isActive(item.path);
@@ -124,9 +158,21 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
                 </Link>
               );
             })}
-            {import.meta.env.DEV && (
-              <div className="pt-2 border-t border-navy-800 mt-2 px-3 text-[10px] font-mono text-navy-400">
-                DEV {isMock ? '(mock)' : ''}
+
+            {user && (
+              <div className="pt-3 mt-2 border-t border-navy-800 flex items-center justify-between px-3">
+                <div>
+                  <span className="block text-xs font-medium text-white">{user.display_name}</span>
+                  <span className="block text-[10px] text-navy-400">{user.email}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-red-400 hover:text-red-300 bg-navy-900"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Cerrar sesión</span>
+                </button>
               </div>
             )}
           </div>

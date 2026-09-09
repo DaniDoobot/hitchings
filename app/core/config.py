@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 import json
-from typing import Any, Union
+from typing import Any, Union, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     # Unit: USD per 1,000,000 tokens.
     GEMINI_INPUT_USD_PER_MILLION_TOKENS: float = 0.75
     GEMINI_OUTPUT_USD_PER_MILLION_TOKENS: float = 3.75
+
+    # Authentication & Sessions (Bloque 8C.1 - Private Portal Authentication)
+    AUTH_COOKIE_NAME: str = "hitchings_session"
+    AUTH_SESSION_TTL_HOURS: int = 24
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_DOMAIN: Optional[str] = None
 
 
 @lru_cache

@@ -108,16 +108,31 @@ def db_session() -> Generator[Session, None, None]:
     connection.close()
 
 
+from app.api.v1.endpoints.auth import get_current_user
+from app.models.user import User
+import uuid
+
+
 @pytest.fixture
 def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """Provide a TestClient with the test database session overridden."""
+    """Provide a TestClient with the test database session and auth dependency overridden."""
     def override_get_db():
         try:
             yield db_session
         finally:
             pass
 
+    default_user = User(
+        id=uuid.uuid4(),
+        email="test_active@example.com",
+        display_name="Active Test User",
+        password_hash="hash",
+        is_active=True,
+    )
+
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: default_user
+
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
