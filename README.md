@@ -1097,17 +1097,45 @@ Migración: `0005_users_and_auth_sessions`.
 
 **Endpoints públicos:** `/health` y `/health/db` permanecen siempre accesibles sin autenticación.
 
-### Provisión de Usuarios (CLI Administrativo)
+### Gestión Administrativa de Usuarios (CLI Local)
 
 ```powershell
-# Crear usuario interactivamente (pide contraseña de forma segura via getpass):
+# Crear nuevo usuario interactivamente (pide contraseña de forma segura via getpass):
 python -m scripts.create_user --email usuario@ejemplo.com --display-name "Nombre Visible"
 
-# Con contraseña inline (útil en automatización interna):
-python -m scripts.create_user --email usuario@ejemplo.com --display-name "Nombre Visible" --password "Contraseña_Segura_2026!"
+# Restablecer contraseña y revocar todas las sesiones activas del usuario (via getpass):
+python -m scripts.reset_user_password --email usuario@ejemplo.com
 ```
 
-El script es completamente **idempotente** — rechaza duplicar cuentas existentes sin modificar silenciosamente datos previos.
+Ambos scripts son completamente **idempotentes**, operan localmente contra PostgreSQL, exigen entrada interactiva oculta mediante `getpass` y nunca exponen contraseñas en terminal, logs ni argumentos CLI.
+
+### Consideraciones de Despliegue en Producción
+
+#### 1. Arquitectura Same-Site Recomendada
+Para producción, el frontend y la API deben desplegarse bajo el **mismo site**, preferiblemente:
+- Frontend: `https://portal.example.com`
+- API proxied: `https://portal.example.com/api/...`
+- O como mínimo, subdominios del mismo registable domain con `AUTH_COOKIE_DOMAIN=.example.com`.
+
+> [!WARNING]
+> Evitar desplegar frontend y API en sitios completamente distintos (cross-site), ya que las cookies con directiva `SameSite=Lax` no se transmiten en peticiones asíncronas (`fetch`) cross-site, lo que rompería la autenticación en el cliente.
+
+#### 2. Pre-Production Security Blocker: Endpoints Técnicos
+> [!CAUTION]
+> **PRE-PRODUCTION SECURITY BLOCKER:**  
+> Los endpoints técnicos del backend preexistentes:
+> - `/api/v1/entry-analyses/*`
+> - `/api/v1/tracking/*`
+> - `/api/v1/sources/*`
+> - Endpoints de ingesta y administración técnica
+> 
+> **NO** deben quedar expuestos públicamente en producción. Antes del despliegue final deben protegerse mediante autenticación interna/VPN o segregarse en un gateway administrativo independiente.
+
+#### 3. Especificación y Limitaciones del Rate Limiter
+- **Implementación:** Ventana deslizante en memoria (*in-memory sliding window*) basada en timestamps `time.time()`.
+- **Scope:** Compuesto por IP del cliente + email normalizado (`{client_ip}:{email}`).
+- **Ventana y límite:** Máximo 5 intentos fallidos consecutivos en una ventana móvil de 60 segundos (`HTTP 429 Too Many Requests`). Al autenticarse con éxito, el contador se resetea.
+- **Limitaciones (Best-Effort):** Al ser estrictamente local al proceso Python, los reinicios del servidor uvicorn limpian la ventana y los workers multiproceso no comparten estado. Para producción distribuida con alta concurrencia queda pendiente hardening con almacenamiento centralizado (ej. Redis / token bucket) o a nivel de reverse proxy.
 
 ### Variables de Entorno Adicionales
 
@@ -1149,7 +1177,7 @@ La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend re
 
 | Métrica | Valor |
 |---|---|
-| Backend tests | 245 pasando |
+| Backend tests | 247 pasando |
 | Frontend tests | 32 pasando (5 suites) |
 | Build | OK |
 | Migración Alembic | `0005_users_and_auth_sessions (head)` |
@@ -1160,7 +1188,7 @@ La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend re
 | PromptVersions | 12 |
 | Coste acumulado | $1.356304 |
 | Users | 1 (QA local) |
-| AuthSessions | Variable (ciclo natural) |
+| AuthSessions | 5 (0 activas, 5 revocadas) |
 
 ---
 

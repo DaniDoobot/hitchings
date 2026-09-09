@@ -312,3 +312,89 @@ def test_health_endpoints_remain_public(real_auth_client: TestClient):
 
     res_health_db = real_auth_client.get("/health/db")
     assert res_health_db.status_code == status.HTTP_200_OK
+
+
+def test_reset_user_password_updates_hash_and_revokes_sessions(db_session: Session):
+    """reset_user_password updates user hash, updated_at, and revokes all active sessions."""
+    from scripts.reset_user_password import reset_user_password
+
+    # Setup user with 2 active sessions and 1 already revoked
+    old_pw = "OldPassword123!"
+    user = User(
+        email="reset_target@example.com",
+        display_name="Reset Target",
+        password_hash=hash_password(old_pw),
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    s1 = AuthSession(
+        user_id=user.id,
+        token_hash="hash_s1_unique_test",
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    s2 = AuthSession(
+        user_id=user.id,
+        token_hash="hash_s2_unique_test",
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    already_revoked = AuthSession(
+        user_id=user.id,
+        token_hash="hash_s3_already_revoked",
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        last_seen_at=datetime.now(timezone.utc),
+        revoked_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    db_session.add_all([s1, s2, already_revoked])
+    db_session.commit()
+
+    old_updated_at = user.updated_at
+    new_pw = "NewSecurePassword456!"
+
+    # Execute reset with password argument (programmatic / test mode)
+    ret = reset_user_password("reset_target@example.com", password=new_pw, db=db_session)
+    assert ret == 0
+
+    # Refresh db state
+    db_session.expire_all()
+    reloaded_user = db_session.query(User).filter(User.id == user.id).first()
+    assert reloaded_user is not None
+    assert verify_password(new_pw, reloaded_user.password_hash) is True
+    assert verify_password(old_pw, reloaded_user.password_hash) is False
+    assert reloaded_user.updated_at >= old_updated_at
+
+    # Verify all sessions are now revoked
+    user_sessions = db_session.query(AuthSession).filter(AuthSession.user_id == user.id).all()
+    assert len(user_sessions) == 3
+    for s in user_sessions:
+        assert s.revoked_at is not None
+        assert s.is_valid() is False
+
+
+def test_reset_user_password_validations(db_session: Session):
+    """reset_user_password handles non-existent user, short password, and invalid email."""
+    from scripts.reset_user_password import reset_user_password
+
+    # Non-existent email
+    assert reset_user_password("nonexistent@example.com", password="ValidPassword123!", db=db_session) == 1
+
+    # Invalid email format
+    assert reset_user_password("invalid_email", password="ValidPassword123!", db=db_session) == 1
+
+    # User exists but password is too short
+    user = User(
+        email="short_pw_test@example.com",
+        display_name="Short PW User",
+        password_hash=hash_password("ValidInitial123!"),
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+
+    assert reset_user_password("short_pw_test@example.com", password="123", db=db_session) == 1
