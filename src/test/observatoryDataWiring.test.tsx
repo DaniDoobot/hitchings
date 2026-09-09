@@ -123,7 +123,7 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent(
       '[2026] EWCA Civ 993 | Dr Liza Lovdahl Gormsen v Meta Platforms, Inc. and Others - Judgment of the Court of Appeal (Pleading Amendments)'
     );
-    expect(screen.getByText('95')).toBeInTheDocument();
+    expect(screen.getByText('95/100')).toBeInTheDocument();
     expect(screen.queryByText(/Rachael Kent/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/1433\/5\/7\/22/i)).not.toBeInTheDocument();
   });

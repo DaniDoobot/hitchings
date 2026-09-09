@@ -146,7 +146,7 @@ export const DashboardPage: React.FC = () => {
             >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-amber-700">
-                  En Revisión
+                  Inciertas
                 </span>
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
               </div>

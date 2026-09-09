@@ -685,29 +685,32 @@ def test_get_dashboard_kpis_and_aggregates(client: TestClient, db_session: Sessi
 
 
 def test_get_sources_counts_and_latest(client: TestClient, db_session: Session) -> None:
-    """Verify /sources returns entry counts and latest published date."""
+    """Verify /sources returns only sources with current analyzed publications (entry_count > 0)."""
+    matrix, topics = create_matrix_and_topics(db_session, active=True)
     s1 = create_source(db_session, name="Source 1")
     s2 = create_source(db_session, name="Source 2")
 
     dt1 = datetime(2026, 8, 1, tzinfo=timezone.utc)
     dt2 = datetime(2026, 8, 20, tzinfo=timezone.utc)
 
-    create_entry(db_session, s1, title="S1 E1", published_at=dt1)
-    create_entry(db_session, s1, title="S1 E2", published_at=dt2)
+    e1 = create_entry(db_session, s1, title="S1 E1", published_at=dt1)
+    e2 = create_entry(db_session, s1, title="S1 E2", published_at=dt2)
+    # Give s1 entries completed analyses
+    create_analysis(db_session, e1, matrix, relevance_status="relevant", relevance_score=90)
+    create_analysis(db_session, e2, matrix, relevance_status="not_relevant", relevance_score=20)
+    # s2 has no entries / no analyses
     db_session.commit()
 
     resp = client.get("/api/v1/observatory/sources")
     assert resp.status_code == status.HTTP_200_OK
     items = resp.json()
-    assert len(items) == 2
+    # Source 2 has 0 publications, so it is excluded from client catalog
+    assert len(items) == 1
 
-    s1_item = next(s for s in items if s["name"] == "Source 1")
+    s1_item = items[0]
+    assert s1_item["name"] == "Source 1"
     assert s1_item["entry_count"] == 2
     assert s1_item["latest_published_at"] is not None
-
-    s2_item = next(s for s in items if s["name"] == "Source 2")
-    assert s2_item["entry_count"] == 0
-    assert s2_item["latest_published_at"] is None
 
 
 def test_get_topics_hierarchy_active_matrix_only(client: TestClient, db_session: Session) -> None:

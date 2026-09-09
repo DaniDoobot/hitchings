@@ -20,7 +20,7 @@ export const RelevanceBadge: React.FC<RelevanceBadgeProps> = ({
   let Icon = CheckCircle2;
 
   if (status === 'uncertain') {
-    label = 'En revisión';
+    label = 'Incierto';
     badgeClasses = 'bg-amber-50 text-amber-800 border-amber-200/80';
     Icon = AlertCircle;
   } else if (status === 'not_relevant') {
@@ -37,14 +37,14 @@ export const RelevanceBadge: React.FC<RelevanceBadgeProps> = ({
 
   return (
     <span
-      className={`inline-flex items-center rounded-full border shadow-sm transition-colors ${badgeClasses} ${sizeClasses}`}
-      title={`Relevancia: ${label}${score !== undefined ? ` (Puntuación: ${score}/100)` : ''}`}
+      className={`inline-flex items-center rounded-full border shadow-sm transition-colors w-fit self-start shrink-0 ${badgeClasses} ${sizeClasses}`}
+      title={`Relevancia: ${label}${score !== undefined ? ` (${score}/100)` : ''}`}
     >
       <Icon className={size === 'sm' ? 'w-3 h-3' : size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
       <span>{label}</span>
       {showScore && score !== undefined && (
         <span className="font-mono text-[11px] font-semibold opacity-85 ml-0.5">
-          {score}
+          {score}/100
         </span>
       )}
     </span>

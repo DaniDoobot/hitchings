@@ -11,6 +11,7 @@ import {
   Scale,
   Sparkles,
   AlertTriangle,
+  User,
 } from 'lucide-react';
 import { observatoryApi } from '../services/observatoryApi';
 import { ObservatoryEntryDetail } from '../types/observatory';
@@ -99,12 +100,18 @@ export const EntryDetailPage: React.FC = () => {
       {/* Main Entry Header Card */}
       <div className="bg-white rounded-xl border border-slate-200 p-6 sm:p-8 shadow-sm">
         {/* Source metadata & relevance badge */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-3 mb-4">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-1 rounded border border-navy-100 flex items-center gap-1.5">
               <Scale className="w-3.5 h-3.5 text-navy-600" />
               {entry.source.name}
             </span>
+            {entry.author && (
+              <span className="text-xs text-slate-600 flex items-center gap-1.5 font-medium bg-slate-50 px-2.5 py-1 rounded border border-slate-200/60" title={`Autor: ${entry.author}`}>
+                <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span>{entry.author}</span>
+              </span>
+            )}
             {entry.content_type && (
               <span className="text-xs uppercase tracking-wider text-slate-500 bg-slate-100 px-2.5 py-1 rounded font-mono font-medium">
                 {entry.content_type}

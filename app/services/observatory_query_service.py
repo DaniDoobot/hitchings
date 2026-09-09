@@ -1,4 +1,4 @@
-﻿"""Observatory Query Service (BLOQUE 8A).
+"""Observatory Query Service (BLOQUE 8A).
 
 Single-responsibility service for all client-facing observatory queries.
 
@@ -231,6 +231,7 @@ def _build_list_item(
         entry_id=entry.id,
         title=entry.title,
         source=ObservatorySourceRef(id=entry.source.id, name=entry.source.name),
+        author=entry.author,
         published_at=entry.published_at,
         url=entry.url,
         content_type=entry.content_type,
@@ -257,6 +258,7 @@ def _build_detail(
         entry_id=entry.id,
         title=entry.title,
         source=ObservatorySourceRef(id=entry.source.id, name=entry.source.name),
+        author=entry.author,
         published_at=entry.published_at,
         url=entry.url,
         content_type=entry.content_type,
@@ -510,32 +512,44 @@ def get_entry_detail(
 
 
 def get_sources(db: Session) -> list[ObservatorySourceDetail]:
-    """Return all sources with entry_count and latest_published_at."""
-    from sqlalchemy import func
+    """Return sources with at least one current analyzed publication.
 
-    sources = db.query(Source).order_by(Source.name).all()
-    agg = (
-        db.query(
-            Entry.source_id,
-            func.count(Entry.id).label("entry_count"),
-            func.max(Entry.published_at).label("latest_published_at"),
-        )
-        .group_by(Entry.source_id)
-        .all()
-    )
-    agg_map = {row.source_id: row for row in agg}
+    Excludes sources with zero client-visible publications (such as unanalysed
+    discovery feeds or unconfigured providers), providing an accurate, noise-free catalog.
+    """
+    raw_entries = _load_entries_for_list_or_dashboard(db)
+
+    source_stats: dict[uuid.UUID, tuple[int, Optional[datetime]]] = {}
+    sources_by_id: dict[uuid.UUID, Source] = {}
+
+    for entry in raw_entries:
+        current = select_current_analysis(entry, entry.analyses)
+        if current is not None and current.status == "completed":
+            src_id = entry.source_id
+            if entry.source:
+                sources_by_id[src_id] = entry.source
+            prev_cnt, prev_max_dt = source_stats.get(src_id, (0, None))
+            new_cnt = prev_cnt + 1
+            pub_dt = to_utc_datetime(entry.published_at)
+            if prev_max_dt is None or (pub_dt and pub_dt > prev_max_dt):
+                new_max_dt = pub_dt
+            else:
+                new_max_dt = prev_max_dt
+            source_stats[src_id] = (new_cnt, new_max_dt)
 
     result: list[ObservatorySourceDetail] = []
-    for src in sources:
-        row = agg_map.get(src.id)
+    # Return sources with entry_count > 0, sorted alphabetically by name
+    sorted_sources = sorted(sources_by_id.values(), key=lambda s: s.name)
+    for src in sorted_sources:
+        cnt, latest_dt = source_stats[src.id]
         result.append(
             ObservatorySourceDetail(
                 id=src.id,
                 name=src.name,
                 type=src.type.value if hasattr(src.type, "value") else str(src.type),
                 url=src.url,
-                entry_count=row.entry_count if row else 0,
-                latest_published_at=row.latest_published_at if row else None,
+                entry_count=cnt,
+                latest_published_at=latest_dt,
             )
         )
     return result

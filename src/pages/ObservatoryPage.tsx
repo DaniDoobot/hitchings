@@ -11,6 +11,7 @@ import {
   ChevronRight,
   Sparkles,
   SlidersHorizontal,
+  User,
 } from 'lucide-react';
 import { observatoryApi } from '../services/observatoryApi';
 import {
@@ -339,7 +340,7 @@ export const ObservatoryPage: React.FC = () => {
               {[
                 { id: '', label: 'Todas las calificaciones' },
                 { id: 'relevant', label: 'Relevante' },
-                { id: 'uncertain', label: 'En revisión' },
+                { id: 'uncertain', label: 'Incierto' },
                 { id: 'not_relevant', label: 'No relevante' },
               ].map((item) => (
                 <label
@@ -493,11 +494,17 @@ export const ObservatoryPage: React.FC = () => {
                   className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm hover:border-navy-300 hover:shadow-md transition-all group"
                 >
                   {/* Card Header: Source & Relevance Badge */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-2 mb-2.5">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-0.5 rounded border border-navy-100">
                         {entry.source.name}
                       </span>
+                      {entry.author && (
+                        <span className="text-xs text-slate-600 flex items-center gap-1 font-medium bg-slate-50 px-2 py-0.5 rounded border border-slate-200/60" title={`Autor: ${entry.author}`}>
+                          <User className="w-3 h-3 text-slate-400 shrink-0" />
+                          <span>{entry.author}</span>
+                        </span>
+                      )}
                       {entry.content_type && (
                         <span className="text-[11px] uppercase tracking-wider text-slate-500 bg-slate-100 px-2 py-0.5 rounded font-mono">
                           {entry.content_type}
@@ -682,7 +689,7 @@ export const ObservatoryPage: React.FC = () => {
                 >
                   <option value="">Todas las calificaciones</option>
                   <option value="relevant">Relevante</option>
-                  <option value="uncertain">En revisión</option>
+                  <option value="uncertain">Incierto</option>
                   <option value="not_relevant">No relevante</option>
                 </select>
               </div>

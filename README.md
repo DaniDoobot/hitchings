@@ -1506,7 +1506,54 @@ python -m scripts.run_incremental_analysis --source-id <UUID> --confirm-real-cal
 
 ---
 
-## 35. Roadmap
+## 35. Ejecución Local para Revisión de Producto (Bloque 10A)
+
+El aplicativo cliente se encuentra plenamente operativo y cableado directamente a los datos reales de PostgreSQL (sin mocks, sin llamadas a Gemini y sin scrapers activos).
+
+### Requisitos Previos
+- PostgreSQL en ejecución (puerto 5432) con la base de datos `hitchings` y migraciones al día (`0006_add_linkedin_source_type`).
+- Python 3.12+ con el entorno virtual `.venv` configurado.
+- Node.js / Bun con dependencias frontend instaladas.
+
+### 1. Variables de Entorno (`.env`)
+Asegúrate de que tu `.env` incluya:
+```bash
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+FRONTEND_URL=http://localhost:5173
+VITE_API_BASE_URL=http://localhost:8000
+VITE_USE_MOCK_DATA=false
+```
+
+### 2. Iniciar el Backend (Terminal 1 - PowerShell)
+```powershell
+# Desde C:\Users\danim\Proyectos\hitchings
+.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+Verifica que responde en: `http://127.0.0.1:8000/health` (`{"status":"ok","service":"hitchings"}`).
+
+### 3. Iniciar el Frontend (Terminal 2 - PowerShell)
+```powershell
+# Desde C:\Users\danim\Proyectos\hitchings
+bun run dev -- --host 127.0.0.1 --port 5173
+```
+La aplicación web estará accesible en: `http://localhost:5173/`.
+
+### 4. Provisión de Usuario de Acceso (si no se dispone de uno)
+```powershell
+# Crear o resetear un usuario para revisión local:
+.venv\Scripts\python.exe -m scripts.manage_users create --email revisor@hitchings.test --full-name "Revisor de Producto" --role viewer
+# (El CLI solicitará la contraseña de forma interactiva y segura sin imprimirla)
+```
+
+### 5. Navegación en el Aplicativo
+1. Accede a `http://localhost:5173/login` e inicia sesión con las credenciales creadas.
+2. **Cuadro de Mando (`/`)**: Visualiza los KPIs consolidados (89 publicaciones analizadas: 40 Relevantes, 10 Inciertas, 39 No relevantes), las 7 fuentes monitorizadas con publicaciones activas, y los temas con mayor actividad jurídica.
+3. **Observatorio (`/observatorio`)**: Explora el fondo documental con filtrado facetado por relevancia (Relevante, Incierto, No relevante), puntuación mínima (≥90, ≥80, etc.), fuente monitorizada (7 fuentes activas), temas jurídicos y fechas. Los artículos muestran el autor original cuando procede (*Christian Bergqvist*, *Pablo Ibañez Colomo*, *Francisco Marcos*, etc.).
+4. **Detalle de Publicación (`/observatorio/:entryId`)**: Consulta el análisis estructurado completo: calificación de relevancia y puntuación sobre 100, resumen ejecutivo, puntos clave jurídicos, citas textuales literales del documento fuente y enlace a la publicación original.
+
+---
+
+## 36. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1531,8 +1578,9 @@ python -m scripts.run_incremental_analysis --source-id <UUID> --confirm-real-cal
 - [x] **Bloque 9C.1:** Hardening de Identidad LinkedIn, Fallback No-Cookie y Migración (corrección identidad CNMC, harvestapi no-cookie actor, procedencia verificada). *(Cerrado)*
 - [x] **Bloque 9C.2:** Corrección Final del Fallback Apify y Replay Real de Migración 0006 (harvestapi/linkedin-profile-posts, normalización de endpoint, replay aislado 0005→0006). *(Cerrado)*
 - [x] **Bloque 9D:** Análisis Incremental Controlado de Nuevas Entries (planeador agnóstico, filtro de suficiencia FULL, budget guard \$0.50, pipeline v6, 9 direct web entries analizadas). *(Cerrado)*
-- [ ] **Bloque 9E:** Pipeline continuo de ingesta / scheduler.
-- [ ] **Futuro:** Módulo de análisis documental.
+- [x] **Bloque 10A:** Cierre de Producto y Finalización del Frontend (portal cliente conectado a datos reales en PostgreSQL, 7 fuentes activas, badges y filtros normalizados, visual audit completa). *(Cerrado)*
+- [ ] **Bloque 10B:** Módulo de análisis documental y generación de informes.
+- [ ] **Bloque 10C:** Automatización y scheduler de ingestas continuas.
 
 
 

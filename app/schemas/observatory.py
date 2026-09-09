@@ -91,6 +91,7 @@ class ObservatoryEntryListItem(BaseModel):
     entry_id: uuid.UUID
     title: Optional[str]
     source: ObservatorySourceRef
+    author: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]
@@ -115,6 +116,7 @@ class ObservatoryEntryDetail(BaseModel):
     entry_id: uuid.UUID
     title: Optional[str]
     source: ObservatorySourceRef
+    author: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]

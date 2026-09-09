@@ -6,19 +6,19 @@ describe('RelevanceBadge Component', () => {
   it('renders "Relevante" label for status relevant', () => {
     render(<RelevanceBadge status="relevant" score={95} />);
     expect(screen.getByText('Relevante')).toBeInTheDocument();
-    expect(screen.getByText('95')).toBeInTheDocument();
+    expect(screen.getByText('95/100')).toBeInTheDocument();
   });
 
-  it('renders "En revisión" label for status uncertain', () => {
+  it('renders "Incierto" label for status uncertain', () => {
     render(<RelevanceBadge status="uncertain" score={50} />);
-    expect(screen.getByText('En revisión')).toBeInTheDocument();
-    expect(screen.getByText('50')).toBeInTheDocument();
+    expect(screen.getByText('Incierto')).toBeInTheDocument();
+    expect(screen.getByText('50/100')).toBeInTheDocument();
   });
 
   it('renders "No relevante" label for status not_relevant', () => {
     render(<RelevanceBadge status="not_relevant" score={20} />);
     expect(screen.getByText('No relevante')).toBeInTheDocument();
-    expect(screen.getByText('20')).toBeInTheDocument();
+    expect(screen.getByText('20/100')).toBeInTheDocument();
   });
 
   it('does NOT recompute semantic status based on score (status is authoritative)', () => {
