@@ -871,21 +871,60 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
     - `Total con análisis de producción vigente`: **79 / 80 (98.75%)**
     - `Sin análisis vigente`: 1 (Gormsen)
 
+> [!NOTE]
+> **Aclaración sobre el coste histórico reconstruido:** La diferencia fija de $0.215816 USD entre el coste registrado en BD y el coste histórico estimado reconstruido procede de llamadas de desarrollo eliminadas durante la validación de prompts v3 en el **Bloque 7E** (no en 7C/7D).
+
 ---
 
-## 25. Funcionalidades Deliberadamente Pendientes
+## 25. V6 Contiguous-Evidence Hotfix y Reparación Final de Gormsen (Bloque 7H.3)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7H.2 **NO** se han implementado:
-1. Reintentos adicionales sobre Gormsen (se ejecutó exactamente una vez).
-2. Prompts v6 ni modificación de prompts v1-v5 (todos congelados e inmutables).
+### 1. Diagnóstico y Principio Técnico
+- **Causa raíz en Gormsen v5:** La resolución judicial de la Court of Appeal (*Dr Liza Lovdahl Gormsen v Meta*, `ada5d125`) contiene en el carácter 83.582 un salto de página físico con encabezado judicial interpuesto (`Judgment Approved by the court for handing down. Meta Platforms Inc & Ors v Gormsen`). En v5, el modelo extrajo una proposición jurídica omitiendo dicha cabecera intermedia, generando una cita discontinua de 235 caracteres que el `GroundingValidator` rechazó con `AnalysisGroundingError`.
+- **Principio:** No relajar el `GroundingValidator`, no admitir comodines ni elipsis, y no alterar `Entry.content`. Toda cita debe ser un span literal continuo presente en el texto fuente suministrado.
+- **Prompts v6 introducidos:**
+  - `observatory_triage:v6`: Materialmente idéntico a v5 salvo versión 6.
+  - `observatory_deep_analysis:v6`: Mantiene capacidad de 8k tokens (`max_output_tokens=8192`, `thinking_level='medium'`) e incorpora la **Regla 7 genérica de span continuo y exclusión de artefactos de salto de página**:
+    - Si una frase útil atraviesa un salto de página o encabezado físico intercalado, el modelo debe extraer una cita más corta íntegramente ANTES del artefacto, íntegramente DESPUÉS, o seleccionar otro span continuo independiente.
+    - Regla 100% genérica sin sobreajuste (no menciona a Gormsen, Meta, Devenish ni textos de cabecera específicos).
+
+### 2. Resultados de la Ejecución Real (Run ID: `541e0b5b-0da1-4458-9ccb-92963410b464`)
+- **Llamadas realizadas:** 2 (1 Triage v6 + 1 Deep Analysis v6).
+- **Resultado Gormsen v6:** **`completed`**
+  - Relevance score: `95 / 100` (`relevant`).
+  - Cita sobre Devenish: El modelo aplicó la Regla 7 y extrajo la cita continua situada íntegramente antes del artefacto: `'It is strongly arguable that Devenish is not authority for the proposition that user damages do not apply in competition law cases.'` (131 caracteres, 100% exacta).
+  - Tasa de verificación de evidencias: **12 / 12 citas verificadas al 100%** (3 triage, 4 summary, 5 key points). Cero citas discontinuas.
+  - Finish reason: `STOP` (sin truncamiento).
+  - Consumo: 21.545 in / 400 out en Triage; 20.583 in / 4.552 out en Deep (0 thought, 4.552 visible).
+  - Coste del run: **$0.050166 USD** (Triage: $0.017659, Deep: $0.032507; muy inferior al límite de $0.12 USD).
+
+### 3. Cierre del Baseline del Observatorio (80 / 80 Entries)
+Con la reparación de Gormsen, el observatorio alcanza **cobertura total**:
+- `select_current_analysis` sobre las 80 entradas:
+  - **`Current v6`:** 1 (Gormsen v Meta)
+  - **`Current v5`:** 2 (Sciallis v Fender CAT 56, Rowntree v PRS EWCA Civ 814)
+  - **`Current v4`:** 77
+  - **`Current v3 / v2`:** 0
+  - **`Sin análisis vigente`:** **0** (100% cubierto).
+- **Recomendación para futuras ingestas:** El pipeline recomendado para analizar nuevas entradas a partir de este punto es **v6**, ya que combina el protocolo extract-first (v4), la capacidad ampliada de 8.192 tokens (v5) y la protección contra artefactos de paginación (v6).
+- **Contabilidad final de costes:**
+  - DB recorded estimated cost: **$1.356304 USD**
+  - Reconstructed historical estimated cost: **$1.572120 USD**
+
+---
+
+## 26. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7H.3 **NO** se han implementado:
+1. Reanálisis de las 77 entradas v4 ni las 2 entradas v5 para homogeneizar (se preserva la inmutabilidad y la eficiencia de costes).
+2. Modificación de prompts v1 a v6 (congelados e inmutables).
 3. Modificación del `GroundingValidator` (mantiene búsqueda verbatim continua sin elipsis).
-4. Análisis de nuevas fuentes o entradas.
+4. Limpieza o preprocesamiento de textos de entrada (`remove_headers`, etc.).
 5. Scheduler en segundo plano (Celery, APScheduler, cron).
 6. Interfaz gráfica o frontend.
 
 ---
 
-## 26. Roadmap
+## 27. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -907,7 +946,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7H.2 **NO** se 
 - [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4.
 - [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 run estimated cost, 391/391 citas 100% verificadas).
 - [x] **Bloque 7H.1:** Post-backfill integrity, failure forensics (100% analizadas las 3 fallidas, NoParsed por MAX_TOKENS), corrección de budget guard y planificador read-only de reintentos.
-- [x] **Bloque 7H.2:** V5 Capacity Hotfix y reparación controlada de fallidas (2/3 reparadas con éxito, 79/80 entries con análisis vigente, $0.100588 run estimated cost, 24/24 citas verificadas). *(Cerrado)*
+- [x] **Bloque 7H.2:** V5 Capacity Hotfix y reparación controlada de fallidas (2/3 reparadas con éxito, 79/80 entries con análisis vigente, $0.100588 run estimated cost, 24/24 citas verificadas).
+- [x] **Bloque 7H.3:** V6 Contiguous-Evidence Hotfix y reparación final de Gormsen (80/80 entries con análisis vigente, 100% grounded baseline, $0.050166 run estimated cost, 12/12 citas verificadas). *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.

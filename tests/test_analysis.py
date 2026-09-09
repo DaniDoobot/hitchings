@@ -722,7 +722,7 @@ def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
     """
     # Run 1
     prompts_run1 = seed_analysis_prompts(db_session)
-    assert len(prompts_run1) == 10
+    assert len(prompts_run1) == 12
     codes1 = {p.code for p in prompts_run1}
     assert codes1 == {"observatory_triage", "observatory_deep_analysis"}
     versions1 = {(p.code, p.version) for p in prompts_run1}
@@ -731,15 +731,17 @@ def test_23_seed_analysis_prompts_idempotency(db_session: Session) -> None:
     assert ("observatory_triage", 3) in versions1
     assert ("observatory_triage", 4) in versions1
     assert ("observatory_triage", 5) in versions1
+    assert ("observatory_triage", 6) in versions1
     assert ("observatory_deep_analysis", 1) in versions1
     assert ("observatory_deep_analysis", 2) in versions1
     assert ("observatory_deep_analysis", 3) in versions1
     assert ("observatory_deep_analysis", 4) in versions1
     assert ("observatory_deep_analysis", 5) in versions1
+    assert ("observatory_deep_analysis", 6) in versions1
 
     # Run 2: content identical -> unchanged (same IDs)
     prompts_run2 = seed_analysis_prompts(db_session)
-    assert len(prompts_run2) == 10
+    assert len(prompts_run2) == 12
     assert {p.id for p in prompts_run1} == {p.id for p in prompts_run2}
 
 
