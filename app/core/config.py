@@ -1,6 +1,9 @@
 """Application settings management via pydantic-settings."""
 
 from functools import lru_cache
+import json
+from typing import Any, Union
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +22,30 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "HITCHINGS"
     ENV: str = "development"
     LOG_LEVEL: str = "INFO"
+
+    # Web & CORS (Bloque 8B.0 - Frontend Portal Preparation)
+    CORS_ALLOWED_ORIGINS: Union[list[str], str] = []
+    FRONTEND_URL: str = ""
+
+    @field_validator("CORS_ALLOWED_ORIGINS", mode="after")
+    @classmethod
+    def assemble_cors_origins(cls, v: Any) -> list[str]:
+        """Parse comma-separated strings or lists into a clean list of origins."""
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return []
+            if v_str.startswith("[") and v_str.endswith("]"):
+                try:
+                    parsed = json.loads(v_str)
+                    if isinstance(parsed, list):
+                        return [str(i).strip() for i in parsed if str(i).strip()]
+                except Exception:
+                    pass
+            return [i.strip() for i in v_str.split(",") if i.strip()]
+        elif isinstance(v, (list, tuple, set)):
+            return [str(i).strip() for i in v if str(i).strip()]
+        return []
 
     # Database
     DATABASE_URL: str = "postgresql+psycopg://hitchings:hitchings@db:5432/hitchings"

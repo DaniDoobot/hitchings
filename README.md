@@ -960,17 +960,36 @@ El cliente final no consume directamente tablas internas de auditoría ni modelo
 
 ---
 
-## 27. Funcionalidades Deliberadamente Pendientes
+## 27. BLOQUE 8B.0 — Preparación del Backend para el Portal Web
 
-Para respetar la delimitación estricta de fases, en este Bloque 8A **NO** se han implementado:
-1. Autenticación, control de acceso de usuarios ni login (se incorporarán en la fase frontend/auth).
-2. Frontend o interfaz web gráfica.
-3. Scheduler automático en segundo plano.
-4. Modificación de datos históricos, prompts o validadores analíticos.
+En este bloque se ha completado la preparación técnica del backend FastAPI para permitir el consumo directo de la API del Observatorio desde navegadores web:
+
+### 1. Configuración de CORS
+- Se añadió [`AppCORSMiddleware`](file:///C:/Users/danim/Proyectos/hitchings/app/main.py) sobre FastAPI, controlado dinámicamente mediante la configuración `CORS_ALLOWED_ORIGINS`.
+- Soporta múltiples orígenes declarados en variables de entorno (separados por comas o arrays JSON).
+- Por defecto, la lista de orígenes permitidos está vacía (`[]`), garantizando que no se abra ningún origen comodín (*wildcard*) no autorizado.
+- Se prohíbe explícitamente el uso de comodines (`"*"`) junto con credenciales (`allow_credentials=True`), cumpliendo con los estándares de seguridad web.
+- Las peticiones preflight HTTP `OPTIONS` devuelven cabeceras completas `Access-Control-Allow-*` con código `200 OK` para orígenes autorizados, y `400 Bad Request` para orígenes no permitidos.
+
+### 2. Documentación del Contrato API para Frontend
+- Se creó la guía de integración compacta [`docs/observatory_api_contract.md`](file:///C:/Users/danim/Proyectos/hitchings/docs/observatory_api_contract.md) orientada exclusivamente al desarrollo del portal cliente:
+  - Mapeo exacto entre pantallas frontend (Dashboard, Observatorio, Ficha de Detalle) y endpoints del backend.
+  - Ejemplos de uso de los filtros combinados (`relevance_status`, `min_relevance_score`, `topic_code` jerárquico, `q`, `date_from/date_to`, `sort_by/sort_order`).
+  - Formato JSON de respuestas y códigos de error estandarizados (`404 Not Found`, `422 Unprocessable Entity`).
 
 ---
 
-## 28. Roadmap
+## 28. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 8B.0 **NO** se han implementado:
+1. Construcción del frontend web (código React, Vue, HTML/CSS).
+2. Autenticación de usuarios, login o gestión de sesiones (fase posterior).
+3. Scheduler automático en segundo plano.
+4. Modificación de datos analíticos, históricos ni prompts.
+
+---
+
+## 29. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -981,6 +1000,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 8A **NO** se ha
 - [x] **Bloque 6:** Jurisprudencia de la UE: Tribunal de Justicia de la Unión Europea (TJUE / CURIA) / Sentencias y Conclusiones.
 - [x] **Bloques 7A a 7H.3:** Motor Analítico de IA y Grounding (Cerrado). 100% de cobertura (80/80 entradas con análisis vigente, validación verbatim de citas, prompts v6 y control estricto de costes).
 - [x] **Bloque 8A:** API de Consumo del Observatorio para el Portal Cliente (`/api/v1/observatory`). *(Cerrado)*
+- [x] **Bloque 8B.0:** Preparación del Backend para el Portal Web (CORS, Contrato API y Smoke Test HTTP). *(Cerrado)*
 - [ ] **Bloque 8B:** Portal frontend cliente del Observatorio.
 - [ ] **Bloque 9:** Automatización / programación (scheduler).
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
