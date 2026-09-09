@@ -11,7 +11,7 @@ import argparse
 import getpass
 import sys
 
-from app.core.security import hash_password
+from app.core.security import hash_password, validate_password_policy
 from app.db.session import SessionLocal
 from app.models.user import User
 
@@ -74,8 +74,9 @@ def main() -> int:
                 return 1
             password = p1
 
-        if len(password) < 6:
-            print("Error: La contraseña debe tener al menos 6 caracteres.", file=sys.stderr)
+        valid, err_msg = validate_password_policy(password)
+        if not valid:
+            print(f"Error: {err_msg}", file=sys.stderr)
             return 1
 
         pw_hash = hash_password(password)

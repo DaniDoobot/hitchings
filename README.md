@@ -1192,7 +1192,51 @@ La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend re
 
 ---
 
-## 32. Roadmap
+---
+
+## 32. BLOQUE 9A — Google News como Fuente de Descubrimiento
+
+### Objetivo y Principio Arquitectónico
+Incorporar **Google News** como canal complementario de descubrimiento (*discovery source*) para identificar noticias, resoluciones y novedades de Derecho de la Competencia publicadas en medios externos generalistas y especializados.
+
+Google News **NO** sustituye a las fuentes oficiales (CNMC, Comisión Europea, CAT, CURIA) ni actúa como el publisher de las noticias. Se modela dentro de la arquitectura existente como:
+- **`Source` canónica:** `type=SourceType.GOOGLE_NEWS` (`"google_news"`), `category="news_aggregator"`, `provider="native"`.
+- **`Entry`:** Conserva `discovery_source="Google News"` en `raw_metadata`, mientras que el medio de procedencia real se registra en `raw_metadata["publisher"]` (ej. *Cinco Días*, *The Objective*, *Financial Times*, *Garrigues*) y `author`.
+
+### Planificador Determinista de Consultas (`GoogleNewsQueryPlanner`)
+Para evitar la combinatoria explosiva (38 entidades $\times$ 18 temas $\times$ idiomas), el planificador implementa una selección acotada y determinista:
+1. **Entidades Institucionales y Organizaciones:** Prioriza organismos de competencia (*CNMC*, *European Commission*, *CAT*, *TJUE*) y firmas de litigación privada (*Hausfeld*, *ESKARIAM*).
+2. **Consultas Temáticas Canónicas:** Utiliza las `discovery_queries` registradas en los `TrackingTopic` de mayor prioridad (`competition_law_general`, `private_enforcement`, `damages_actions`, `digital_competition_dma`).
+3. **Control de Idioma y Región:** Filtra y genera variantes en español (`es/ES`) e inglés (`en/GB`).
+4. **Criterio Determinista y Cap Estricto:** Ordena por `(priority DESC, query_text ASC)` y acota a un máximo de 20 consultas por defecto (con techo absoluto de 50).
+
+### Vía de Acceso, URLs y Limitación de Consent Wall
+- Se utiliza exclusivamente el feed RSS público de búsqueda de Google News (`https://news.google.com/rss/search?q={query}&hl={hl}&gl={gl}&ceid={ceid}`).
+- **Sin automatización de navegador, sin cookies ni sesiones personales.**
+- **Gestión de URLs:** En la UE/UK, seguir enlaces `news.google.com/rss/articles/...` redirige a la pantalla de consentimiento de Google (`consent.google.com`). Para evitar scraping frágil que viole políticas de acceso, se almacena la URL de Google News y se capturan el nombre y dominio base del medio (`source url="..."`) en `raw_metadata`.
+
+### Deduplicación y Frontera con Fuentes Oficiales
+- **Normalización de URL:** Se eliminan parámetros de marketing (`utm_*`, `gclid`, `fbclid`, `oc`, `ref`) y fragmentos `#`.
+- **Deduplicación Cruzada:** Si Google News descubre una noticia cuya URL canónica o hash de contenido ya fue capturada previamente por una fuente oficial (o por Google News), la entrada se descarta como duplicada sin duplicar registros.
+- **Deduplicación Intra-Run:** Previene procesar el mismo artículo si coincide en múltiples queries del mismo lote.
+
+### Contenido y Suficiencia Documental (`SourceSufficiencyService`)
+- En el Bloque 9A **NO** se realiza scraping automático del cuerpo completo de webs externas; las entradas se persisten con `content=None` y el snippet en `excerpt`.
+- Conforme al principio de rigor analítico, `SourceSufficiencyService.assess()` califica estas entradas como `insufficient` (o `partial`), impidiendo que sean enviadas a Gemini sin disponer del texto íntegro.
+
+### CLI de Ingesta (`scripts/ingest_google_news.py`)
+
+```powershell
+# Modo DRY-RUN (por defecto: 0 llamadas de red, 0 escrituras en BD):
+python -m scripts.ingest_google_news
+
+# Ejecución real controlada (requiere flag explícito y GOOGLE_NEWS_ENABLED=true):
+python -m scripts.ingest_google_news --confirm-real-calls --max-queries 5 --max-items-per-query 5 --max-new-entries 15
+```
+
+---
+
+## 33. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1207,9 +1251,12 @@ La verificación fue ejecutada con Puppeteer (Chrome headless) contra backend re
 - [x] **Bloque 8B.1:** Portal Frontend Cliente MVP: Estructura, Diseño y Conexión API. *(Cerrado)*
 - [x] **Bloque 8B.2:** Hardening del Frontend y Conexión Real Frontend ↔ Backend. *(Cerrado)*
 - [x] **Bloque 8C.1:** Autenticación Privada del Portal Cliente (sesiones server-side, cookies HttpOnly, CLI de provisión, protección de rutas). *(Cerrado)*
-- [ ] **Bloque 9:** Automatización / programación (scheduler).
+- [x] **Bloque 8C.1A:** Security Cleanup y Auditoría de Credenciales (rotación QA, reset CLI interactivo, política de longitud). *(Cerrado)*
+- [x] **Bloque 9A:** Google News como Fuente de Descubrimiento (feed RSS público, query planner determinista, límites y dedupe). *(Cerrado)*
+- [ ] **Bloque 9B:** Scheduler automático en segundo plano.
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.
+
 
 
 

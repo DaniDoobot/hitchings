@@ -377,6 +377,33 @@ def test_reset_user_password_updates_hash_and_revokes_sessions(db_session: Sessi
         assert s.is_valid() is False
 
 
+def test_password_policy_validation():
+    """validate_password_policy enforces MIN_PASSWORD_LENGTH (12) without requiring arbitrary symbols."""
+    from app.core.security import MIN_PASSWORD_LENGTH, validate_password_policy
+
+    assert MIN_PASSWORD_LENGTH == 12
+
+    # Empty
+    valid, msg = validate_password_policy("")
+    assert valid is False
+    assert "vacía" in msg.lower()
+
+    # Short (11 chars)
+    valid, msg = validate_password_policy("abcdefghijk")
+    assert valid is False
+    assert "12 caracteres" in msg
+
+    # Exact 12 chars
+    valid, msg = validate_password_policy("abcdefghijkl")
+    assert valid is True
+    assert msg is None
+
+    # Longer
+    valid, msg = validate_password_policy("unafraseseguradecompetencia")
+    assert valid is True
+    assert msg is None
+
+
 def test_reset_user_password_validations(db_session: Session):
     """reset_user_password handles non-existent user, short password, and invalid email."""
     from scripts.reset_user_password import reset_user_password
@@ -387,14 +414,15 @@ def test_reset_user_password_validations(db_session: Session):
     # Invalid email format
     assert reset_user_password("invalid_email", password="ValidPassword123!", db=db_session) == 1
 
-    # User exists but password is too short
+    # User exists but password is too short (< 12 chars)
     user = User(
         email="short_pw_test@example.com",
         display_name="Short PW User",
-        password_hash=hash_password("ValidInitial123!"),
+        password_hash=hash_password("ValidInitialPassword123!"),
         is_active=True,
     )
     db_session.add(user)
     db_session.commit()
 
+    assert reset_user_password("short_pw_test@example.com", password="shortpass11", db=db_session) == 1
     assert reset_user_password("short_pw_test@example.com", password="123", db=db_session) == 1

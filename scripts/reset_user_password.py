@@ -14,7 +14,7 @@ import sys
 
 from sqlalchemy.orm import Session
 
-from app.core.security import hash_password
+from app.core.security import hash_password, validate_password_policy
 from app.db.session import SessionLocal
 from app.models.user import AuthSession, User
 
@@ -64,11 +64,9 @@ def reset_user_password(
 
         if password is None:
             p1 = _read_password_securely("Nueva contraseña: ")
-            if not p1:
-                print("Error: La contraseña no puede estar vacía.", file=sys.stderr)
-                return 1
-            if len(p1) < 6:
-                print("Error: La contraseña debe tener al menos 6 caracteres.", file=sys.stderr)
+            valid, err_msg = validate_password_policy(p1)
+            if not valid:
+                print(f"Error: {err_msg}", file=sys.stderr)
                 return 1
             p2 = _read_password_securely("Confirmar nueva contraseña: ")
             if p1 != p2:
@@ -76,8 +74,9 @@ def reset_user_password(
                 return 1
             password = p1
         else:
-            if len(password) < 6:
-                print("Error: La contraseña debe tener al menos 6 caracteres.", file=sys.stderr)
+            valid, err_msg = validate_password_policy(password)
+            if not valid:
+                print(f"Error: {err_msg}", file=sys.stderr)
                 return 1
 
         now = datetime.now(timezone.utc)

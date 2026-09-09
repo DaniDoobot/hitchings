@@ -23,6 +23,22 @@ _hasher = PasswordHasher(
 # (prevents timing side-channel attacks for username enumeration)
 _DUMMY_HASH: str = _hasher.hash("dummy_constant_time_timing_resistance_password")
 
+# Administrative password policy: reasonable minimal length (Bloque 9A hardening)
+MIN_PASSWORD_LENGTH: int = 12
+
+
+def validate_password_policy(password: str) -> tuple[bool, str | None]:
+    """Validate password against baseline policy: minimal length check.
+    
+    Does not arbitrarily enforce uppercase/symbol/number rules.
+    Returns (True, None) if valid, or (False, error_message) if invalid.
+    """
+    if not password:
+        return False, "La contraseña no puede estar vacía."
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return False, f"La contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres."
+    return True, None
+
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password using Argon2id."""

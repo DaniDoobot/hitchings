@@ -99,6 +99,35 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SECURE: bool = False
     AUTH_COOKIE_DOMAIN: Optional[str] = None
 
+    # Google News Discovery (Bloque 9A - Discovery Source)
+    GOOGLE_NEWS_ENABLED: bool = False
+    GOOGLE_NEWS_LANGUAGES: Union[list[str], str] = ["es", "en"]
+    GOOGLE_NEWS_REGION: str = "ES"
+    GOOGLE_NEWS_MAX_QUERIES_PER_RUN: int = 20
+    GOOGLE_NEWS_MAX_ITEMS_PER_QUERY: int = 10
+    GOOGLE_NEWS_MAX_NEW_ENTRIES_PER_RUN: int = 50
+    GOOGLE_NEWS_TIMEOUT_SECONDS: float = 15.0
+
+    @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
+    @classmethod
+    def assemble_languages(cls, v: Any) -> list[str]:
+        """Parse comma-separated strings or lists into clean lowercase language codes."""
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return ["es", "en"]
+            if v_str.startswith("[") and v_str.endswith("]"):
+                try:
+                    parsed = json.loads(v_str)
+                    if isinstance(parsed, list):
+                        return [str(i).strip().lower() for i in parsed if str(i).strip()]
+                except Exception:
+                    pass
+            return [i.strip().lower() for i in v_str.split(",") if i.strip()]
+        elif isinstance(v, (list, tuple, set)):
+            return [str(i).strip().lower() for i in v if str(i).strip()]
+        return ["es", "en"]
+
 
 @lru_cache
 def get_settings() -> Settings:
