@@ -42,9 +42,9 @@ class GoogleNewsItem:
 
     @property
     def publisher_domain(self) -> str:
-        """Return clean, normalized publisher domain."""
+        """Return clean, normalized publisher domain or empty string if publisher_url is missing/invalid."""
         from app.core.url_utils import extract_publisher_domain
-        return extract_publisher_domain(self.publisher_url or self.publisher)
+        return extract_publisher_domain(self.publisher_url)
 
 
 def clean_html_text(raw_html: str | None) -> str:

@@ -87,12 +87,15 @@ def extract_publisher_domain(url_or_host: str | None) -> str:
     Strips schemes, ports, credentials, paths, query strings, and leading 'www.'.
     Forces lowercase.
 
+    Returns empty string if input does not contain a valid dot-separated hostname
+    (e.g. a bare publisher name like 'Macfarlanes' is NOT a domain).
+
     Examples:
         'https://www.cnmc.es/prensa/noticias' -> 'cnmc.es'
         'http://WWW.FT.COM:8080/world' -> 'ft.com'
         'https://legalblogs.wolterskluwer.com' -> 'legalblogs.wolterskluwer.com'
         'ga-p.com' -> 'ga-p.com'
-        'Macfarlanes' -> 'macfarlanes'
+        'Macfarlanes' -> '' (bare name is not a domain)
     """
     if not url_or_host:
         return ""
@@ -126,7 +129,46 @@ def extract_publisher_domain(url_or_host: str | None) -> str:
     if host.startswith("www."):
         host = host[4:]
 
-    return host.strip()
+    host = host.strip()
+
+    # A valid domain must contain at least one dot (e.g. example.com, cnmc.es).
+    # A bare publisher name (e.g. 'Macfarlanes') is not a domain.
+    if "." not in host:
+        return ""
+
+    return host
+
+
+def domains_belong_to_same_site(domain_a: str | None, domain_b: str | None) -> bool:
+    """Check if two domain names belong to the same website or parent/subdomain hierarchy.
+
+    Conservative comparison:
+        normalized_a == normalized_b
+        OR normalized_a.endswith("." + normalized_b)
+        OR normalized_b.endswith("." + normalized_a)
+
+    Both domains must be non-empty and contain at least one dot.
+    Does NOT use substring matching (prevents 'example.com' matching 'example.com.evil.test'
+    or 'fake-ec.europa.eu' matching 'ec.europa.eu').
+
+    Examples:
+        ('competition-policy.ec.europa.eu', 'ec.europa.eu') -> True
+        ('infocuria.curia.europa.eu', 'curia.europa.eu') -> True
+        ('news.example.com', 'example.com') -> True
+        ('ec.europa.eu', 'fake-ec.europa.eu') -> False
+        ('example.com', 'example.com.evil.test') -> False
+        ('curia.europa.eu', 'curia.europa.eu.example.org') -> False
+    """
+    if not domain_a or not domain_b:
+        return False
+
+    a = extract_publisher_domain(domain_a)
+    b = extract_publisher_domain(domain_b)
+
+    if not a or not b or "." not in a or "." not in b:
+        return False
+
+    return a == b or a.endswith("." + b) or b.endswith("." + a)
 
 
 def normalize_title(title: str | None) -> str:
@@ -155,20 +197,38 @@ def normalize_title(title: str | None) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def compute_discovery_fingerprint(publisher_domain: str | None, title: str | None) -> str:
-    """Compute conservative discovery fingerprint based on normalized publisher domain and title.
+def compute_discovery_fingerprint(
+    publisher_domain: str | None,
+    title: str | None,
+    publisher_name: str | None = None,
+) -> str:
+    """Compute conservative discovery fingerprint based on normalized publisher domain/name and title.
 
     Produces a deterministic SHA256 hex digest:
-        SHA256(normalized_publisher_domain + ":" + normalized_title)
+        SHA256(identity_prefix + ":" + normalized_title)
+
+    Where identity_prefix is:
+    - normalized publisher_domain (if present and valid FQDN)
+    - "pub:" + normalize_title(publisher_name) (fallback if publisher_domain is missing/empty)
+    - "" (if neither is present)
 
     Ensures:
     - Same publisher + same title (or superficial punctuation/whitespace variation) -> identical fingerprint.
     - Different publishers + same title -> different fingerprints (no cross-publisher collision).
     - Same publisher + materially different titles -> different fingerprints.
+    - Bare publisher name ('Macfarlanes') is treated as publisher name fallback, NOT a fake hostname.
     """
     import hashlib
 
     norm_domain = extract_publisher_domain(publisher_domain)
     norm_title = normalize_title(title)
-    combined = f"{norm_domain}:{norm_title}"
+
+    if norm_domain:
+        identity_prefix = norm_domain
+    elif publisher_name:
+        identity_prefix = f"pub:{normalize_title(publisher_name)}"
+    else:
+        identity_prefix = ""
+
+    combined = f"{identity_prefix}:{norm_title}"
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()

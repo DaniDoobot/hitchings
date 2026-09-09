@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.url_utils import (
     compute_discovery_fingerprint,
+    domains_belong_to_same_site,
     extract_publisher_domain,
     normalize_title,
     normalize_url,
@@ -106,7 +107,8 @@ def test_publisher_domain_normalization():
     assert extract_publisher_domain("http://WWW.FT.COM:8080/world") == "ft.com"
     assert extract_publisher_domain("https://legalblogs.wolterskluwer.com/antitrust") == "legalblogs.wolterskluwer.com"
     assert extract_publisher_domain("ga-p.com") == "ga-p.com"
-    assert extract_publisher_domain("Macfarlanes") == "macfarlanes"
+    assert extract_publisher_domain("Macfarlanes") == ""  # Bare name is not a domain
+    assert extract_publisher_domain("LawFirm XYZ") == ""
     assert extract_publisher_domain("") == ""
     assert extract_publisher_domain(None) == ""
 
@@ -540,3 +542,319 @@ def test_ingestion_run_tracks_query_metrics_and_stopped_by_cap(db_session: Sessi
     assert run.run_metadata["max_new_entries_cap"] == 1
     assert run.run_metadata["queries_planned"] == report.queries_planned
     assert run.run_metadata["queries_executed"] == report.queries_executed
+
+
+# ---------------------------------------------------------------------------
+# 8. Bloque 9A.2 — Domain Matching & Subdomain/Parent Hierarchy Tests
+# ---------------------------------------------------------------------------
+def test_domains_belong_to_same_site_rules():
+    """Verify domains_belong_to_same_site correctly matches safe hierarchies and rejects spoofing."""
+    # Valid hierarchy matches
+    assert domains_belong_to_same_site("competition-policy.ec.europa.eu", "ec.europa.eu") is True
+    assert domains_belong_to_same_site("ec.europa.eu", "competition-policy.ec.europa.eu") is True
+    assert domains_belong_to_same_site("infocuria.curia.europa.eu", "curia.europa.eu") is True
+    assert domains_belong_to_same_site("curia.europa.eu", "infocuria.curia.europa.eu") is True
+    assert domains_belong_to_same_site("news.example.com", "example.com") is True
+    assert domains_belong_to_same_site("example.com", "news.example.com") is True
+    assert domains_belong_to_same_site("www.cnmc.es", "cnmc.es") is True
+    assert domains_belong_to_same_site("www.catribunal.org.uk", "catribunal.org.uk") is True
+
+    # Malicious / false matches (must NOT match)
+    assert domains_belong_to_same_site("example.com", "example.com.evil.test") is False
+    assert domains_belong_to_same_site("ec.europa.eu", "fake-ec.europa.eu") is False
+    assert domains_belong_to_same_site("fake-ec.europa.eu", "ec.europa.eu") is False
+    assert domains_belong_to_same_site("curia.europa.eu", "curia.europa.eu.example.org") is False
+    assert domains_belong_to_same_site("cnmc.es", "evil-cnmc.es") is False
+    assert domains_belong_to_same_site("Macfarlanes", "macfarlanes.com") is False
+    assert domains_belong_to_same_site("", "cnmc.es") is False
+    assert domains_belong_to_same_site(None, "cnmc.es") is False
+
+
+def test_cross_source_dedupe_ec_parent_subdomain(db_session: Session, monkeypatch):
+    """Verify Google News item with publisher ec.europa.eu matches Source competition-policy.ec.europa.eu."""
+    _setup_active_matrix(db_session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "GOOGLE_NEWS_ENABLED", True)
+
+    title = "Commission adopts EU guidelines on exclusionary abuses of dominance"
+    official_url = "https://competition-policy.ec.europa.eu/about/news/commission-adopts-eu-guidelines-exclusionary-abuses-dominance-2026-09-03_en"
+    gn_url = "https://news.google.com/rss/articles/CBMi_ec_dup"
+
+    ec_source = Source(
+        name="European Commission - Competition Policy",
+        type=SourceType.RSS,
+        provider="european_commission",
+        category="official_bulletin",
+        url="https://competition-policy.ec.europa.eu/node/38/rss_en",
+        active=True,
+    )
+    db_session.add(ec_source)
+    db_session.flush()
+
+    official_entry = Entry(
+        source_id=ec_source.id,
+        external_id="ec_official_1",
+        url=official_url,
+        canonical_url=official_url,
+        title=title,
+        content="Commission adopts new guidelines...",
+        excerpt="Exclusionary abuses guidelines excerpt",
+        content_hash=compute_ingestion_dedupe_hash(title, official_url, "excerpt"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    db_session.add(official_entry)
+    db_session.commit()
+
+    # Google News item has publisher_url pointing to ec.europa.eu
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <title>Google News</title>
+        <item>
+          <title>{title}</title>
+          <link>{gn_url}</link>
+          <guid>CBMi_guid_ec_test</guid>
+          <pubDate>Wed, 09 Sep 2026 14:00:00 GMT</pubDate>
+          <source url="https://ec.europa.eu">European Commission</source>
+        </item>
+      </channel>
+    </rss>"""
+
+    service = GoogleNewsIngestionService()
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=rss_xml))
+    )
+
+    report = service.execute_ingestion(
+        db=db_session,
+        max_queries=1,
+        max_items_per_query=5,
+        max_new_entries=5,
+        confirm_real_calls=True,
+        client=mock_client,
+    )
+
+    # Must be detected as duplicate!
+    assert report.entries_created == 0
+    assert report.duplicates_count == 1
+
+
+def test_cross_source_dedupe_curia_parent_subdomain(db_session: Session, monkeypatch):
+    """Verify Google News item with publisher curia.europa.eu matches Source infocuria.curia.europa.eu."""
+    _setup_active_matrix(db_session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "GOOGLE_NEWS_ENABLED", True)
+
+    title = "Judgment of the Court of Justice in Case C-123/24 Competition Appeal"
+    official_url = "https://infocuria.curia.europa.eu/tabs/jurisprudence?lang=en&ecli=ECLI:EU:C:2026:999"
+    gn_url = "https://news.google.com/rss/articles/CBMi_curia_dup"
+
+    curia_source = Source(
+        name="Court of Justice of the European Union - Case Law",
+        type=SourceType.WEBSITE,
+        provider="curia",
+        category="case_law",
+        url="https://infocuria.curia.europa.eu/tabs/jurisprudence",
+        active=True,
+    )
+    db_session.add(curia_source)
+    db_session.flush()
+
+    official_entry = Entry(
+        source_id=curia_source.id,
+        external_id="curia_official_1",
+        url=official_url,
+        canonical_url=official_url,
+        title=title,
+        content="Judgment text...",
+        excerpt="Judgment excerpt",
+        content_hash=compute_ingestion_dedupe_hash(title, official_url, "excerpt"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    db_session.add(official_entry)
+    db_session.commit()
+
+    # Google News item has publisher_url pointing to curia.europa.eu
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <title>Google News</title>
+        <item>
+          <title>{title}</title>
+          <link>{gn_url}</link>
+          <guid>CBMi_guid_curia_test</guid>
+          <pubDate>Wed, 09 Sep 2026 15:00:00 GMT</pubDate>
+          <source url="https://curia.europa.eu">Court of Justice</source>
+        </item>
+      </channel>
+    </rss>"""
+
+    service = GoogleNewsIngestionService()
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=rss_xml))
+    )
+
+    report = service.execute_ingestion(
+        db=db_session,
+        max_queries=1,
+        max_items_per_query=5,
+        max_new_entries=5,
+        confirm_real_calls=True,
+        client=mock_client,
+    )
+
+    # Must be detected as duplicate!
+    assert report.entries_created == 0
+    assert report.duplicates_count == 1
+
+
+def test_cross_source_dedupe_subdomain_inverso(db_session: Session, monkeypatch):
+    """Verify Google News item with subdomain publisher matches apex Source (news.example.com -> example.com)."""
+    _setup_active_matrix(db_session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "GOOGLE_NEWS_ENABLED", True)
+
+    title = "Official Antitrust Regulatory Guidance Published"
+    official_url = "https://example.com/antitrust-guidance-2026"
+    gn_url = "https://news.google.com/rss/articles/CBMi_apex_sub_dup"
+
+    example_source = Source(
+        name="Example Regulator",
+        type=SourceType.WEBSITE,
+        provider="custom",
+        category="official_bulletin",
+        url="https://example.com",
+        active=True,
+    )
+    db_session.add(example_source)
+    db_session.flush()
+
+    official_entry = Entry(
+        source_id=example_source.id,
+        external_id="example_1",
+        url=official_url,
+        canonical_url=official_url,
+        title=title,
+        content="Guidance text...",
+        excerpt="Excerpt text",
+        content_hash=compute_ingestion_dedupe_hash(title, official_url, "excerpt"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    db_session.add(official_entry)
+    db_session.commit()
+
+    # Google News item publisher is news.example.com (subdomain of example.com)
+    rss_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <title>Google News</title>
+        <item>
+          <title>{title}</title>
+          <link>{gn_url}</link>
+          <guid>CBMi_guid_subdomain_inverso</guid>
+          <pubDate>Wed, 09 Sep 2026 15:30:00 GMT</pubDate>
+          <source url="https://news.example.com">Example News</source>
+        </item>
+      </channel>
+    </rss>"""
+
+    service = GoogleNewsIngestionService()
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=rss_xml))
+    )
+
+    report = service.execute_ingestion(
+        db=db_session,
+        max_queries=1,
+        max_items_per_query=5,
+        max_new_entries=5,
+        confirm_real_calls=True,
+        client=mock_client,
+    )
+
+    # Must be detected as duplicate!
+    assert report.entries_created == 0
+    assert report.duplicates_count == 1
+
+
+def test_cross_source_dedupe_protects_against_spoofed_or_malicious_domains(db_session: Session, monkeypatch):
+    """Verify that fake or spoofed domains (e.g. fake-ec.europa.eu or example.com.evil.test) do NOT falsely collide."""
+    _setup_active_matrix(db_session)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "GOOGLE_NEWS_ENABLED", True)
+
+    title = "Crucial Ruling on Cartel Damages"
+    official_url = "https://ec.europa.eu/commission/presscorner/detail/en/ip_26_1000"
+
+    ec_source = Source(
+        name="European Commission Press",
+        type=SourceType.WEBSITE,
+        provider="custom",
+        category="official_bulletin",
+        url="https://ec.europa.eu",
+        active=True,
+    )
+    db_session.add(ec_source)
+    db_session.flush()
+
+    official_entry = Entry(
+        source_id=ec_source.id,
+        external_id="ec_official_genuine",
+        url=official_url,
+        canonical_url=official_url,
+        title=title,
+        content="Press release text...",
+        excerpt="Excerpt text",
+        content_hash=compute_ingestion_dedupe_hash(title, official_url, "excerpt"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    db_session.add(official_entry)
+    db_session.commit()
+
+    # 1. Fake EC domain: fake-ec.europa.eu (must NOT match ec.europa.eu)
+    rss_xml_fake = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0">
+      <channel>
+        <title>Google News</title>
+        <item>
+          <title>{title}</title>
+          <link>https://news.google.com/rss/articles/fake_ec_article</link>
+          <guid>guid_fake_ec_1</guid>
+          <source url="https://fake-ec.europa.eu">Fake EC</source>
+        </item>
+      </channel>
+    </rss>"""
+
+    service = GoogleNewsIngestionService()
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, text=rss_xml_fake))
+    )
+
+    report = service.execute_ingestion(
+        db=db_session,
+        max_queries=1,
+        max_items_per_query=5,
+        max_new_entries=5,
+        confirm_real_calls=True,
+        client=mock_client,
+    )
+
+    # Must NOT collide with official source! Created = 1
+    assert report.entries_created == 1
+    assert report.duplicates_count == 0
+
+
+def test_discovery_fingerprint_fallback_on_bare_publisher_name():
+    """Verify that bare publisher names without a domain trigger pub: fallback without fake hostname."""
+    # When publisher_url is missing / bare string, publisher_domain is empty
+    fp_bare1 = compute_discovery_fingerprint("", "Antitrust Litigation Overview", publisher_name="Macfarlanes")
+    fp_bare2 = compute_discovery_fingerprint(None, "Antitrust Litigation Overview", publisher_name="Macfarlanes")
+    assert fp_bare1 == fp_bare2
+
+    # Different bare publisher name with same title produces different fingerprint
+    fp_other = compute_discovery_fingerprint(None, "Antitrust Litigation Overview", publisher_name="Clifford Chance")
+    assert fp_bare1 != fp_other
+
+    # Domain takes precedence over publisher_name
+    fp_domain = compute_discovery_fingerprint("macfarlanes.com", "Antitrust Litigation Overview", publisher_name="Macfarlanes")
+    assert fp_domain != fp_bare1

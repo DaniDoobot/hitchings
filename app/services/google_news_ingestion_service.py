@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.url_utils import (
     compute_discovery_fingerprint,
+    domains_belong_to_same_site,
     extract_publisher_domain,
     normalize_title,
     normalize_url,
@@ -207,12 +208,7 @@ class GoogleNewsIngestionService:
                 continue
             e_titles = db.query(Entry.title).filter(Entry.source_id == os_source.id).all()
             titles_set = {normalize_title(t[0]) for t in e_titles if t[0]}
-            official_source_titles[src_domain] = titles_set
-            # Associate parent domains for known multi-level official endpoints
-            if src_domain.endswith(".ec.europa.eu"):
-                official_source_titles.setdefault("ec.europa.eu", set()).update(titles_set)
-            elif src_domain.endswith(".curia.europa.eu"):
-                official_source_titles.setdefault("curia.europa.eu", set()).update(titles_set)
+            official_source_titles.setdefault(src_domain, set()).update(titles_set)
 
         # Pre-load existing discovery entries from DB to populate historical deduplication sets
         existing_gn_entries = (
@@ -285,9 +281,9 @@ class GoogleNewsIngestionService:
 
                     # 1. Normalization & Fingerprint computation
                     canon_url = item.canonical_url or normalize_url(item.google_news_url)
-                    item_domain = item.publisher_domain
+                    item_domain = item.publisher_domain or None
                     norm_title = normalize_title(item.title)
-                    item_fp = compute_discovery_fingerprint(item_domain, item.title)
+                    item_fp = compute_discovery_fingerprint(item_domain, item.title, publisher_name=item.publisher)
 
                     # 2. Intra-run & GUID deduplication
                     if canon_url in seen_in_run_urls or (item.guid and item.guid in seen_in_run_guids):
@@ -301,12 +297,13 @@ class GoogleNewsIngestionService:
                         continue
 
                     # 4. Generic Cross-Source Official Source Deduplication
-                    # If publisher_domain matches an official Source (e.g. cnmc.es, catribunal.org.uk, curia.europa.eu, ec.europa.eu)
+                    # If publisher_domain matches an official Source domain (including parent/subdomain hierarchy
+                    # via domains_belong_to_same_site, e.g. ec.europa.eu vs competition-policy.ec.europa.eu)
                     # and an Entry with identical normalized title already exists for that official source, mark as duplicate.
                     is_official_dup = False
                     if item_domain:
                         for off_dom, off_titles in official_source_titles.items():
-                            if item_domain == off_dom or item_domain.endswith("." + off_dom) or off_dom.endswith("." + item_domain):
+                            if domains_belong_to_same_site(item_domain, off_dom):
                                 if norm_title in off_titles:
                                     is_official_dup = True
                                     break
