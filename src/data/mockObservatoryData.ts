@@ -730,9 +730,9 @@ export function filterMockEntries(params: EntriesQueryParams): ObservatoryListRe
   if (params.q) {
     const qLower = params.q.toLowerCase().trim();
     list = list.filter(item => {
-      const inTitle = item.title.toLowerCase().includes(qLower);
-      const inSummary = item.summary.toLowerCase().includes(qLower);
-      const inKeyPoints = item.key_points.some(kp => kp.toLowerCase().includes(qLower));
+      const inTitle = (item.title || '').toLowerCase().includes(qLower);
+      const inSummary = (item.summary || '').toLowerCase().includes(qLower);
+      const inKeyPoints = (item.key_points || []).some(kp => kp.toLowerCase().includes(qLower));
       return inTitle || inSummary || inKeyPoints;
     });
   }
@@ -766,13 +766,13 @@ export function filterMockEntries(params: EntriesQueryParams): ObservatoryListRe
   // 6. Dates
   if (params.date_from) {
     const fromDate = new Date(params.date_from);
-    list = list.filter(item => new Date(item.published_at) >= fromDate);
+    list = list.filter(item => item.published_at ? new Date(item.published_at) >= fromDate : false);
   }
   if (params.date_to) {
     const toDate = new Date(params.date_to);
     // End of day
     toDate.setHours(23, 59, 59, 999);
-    list = list.filter(item => new Date(item.published_at) <= toDate);
+    list = list.filter(item => item.published_at ? new Date(item.published_at) <= toDate : false);
   }
 
   // 7. Sort
@@ -783,7 +783,9 @@ export function filterMockEntries(params: EntriesQueryParams): ObservatoryListRe
     if (sortBy === 'relevance_score') {
       comp = a.relevance.score - b.relevance.score;
     } else {
-      comp = new Date(a.published_at).getTime() - new Date(b.published_at).getTime();
+      const timeA = a.published_at ? new Date(a.published_at).getTime() : 0;
+      const timeB = b.published_at ? new Date(b.published_at).getTime() : 0;
+      comp = timeA - timeB;
     }
     return sortOrder === 'asc' ? comp : -comp;
   });

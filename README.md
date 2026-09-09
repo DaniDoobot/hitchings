@@ -991,30 +991,60 @@ En este bloque se ha construido el portal frontend cliente para el Observatorio 
   - `/observatorio/:entryId` — **Ficha Jurídica:** Resumen ejecutivo de alto contraste, puntos clave estructurados y bloque de **Evidencias Textuales Verificadas** (citas literales de la resolución oficial).
 - **Diseño Visual:** Estética sobria, institucional y legible, con paleta navy/slate y acentos dorados legales (`legal-gold`).
 
-### 2. Capa de Datos Dual (API Real / Mock Autónomo)
-- **Servicio Unificado:** [`src/services/observatoryApi.ts`](file:///C:/Users/danim/Proyectos/hitchings/src/services/observatoryApi.ts) desacopla totalmente los componentes de la procedencia de los datos.
-- **Detección Automática:**
-  - Si `VITE_API_BASE_URL` no está definida o si `VITE_USE_MOCK_DATA=true`, la aplicación opera en **modo autónomo** consumiendo [`src/data/mockObservatoryData.ts`](file:///C:/Users/danim/Proyectos/hitchings/src/data/mockObservatoryData.ts).
-  - Si `VITE_API_BASE_URL` está configurada (ej. `http://localhost:8000`), consume en tiempo real los endpoints de `/api/v1/observatory/*`.
-- **Filtros en Mock:** El dataset mock reproduce exactamente la semántica del backend (búsqueda en título/resumen/puntos clave, expansión jerárquica de temas padre a subtemas, filtros de fuente y fecha, ordenación y paginación).
+### 2. Capa de Datos: Reglas Fail-Closed y Protección en Producción
+- **Servicio Unificado:** [`src/services/observatoryApi.ts`](file:///C:/Users/danim/Proyectos/hitchings/src/services/observatoryApi.ts) desacopla los componentes de la procedencia de los datos.
+- **Fail-Closed Estricto:**
+  - Los datos mock se activan **única y exclusivamente** si `VITE_USE_MOCK_DATA=true` de forma explícita.
+  - Si `VITE_USE_MOCK_DATA=false` (o no está definido) y `VITE_API_BASE_URL` no está configurada, el cliente **NO** hace fallback silencioso a mock: lanza inmediatamente un error explícito de configuración (`VITE_API_BASE_URL is required when mock data is disabled`), provocando la presentación del `ErrorState` en la interfaz.
+- **Protección Antidespliegue de Mock:**
+  - Si la aplicación se compila en modo producción (`import.meta.env.PROD === true`) y se intenta forzar mock (`VITE_USE_MOCK_DATA=true`), el servicio lanza un error de seguridad impidiendo la publicación accidental de datos ficticios.
+  > [!CAUTION]
+  > **Nunca desplegar en producción con mock activado.** Los entornos productivos deben conectarse obligatoriamente a la API real del backend.
 
-### 3. Puesta en Marcha del Frontend
+### 3. Desarrollo Local Real (Frontend ↔ Backend)
+Para ejecutar la plataforma completa en local con datos reales:
+
+**1. Backend (FastAPI):**
 ```bash
-# Instalación de dependencias (Bun o npm)
-bun install
+# Configurar CORS para el origen de Vite y arrancar uvicorn
+$env:CORS_ALLOWED_ORIGINS="http://localhost:5173"
+.venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-# Modo desarrollo (puerto 5173 por defecto)
-bun dev
+**2. Frontend (React / Vite):**
+```bash
+# Configurar variables de entorno y arrancar Vite
+$env:VITE_API_BASE_URL="http://127.0.0.1:8000"
+$env:VITE_USE_MOCK_DATA="false"
+bun run dev
+```
 
-# Compilación de producción (TypeScript check + Vite build)
-bun run build
+**3. Suite de Tests Frontend (Vitest + React Testing Library):**
+```bash
+bun run test
 ```
 
 ---
 
-## 29. Funcionalidades Deliberadamente Pendientes
+## 29. BLOQUE 8B.2 — Hardening del Frontend y Conexión Real Frontend ↔ Backend
 
-Para respetar la delimitación estricta de fases, en este Bloque 8B.1 **NO** se han implementado:
+En este bloque se ha ejecutado el hardening de la integración end-to-end entre el frontend y el backend:
+1. **Mock Fail-Closed:** Eliminado cualquier fallback silencioso a datos mock.
+2. **Protección de Producción:** Bloqueo terminante de datos mock en builds de producción.
+3. **Eliminación de Badges Técnicos:** Retirados indicadores técnicos ("Mock Dataset", "API Conectada") de la interfaz de usuario para preservar la sobriedad institucional.
+4. **Normalización Terminológica:**
+   - Evidencias: adaptadas de "texto oficial" a "documento fuente" para contemplar la diversidad de futuras fuentes (Google News, LinkedIn, prensa jurídica).
+   - Enlaces externos: renombrados de "Fuente oficial" a "Publicación original".
+   - Estados de relevancia: unificados uniformemente como *Relevante*, *En revisión* y *No relevante* en todas las pantallas.
+5. **Hero y Fuentes Dinámicas:** Eliminadas menciones estáticas hardcoded (CAT, TJUE, CNMC, DG Comp) para asegurar escalabilidad ante la incorporación de nuevas fuentes.
+6. **Tests Frontend Automatizados:** 14 tests unitarios implementados con Vitest y React Testing Library cubriendo contratos de API, parámetros de query, reglas fail-closed, estados de carga/error/vacío y ausencia de jerga interna de auditoría.
+7. **Smoke Test Real End-to-End:** Validación contra la base de datos real confirmando 80 publicaciones, 32 relevantes, 10 en revisión, 38 no relevantes, 22 en *private_enforcement*, paginación por offsets y detalle íntegro verificado en Livronsa y Gormsen.
+
+---
+
+## 30. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 8B.2 **NO** se han implementado:
 1. Autenticación de usuarios, login o gestión de sesiones (fase posterior).
 2. Modificación de datos analíticos, históricos ni prompts.
 3. Scheduler automático en segundo plano.
@@ -1022,7 +1052,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 8B.1 **NO** se 
 
 ---
 
-## 30. Roadmap
+## 31. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1035,6 +1065,7 @@ Para respetar la delimitación estricta de fases, en este Bloque 8B.1 **NO** se 
 - [x] **Bloque 8A:** API de Consumo del Observatorio para el Portal Cliente (`/api/v1/observatory`). *(Cerrado)*
 - [x] **Bloque 8B.0:** Preparación del Backend para el Portal Web (CORS, Contrato API y Smoke Test HTTP). *(Cerrado)*
 - [x] **Bloque 8B.1:** Portal Frontend Cliente MVP: Estructura, Diseño y Conexión API. *(Cerrado)*
+- [x] **Bloque 8B.2:** Hardening del Frontend y Conexión Real Frontend ↔ Backend. *(Cerrado)*
 - [ ] **Bloque 9:** Automatización / programación (scheduler).
 - [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Futuro:** Módulo de análisis documental.

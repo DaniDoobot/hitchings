@@ -14,18 +14,70 @@ import {
   getMockEntryDetail,
 } from '../data/mockObservatoryData';
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
-const FORCE_MOCK = import.meta.env.VITE_USE_MOCK_DATA === 'true';
-const USE_MOCK = FORCE_MOCK || !API_BASE_URL;
+export interface ObservatoryApiOptions {
+  apiBaseUrl?: string;
+  useMock?: boolean;
+  isProd?: boolean;
+  throwOnInit?: boolean;
+}
 
-class ObservatoryApiService {
-  private isMockMode: boolean = USE_MOCK;
+export class ObservatoryApiService {
+  private apiBaseUrl: string = '';
+  private isMockMode: boolean = false;
+  private configError: string | null = null;
 
-  constructor() {
-    if (this.isMockMode) {
-      console.info('[ObservatoryApi] Running in standalone MOCK DATA mode (no backend required).');
-    } else {
-      console.info(`[ObservatoryApi] Connected to real backend API: ${API_BASE_URL}`);
+  constructor(options?: ObservatoryApiOptions) {
+    const isProd =
+      options?.isProd !== undefined
+        ? options.isProd
+        : typeof import.meta !== 'undefined' && import.meta.env?.PROD === true;
+
+    const useMock =
+      options?.useMock !== undefined
+        ? options.useMock
+        : typeof import.meta !== 'undefined' && import.meta.env?.VITE_USE_MOCK_DATA === 'true';
+
+    const rawBaseUrl =
+      options?.apiBaseUrl !== undefined
+        ? options.apiBaseUrl
+        : (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || '';
+
+    const baseUrl = rawBaseUrl.trim().replace(/\/$/, '');
+
+    // Rule 1: Production Protection against Mock
+    if (isProd && useMock) {
+      this.configError =
+        'Security Error: Mock data is strictly disabled in production environments.';
+    }
+    // Rule 2: Explicit Mock Only in Development
+    else if (useMock) {
+      this.isMockMode = true;
+      this.apiBaseUrl = '';
+      if (typeof console !== 'undefined') {
+        console.info('[ObservatoryApi] Running in explicit DEVELOPMENT MOCK mode.');
+      }
+    }
+    // Rule 3: Fail-Closed when Mock is False and Base URL is Missing
+    else if (!baseUrl) {
+      this.configError = 'VITE_API_BASE_URL is required when mock data is disabled';
+    }
+    // Normal connected mode
+    else {
+      this.apiBaseUrl = baseUrl;
+      this.isMockMode = false;
+      if (typeof console !== 'undefined') {
+        console.info(`[ObservatoryApi] Connected to backend API: ${this.apiBaseUrl}`);
+      }
+    }
+
+    if (options?.throwOnInit && this.configError) {
+      throw new Error(this.configError);
+    }
+  }
+
+  private assertReady() {
+    if (this.configError) {
+      throw new Error(this.configError);
     }
   }
 
@@ -33,52 +85,11 @@ class ObservatoryApiService {
     return this.isMockMode;
   }
 
-  public async getDashboard(): Promise<ObservatoryDashboard> {
-    if (this.isMockMode) {
-      // Simulate minor async delay for realistic UX
-      await new Promise(r => setTimeout(r, 120));
-      return JSON.parse(JSON.stringify(MOCK_DASHBOARD));
-    }
-
-    const res = await fetch(`${API_BASE_URL}/api/v1/observatory/dashboard`);
-    if (!res.ok) {
-      throw new Error(`Error al obtener dashboard: HTTP ${res.status}`);
-    }
-    return res.json();
+  public getBaseUrl(): string {
+    return this.apiBaseUrl;
   }
 
-  public async getSources(): Promise<ObservatorySourceDetail[]> {
-    if (this.isMockMode) {
-      await new Promise(r => setTimeout(r, 80));
-      return JSON.parse(JSON.stringify(MOCK_SOURCES));
-    }
-
-    const res = await fetch(`${API_BASE_URL}/api/v1/observatory/sources`);
-    if (!res.ok) {
-      throw new Error(`Error al obtener fuentes: HTTP ${res.status}`);
-    }
-    return res.json();
-  }
-
-  public async getTopics(): Promise<ObservatoryTopicNode[]> {
-    if (this.isMockMode) {
-      await new Promise(r => setTimeout(r, 80));
-      return JSON.parse(JSON.stringify(MOCK_TOPICS));
-    }
-
-    const res = await fetch(`${API_BASE_URL}/api/v1/observatory/topics`);
-    if (!res.ok) {
-      throw new Error(`Error al obtener taxonomía: HTTP ${res.status}`);
-    }
-    return res.json();
-  }
-
-  public async getEntries(params: EntriesQueryParams = {}): Promise<ObservatoryListResponse> {
-    if (this.isMockMode) {
-      await new Promise(r => setTimeout(r, 150));
-      return filterMockEntries(params);
-    }
-
+  public buildQueryParams(params: EntriesQueryParams = {}): URLSearchParams {
     const query = new URLSearchParams();
     if (params.limit !== undefined) query.set('limit', String(params.limit));
     if (params.offset !== undefined) query.set('offset', String(params.offset));
@@ -99,8 +110,64 @@ class ObservatoryApiService {
         query.append('source_ids', sid);
       }
     }
+    return query;
+  }
 
-    const res = await fetch(`${API_BASE_URL}/api/v1/observatory/entries?${query.toString()}`);
+  public async getDashboard(): Promise<ObservatoryDashboard> {
+    this.assertReady();
+
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 100));
+      return JSON.parse(JSON.stringify(MOCK_DASHBOARD));
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/dashboard`);
+    if (!res.ok) {
+      throw new Error(`Error al obtener dashboard: HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  public async getSources(): Promise<ObservatorySourceDetail[]> {
+    this.assertReady();
+
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 80));
+      return JSON.parse(JSON.stringify(MOCK_SOURCES));
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/sources`);
+    if (!res.ok) {
+      throw new Error(`Error al obtener fuentes: HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  public async getTopics(): Promise<ObservatoryTopicNode[]> {
+    this.assertReady();
+
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 80));
+      return JSON.parse(JSON.stringify(MOCK_TOPICS));
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/topics`);
+    if (!res.ok) {
+      throw new Error(`Error al obtener taxonomía: HTTP ${res.status}`);
+    }
+    return res.json();
+  }
+
+  public async getEntries(params: EntriesQueryParams = {}): Promise<ObservatoryListResponse> {
+    this.assertReady();
+
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 120));
+      return filterMockEntries(params);
+    }
+
+    const query = this.buildQueryParams(params);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries?${query.toString()}`);
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
       throw new Error(errBody.detail || `Error al consultar publicaciones: HTTP ${res.status}`);
@@ -109,8 +176,10 @@ class ObservatoryApiService {
   }
 
   public async getEntry(entryId: string): Promise<ObservatoryEntryDetail> {
+    this.assertReady();
+
     if (this.isMockMode) {
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 80));
       const entry = getMockEntryDetail(entryId);
       if (!entry) {
         throw new Error(`Publicación no encontrada o sin análisis vigente (ID: ${entryId})`);
@@ -118,7 +187,7 @@ class ObservatoryApiService {
       return JSON.parse(JSON.stringify(entry));
     }
 
-    const res = await fetch(`${API_BASE_URL}/api/v1/observatory/entries/${entryId}`);
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/observatory/entries/${entryId}`);
     if (res.status === 404) {
       throw new Error(`Publicación no encontrada o sin análisis vigente (ID: ${entryId})`);
     }

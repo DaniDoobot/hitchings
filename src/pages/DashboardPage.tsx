@@ -68,8 +68,7 @@ export const DashboardPage: React.FC = () => {
             Monitorización Estratégica en Derecho de la Competencia
           </h1>
           <p className="text-sm sm:text-base text-navy-200 leading-relaxed mb-6">
-            Análisis jurídico y clasificación de resoluciones oficiales de tribunales y agencias reguladoras
-            (CAT, TJUE, CNMC, DG Comp). Detección temprana de precedentes, acciones colectivas y cárteles.
+            Seguimiento y análisis de publicaciones relevantes en materia de Derecho de la Competencia. Detección temprana de precedentes, litigios y cárteles.
           </p>
 
           {/* Quick Search Form */}
@@ -171,7 +170,7 @@ export const DashboardPage: React.FC = () => {
             >
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-                  Descartadas
+                  No relevantes
                 </span>
                 <span className="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
               </div>
@@ -346,11 +345,15 @@ export const DashboardPage: React.FC = () => {
                     </span>
                     <span className="text-xs text-slate-400 flex items-center gap-1">
                       <Calendar className="w-3 h-3" />
-                      {new Date(entry.published_at).toLocaleDateString('es-ES', {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      })}
+                      {entry.published_at ? (
+                        new Date(entry.published_at).toLocaleDateString('es-ES', {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                        })
+                      ) : (
+                        'Fecha no disponible'
+                      )}
                     </span>
                   </div>
                   <RelevanceBadge status="relevant" score={entry.score} size="sm" />

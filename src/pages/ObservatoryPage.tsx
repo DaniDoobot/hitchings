@@ -505,11 +505,15 @@ export const ObservatoryPage: React.FC = () => {
                       )}
                       <span className="text-xs text-slate-400 flex items-center gap-1">
                         <Calendar className="w-3 h-3" />
-                        {new Date(entry.published_at).toLocaleDateString('es-ES', {
-                          day: 'numeric',
-                          month: 'long',
-                          year: 'numeric',
-                        })}
+                        {entry.published_at ? (
+                          new Date(entry.published_at).toLocaleDateString('es-ES', {
+                            day: 'numeric',
+                            month: 'long',
+                            year: 'numeric',
+                          })
+                        ) : (
+                          'Fecha no disponible'
+                        )}
                       </span>
                     </div>
 
@@ -580,7 +584,7 @@ export const ObservatoryPage: React.FC = () => {
                           rel="noopener noreferrer"
                           className="text-slate-500 hover:text-slate-800 inline-flex items-center gap-1"
                         >
-                          <span>Fuente oficial</span>
+                          <span>Publicación original</span>
                           <ExternalLink className="w-3 h-3" />
                         </a>
                       )}

@@ -21,11 +21,11 @@ export interface ObservatoryTopicNode {
 export interface ObservatoryRelevance {
   status: RelevanceStatus;
   score: number;
-  confidence: number;
+  confidence?: number | null;
 }
 
 export interface ObservatoryEvidenceQuote {
-  source_field: string;
+  source_field?: string | null;
   quote: string;
 }
 
@@ -42,13 +42,13 @@ export interface ObservatoryEvidence {
 
 export interface ObservatoryEntryListItem {
   entry_id: string;
-  title: string;
+  title?: string | null;
   source: ObservatorySourceRef;
-  published_at: string;
+  published_at?: string | null;
   url: string;
   content_type?: string | null;
   relevance: ObservatoryRelevance;
-  summary: string;
+  summary?: string | null;
   canonical_topics: ObservatoryTopicItem[];
   canonical_primary_topic?: ObservatoryTopicItem | null;
   key_points: string[];
@@ -56,13 +56,13 @@ export interface ObservatoryEntryListItem {
 
 export interface ObservatoryEntryDetail {
   entry_id: string;
-  title: string;
+  title?: string | null;
   source: ObservatorySourceRef;
-  published_at: string;
+  published_at?: string | null;
   url: string;
   content_type?: string | null;
   relevance: ObservatoryRelevance;
-  summary: string;
+  summary?: string | null;
   canonical_topics: ObservatoryTopicItem[];
   canonical_primary_topic?: ObservatoryTopicItem | null;
   key_points: string[];
@@ -80,9 +80,9 @@ export interface ObservatorySourceDetail {
   id: string;
   name: string;
   type: string;
-  url: string;
+  url?: string | null;
   entry_count: number;
-  latest_published_at: string | null;
+  latest_published_at?: string | null;
 }
 
 export interface DashboardTopTopic {
@@ -100,11 +100,11 @@ export interface DashboardTopSource {
 
 export interface DashboardLatestEntry {
   entry_id: string;
-  title: string;
+  title?: string | null;
   source: ObservatorySourceRef;
-  published_at: string;
+  published_at?: string | null;
   score: number;
-  summary: string;
+  summary?: string | null;
   canonical_topics: ObservatoryTopicItem[];
 }
 
