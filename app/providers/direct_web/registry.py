@@ -34,27 +34,20 @@ class DirectWebAdapterRegistry:
 
     @classmethod
     def get_adapter_for_source(cls, source: Source) -> BaseWebSourceAdapter:
-        """Resolve adapter for a Source model instance using its config or metadata."""
+        """Resolve adapter for a Source model instance using its explicit config.
+
+        Fails closed with DirectWebUnknownAdapterError if config.adapter is missing or unknown.
+        No heuristic name/URL guessing.
+        """
         config = source.config or {}
         adapter_code = config.get("adapter") or config.get("adapter_code")
 
-        if adapter_code:
-            return cls.get_adapter(str(adapter_code))
+        if not adapter_code:
+            raise DirectWebUnknownAdapterError(
+                f"Source id={source.id} name='{source.name}' has no 'adapter' configured in source.config"
+            )
 
-        # Fallback resolution by canonical source name or URL
-        src_name = source.name.lower()
-        src_url = (source.url or "").lower()
-
-        if "kluwer" in src_name or "wolterskluwer" in src_url:
-            return cls.get_adapter("kluwer_competition")
-        elif "chillin" in src_name or "chillingcompetition" in src_url:
-            return cls.get_adapter("chillin_competition")
-        elif "almac" in src_name or "almacendederecho" in src_url:
-            return cls.get_adapter("almacen_derecho")
-
-        raise DirectWebUnknownAdapterError(
-            f"Unable to resolve direct web adapter for Source id={source.id} name='{source.name}'"
-        )
+        return cls.get_adapter(str(adapter_code))
 
     @classmethod
     def list_adapters(cls) -> list[str]:

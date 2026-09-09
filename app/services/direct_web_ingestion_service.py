@@ -19,6 +19,7 @@ from app.core.url_utils import (
 from app.models.entry import Entry
 from app.models.ingestion_run import IngestionRun, IngestionRunStatus
 from app.models.source import Source, SourceType
+from app.models.tracking import TrackedEntity
 from app.providers.direct_web.base import DirectWebExtractionError
 from app.providers.direct_web.registry import DirectWebAdapterRegistry
 from app.services.ingestion_service import compute_ingestion_dedupe_hash
@@ -288,6 +289,21 @@ class DirectWebIngestionService:
                     if gn_match_id:
                         raw_meta["discovered_via_google_news"] = True
                         raw_meta["google_news_discovery_entry_id"] = gn_match_id
+
+                    # Optional deterministic TrackedEntity author match (Section 6)
+                    if article.author:
+                        author_name = article.author.strip()
+                        matched_author_entity = (
+                            db.query(TrackedEntity)
+                            .filter(
+                                TrackedEntity.active == True,
+                                TrackedEntity.display_name == author_name,
+                            )
+                            .first()
+                        )
+                        if matched_author_entity:
+                            raw_meta["tracked_author_entity_id"] = str(matched_author_entity.id)
+                            raw_meta["tracked_author_entity_name"] = matched_author_entity.display_name
 
                     entry = Entry(
                         source_id=source.id,

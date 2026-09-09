@@ -55,7 +55,7 @@ PILOT_SOURCES_CONFIG = [
             "adapter": "chillin_competition",
             "feed_url": "https://chillingcompetition.com/feed/",
         },
-        "tracked_entity_name": "Pablo Ibáñez Colomo",
+        "tracked_entity_name": None,
     },
     {
         "name": "Almacén de Derecho - Competencia",
@@ -67,7 +67,7 @@ PILOT_SOURCES_CONFIG = [
             "adapter": "almacen_derecho",
             "feed_url": "https://almacendederecho.org/category/competencia/feed",
         },
-        "tracked_entity_name": "Francisco Marcos",
+        "tracked_entity_name": None,
     },
 ]
 
@@ -101,10 +101,9 @@ def seed_pilot_sources(db) -> list[Source]:
             existing.config = cfg["config"]
             existing.url = cfg["url"]
             existing.category = cfg["category"]
-            if te_id and not existing.tracked_entity_id:
-                existing.tracked_entity_id = te_id
+            existing.tracked_entity_id = te_id
             db.commit()
-            print(f"  [Exists] Source '{source_name}' (id={existing.id})")
+            print(f"  [Updated] Source '{source_name}' (id={existing.id}, te_id={existing.tracked_entity_id})")
             seeded.append(existing)
         else:
             new_source = Source(

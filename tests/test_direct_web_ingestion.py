@@ -153,7 +153,7 @@ MOCK_ALMACEN_HTML = """<!DOCTYPE html>
 # ==============================================================================
 
 def test_registry_resolution():
-    """Verify registry resolves adapters by code and by Source."""
+    """Verify registry resolves adapters strictly by code and by explicit Source config."""
     adapter = DirectWebAdapterRegistry.get_adapter("kluwer_competition")
     assert isinstance(adapter, KluwerCompetitionAdapter)
 
@@ -171,23 +171,157 @@ def test_registry_resolution():
     )
     assert isinstance(DirectWebAdapterRegistry.get_adapter_for_source(src), KluwerCompetitionAdapter)
 
-    # Resolution by Source name / URL fallback
-    src_fallback = Source(
+
+def test_rename_source_resolves_adapter():
+    """Verify renaming a source completely does not break dispatch if config.adapter is present (Section 11)."""
+    renamed_source = Source(
+        name="Totally Arbitrary Renamed EU Law Portal",
+        type=SourceType.BLOG,
+        url="https://arbitrary-domain.test",
+        config={"adapter": "chillin_competition"},
+    )
+    # Must resolve ChillinCompetitionAdapter regardless of name or URL
+    resolved = DirectWebAdapterRegistry.get_adapter_for_source(renamed_source)
+    assert isinstance(resolved, ChillinCompetitionAdapter)
+    assert resolved.adapter_code == "chillin_competition"
+
+
+def test_missing_adapter_fails_closed():
+    """Verify sources missing config.adapter fail closed without heuristic guessing (Section 12)."""
+    # 1. Source with empty config
+    src_empty = Source(
         name="Chillin'Competition Blog",
         type=SourceType.BLOG,
         url="https://chillingcompetition.com",
+        config={},
     )
-    assert isinstance(DirectWebAdapterRegistry.get_adapter_for_source(src_fallback), ChillinCompetitionAdapter)
+    with pytest.raises(DirectWebUnknownAdapterError) as exc_info:
+        DirectWebAdapterRegistry.get_adapter_for_source(src_empty)
+    assert "has no 'adapter' configured" in str(exc_info.value)
 
-
-def test_registry_unknown_adapter_raises():
-    """Verify registry fails closed on unknown adapter codes."""
+    # 2. Source with None config
+    src_none = Source(
+        name="Almacén de Derecho",
+        type=SourceType.BLOG,
+        url="https://almacendederecho.org",
+        config=None,
+    )
     with pytest.raises(DirectWebUnknownAdapterError):
-        DirectWebAdapterRegistry.get_adapter("non_existent_adapter_xyz")
+        DirectWebAdapterRegistry.get_adapter_for_source(src_none)
 
-    src_unknown = Source(name="Unknown Publication", type=SourceType.BLOG, url="https://unknown.org")
+    # 3. Source with unknown adapter code
+    src_unknown = Source(
+        name="Some Publication",
+        type=SourceType.BLOG,
+        config={"adapter": "non_existent_code_xyz"},
+    )
     with pytest.raises(DirectWebUnknownAdapterError):
         DirectWebAdapterRegistry.get_adapter_for_source(src_unknown)
+
+
+def test_source_ownership_vs_article_author(db_session: Session):
+    """Verify a collective Source with tracked_entity_id=None can have multiple authors without assigning ownership (Section 13)."""
+    source = Source(
+        name="Almacén de Derecho - Competencia",
+        type=SourceType.BLOG,
+        provider="native",
+        url="https://almacendederecho.org/category/competencia/",
+        config={"adapter": "almacen_derecho"},
+        tracked_entity_id=None,  # Collective publication: no single individual owner
+        active=True,
+    )
+    db_session.add(source)
+    db_session.flush()
+
+    entry_a = Entry(
+        source_id=source.id,
+        external_id="almacen_art_1",
+        url="https://almacendederecho.org/cartel-leche",
+        title="¿Cuánto vale el cártel de la leche?",
+        content="Contenido extenso sobre litigación antitrust en España...",
+        author="Francisco Marcos",
+        content_hash=compute_ingestion_dedupe_hash("¿Cuánto vale el cártel de la leche?", "https://almacendederecho.org/cartel-leche"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    entry_b = Entry(
+        source_id=source.id,
+        external_id="almacen_art_2",
+        url="https://almacendederecho.org/sentencia-rogon",
+        title="La sentencia Rogon del TJUE",
+        content="Contenido extenso sobre agentes deportivos y derecho de la competencia...",
+        author="Jesús Alfaro",
+        content_hash=compute_ingestion_dedupe_hash("La sentencia Rogon del TJUE", "https://almacendederecho.org/sentencia-rogon"),
+        captured_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([entry_a, entry_b])
+    db_session.commit()
+
+    # Verify both entries belong to the same Source
+    assert entry_a.source_id == source.id
+    assert entry_b.source_id == source.id
+
+    # Verify authors are distinct personal authors
+    assert entry_a.author == "Francisco Marcos"
+    assert entry_b.author == "Jesús Alfaro"
+
+    # Verify Source ownership remains unassigned to either individual author
+    assert source.tracked_entity_id is None
+    assert source.tracked_entity is None
+
+
+def test_entry_author_tracked_entity_context(db_session: Session, monkeypatch):
+    """Verify entry-level deterministic author matching records TrackedEntity context without mutating Source.tracked_entity_id (Section 6)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "DIRECT_WEB_INGESTION_ENABLED", True)
+
+    # Create active TrackedEntity for Francisco Marcos
+    te_francisco = TrackedEntity(
+        display_name="Francisco Marcos",
+        entity_type="person",
+        active=True,
+    )
+    db_session.add(te_francisco)
+    db_session.flush()
+
+    source = Source(
+        name="Almacén de Derecho Test",
+        type=SourceType.BLOG,
+        provider="native",
+        url="https://almacendederecho.org",
+        config={"adapter": "almacen_derecho"},
+        tracked_entity_id=None,  # Source is NOT owned by Francisco Marcos
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "feed" in url_str:
+            return httpx.Response(200, text=MOCK_ALMACEN_RSS)
+        return httpx.Response(200, text=MOCK_ALMACEN_HTML)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+
+    service = DirectWebIngestionService()
+    report = service.execute_ingestion(
+        db=db_session,
+        sources=[source],
+        confirm_real_calls=True,
+        client=mock_client,
+    )
+
+    assert report.total_created == 1
+    created_entry = db_session.query(Entry).filter(Entry.source_id == source.id).first()
+    assert created_entry.author == "Francisco Marcos"
+
+    # Entry metadata contains tracked author entity context
+    assert created_entry.raw_metadata.get("tracked_author_entity_id") == str(te_francisco.id)
+    assert created_entry.raw_metadata.get("tracked_author_entity_name") == "Francisco Marcos"
+
+    # Source.tracked_entity_id MUST remain None!
+    db_session.refresh(source)
+    assert source.tracked_entity_id is None
 
 
 # ==============================================================================

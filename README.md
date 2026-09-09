@@ -1305,7 +1305,25 @@ python -m scripts.ingest_direct_sources --confirm-real-calls --limit 5
 python -m scripts.ingest_direct_sources --source chillin_competition --confirm-real-calls
 ```
 
+### 7. Hardening Semántico de Sources Directas (BLOQUE 9B.1)
+
+#### TRACKED ENTITY ≠ SOURCE ≠ ENTRY AUTHOR
+
+Para evitar confusiones en la atribución de autoría y propiedad del canal, se establece una separación estricta:
+
+1. **`Source` (Publicación o Canal Técnico)**:
+   - Puede ser una **publicación colectiva**, blog doctrinal multiautor, medio o revista especializada (ej. *Kluwer Competition Law Blog*, *Chillin'Competition*, *Almacén de Derecho*).
+   - `Source.tracked_entity_id`: **SÓLO** debe asignarse cuando la fuente pertenece inequívoca y exclusivamente a una única entidad vigilada (ej. website institucional de la CNMC $\to$ CNMC; página oficial de la DG COMP $\to$ European Commission; blog personal exclusivo de un experto).
+   - Para fuentes y publicaciones de referencia colectivas (*Reference Sources*), `Source.tracked_entity_id = None`. Una *Reference Source* **no necesita ni debe** pertenecer a un `TrackedEntity`.
+2. **`Entry.author` (Autor Concreto del Artículo)**:
+   - Registra el autor personal humano de cada artículo individual (ej. *Jesús Alfaro* o *Francisco Marcos* en *Almacén de Derecho*; *Pablo Ibáñez Colomo* o *Alfonso Lamadrid* en *Chillin'Competition*).
+   - Si el autor coincide con una entidad vigilada activa de la matriz, el servicio de ingesta anota en los metadatos de la entrada (`raw_metadata["tracked_author_entity_id"]` y `raw_metadata["tracked_author_entity_name"]`) el contexto del autor rastreado, sin alterar jamás la propiedad global de la fuente (`Source.tracked_entity_id`).
+3. **Despacho Explícito de Adaptadores en el Registro (`DirectWebAdapterRegistry`)**:
+   - Se eliminan deducciones heurísticas o por coincidencia parcial de nombres/URLs.
+   - La resolución del adaptador falla de forma cerrada (*fail-closed* con `DirectWebUnknownAdapterError`) a menos que la fuente tenga configurado explícitamente `source.config["adapter"]` o `source.config["adapter_code"]`. Renombrar una fuente o cambiar su URL no altera el despacho del adaptador.
+
 ---
+
 
 ## 34. Roadmap
 
