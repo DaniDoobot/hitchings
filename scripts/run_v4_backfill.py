@@ -123,6 +123,55 @@ def get_run_cost_usd(db: Session, run_id: uuid.UUID) -> float:
         )
 
 
+def max_estimated_triage_call_cost(
+    entry: Entry,
+    prompt: AnalysisPromptVersion,
+    input_rate: float,
+    output_rate: float,
+) -> float:
+    """Calculate conservative upper-bound cost for a TRIAGE stage call.
+
+    Uses a conservative tokenization upper-bound (2.0 chars/token + 20% safety margin)
+    without relying on external API calls or optimistic chars/4 assumptions.
+    """
+    content_chars = len(entry.content or "")
+    title_chars = len(entry.title or "")
+    capped_content_chars = min(content_chars, 120_000)
+    input_chars = capped_content_chars + title_chars + 3_000
+
+    est_input_tokens = int((input_chars / 2.0) * 1.20)
+    config = prompt.config or {}
+    max_output_tokens = config.get("max_output_tokens", 1024)
+
+    input_cost = (est_input_tokens * input_rate) / 1_000_000.0
+    output_cost = (max_output_tokens * output_rate) / 1_000_000.0
+    return round(input_cost + output_cost, 6)
+
+
+def max_estimated_deep_call_cost(
+    entry: Entry,
+    prompt: AnalysisPromptVersion,
+    input_rate: float,
+    output_rate: float,
+) -> float:
+    """Calculate conservative upper-bound cost for a DEEP ANALYSIS stage call.
+
+    Considers longer prompt context (triage summary, topics) and higher max_output_tokens.
+    """
+    content_chars = len(entry.content or "")
+    title_chars = len(entry.title or "")
+    capped_content_chars = min(content_chars, 120_000)
+    input_chars = capped_content_chars + title_chars + 4_500
+
+    est_input_tokens = int((input_chars / 2.0) * 1.20)
+    config = prompt.config or {}
+    max_output_tokens = config.get("max_output_tokens", 4096)
+
+    input_cost = (est_input_tokens * input_rate) / 1_000_000.0
+    output_cost = (max_output_tokens * output_rate) / 1_000_000.0
+    return round(input_cost + output_cost, 6)
+
+
 def calculate_conservative_reservation(
     stage: str,
     entry: Entry,
@@ -130,18 +179,13 @@ def calculate_conservative_reservation(
     input_rate: float,
     output_rate: float,
 ) -> float:
-    """Calculate maximum theoretical cost reservation for the next call."""
-    content_chars = len(entry.content or "")
-    # Assume 2.5 chars per token (worst-case Spanish/English tokenization) + 3000 prompt/system overhead
-    est_input_tokens = int(content_chars / 2.5) + 3000
-    config = prompt.config or {}
-    max_output_tokens = config.get("max_output_tokens", 2048 if stage == "triage" else 4096)
-
-    input_cost = (est_input_tokens * input_rate) / 1_000_000.0
-    output_cost = (max_output_tokens * output_rate) / 1_000_000.0
-    total_est = (input_cost + output_cost) * 1.5  # 50% safety multiplier
-    floor = 0.04 if stage == "triage" else 0.06
-    return max(total_est, floor)
+    """Calculate dynamic, conservative reservation per stage and entry without arbitrary fixed floors."""
+    if stage == "triage":
+        return max_estimated_triage_call_cost(entry, prompt, input_rate, output_rate)
+    elif stage == "deep_analysis":
+        return max_estimated_deep_call_cost(entry, prompt, input_rate, output_rate)
+    else:
+        return max_estimated_deep_call_cost(entry, prompt, input_rate, output_rate)
 
 
 # ----------------------------------------------------------------------

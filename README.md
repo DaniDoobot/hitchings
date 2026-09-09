@@ -794,13 +794,15 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
 - **Entries procesadas:** 79 de 79 intentadas.
 - **Análisis v4 completados:** 76 en este run (+ 1 previo de *Livronsa* = 77 vigentes en el repositorio).
 - **Análisis v4 fallidos:** 3 (registrados permanentemente en PostgreSQL; fail-closed sin auto-reintentos):
-  - `ada5d125` (*Dr Liza Lovdahl Gormsen v Meta*): `AnalysisGroundingError` en Deep Analysis (el modelo truncó una cita con `...` en lugar de texto literal; detectado y bloqueado por el validador estricto).
-  - `4db3fa9a` (*Elisabetta Sciallis v Fender*): `NoParsedResponse` en Deep Analysis.
-  - `14e036d2` (*Mr David Alexander de Horne Rowntree v PRS*): `NoParsedResponse` en Deep Analysis.
+  - `ada5d125` (*Dr Liza Lovdahl Gormsen v Meta*): `AnalysisGroundingError` en Deep Analysis (paráfrasis no literal en una de las 14 citas; detectado y bloqueado por el validador estricto).
+  - `4db3fa9a` (*Elisabetta Sciallis v Fender*): `NoParsedResponse` en Deep Analysis (truncamiento por `max_output_tokens: 4096` consumido por tokens de razonamiento).
+  - `14e036d2` (*Mr David Alexander de Horne Rowntree v PRS*): `NoParsedResponse` en Deep Analysis (truncamiento por `max_output_tokens: 4096` consumido por tokens de razonamiento).
 - **Llamadas API realizadas:** 110 (79 Triage + 31 Deep Analysis; 107 completadas, 3 fallidas).
 - **Consumo de tokens del run:**
-  - Input tokens: 739.576
-  - Output tokens: 95.749 (visibles y razonamiento)
+  - Input tokens: 739.576 (Triage: 612.265, Deep: 127.311)
+  - Visible output tokens: 49.865 (Triage: 22.649, Deep: 27.216)
+  - Thought tokens: 45.884 (Triage: 0, Deep: 45.884)
+  - Billable output tokens: 95.749 (Triage: 22.649, Deep: 73.100)
 - **Métricas de Evidencia y Grounding (Citas literales):**
   - Total de citas extraídas: 391
   - Total de citas validadas por `GroundingValidator`: 391 (100.0% de tasa de verificación).
@@ -808,11 +810,11 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
   - Citas > 180 caracteres: 72 (18.4%).
   - Citas > 25 palabras: 98 (25.1%).
   - Longitud máxima de cita: 394 caracteres.
-- **Contabilidad y Precisión Presupuestaria:**
-  - Coste real del Run: **$0.913752 USD** (frente a previsión EXPECTED de $0.9949 del token-model: 91.8% de precisión).
+- **Contabilidad y Precisión Presupuestaria (Terminología de costes estimados):**
+  - Run estimated cost: **$0.913752 USD** (Triage: $0.544139, Deep: $0.369613; frente a previsión EXPECTED de $0.9949 del token-model: 91.8% de precisión).
   - Presupuesto remanente: $1.086248 USD (consumido el 45.7% del límite de $2.0000; nunca se alcanzó el aviso del 75%).
-  - Coste registrado acumulado en PostgreSQL: $1.205550 USD (anterior: $0.291798).
-  - Coste histórico reconstruido (incluyendo llamadas depuradas en 7E.2): $1.421366 USD.
+  - DB recorded estimated cost: **$1.205550 USD** (anterior: $0.291798).
+  - Reconstructed historical estimated cost: **$1.421366 USD** (anterior: $0.507614).
 - **Subsunción Canónica de Taxonomía:**
   - De los 76 análisis completados, 38 presentaban redundancia padre-hijo bruta en los tópicos asignados por el LLM (50.0%).
   - La capa canónica (`canonicalize_analysis_topics`) eliminó el 100% de las redundancias: **0 redundancias canónicas** subsistentes.
@@ -824,18 +826,34 @@ Se auditó y diferenció la semántica de identificadores para evitar confusione
 
 ---
 
-## 23. Funcionalidades Deliberadamente Pendientes
+## 23. Post-Backfill Integrity y Failure Forensics (Bloque 7H.1)
 
-Para respetar la delimitación estricta de fases, en este Bloque 7H **NO** se han implementado:
-1. Reintentos automáticos de las 3 Entries fallidas.
-2. Modificación de prompts v1, v2, v3 o v4 ni creación de prompts v5.
-3. Concurrencia paralela en llamadas a la API de Gemini (mantenido secuencial por seguridad).
-4. Scheduler en segundo plano (Celery, APScheduler, cron).
-5. Interfaz gráfica o frontend.
+### 1. Auditoría Forense de Fallos
+- **UUID real de Livronsa:** `27c1a107-ebfe-40d0-ba9e-d7d399c3c565` (100% íntegra en PostgreSQL con análisis v4 completed). La errata en el texto del informe 7H (`...-1ba7-47ec...`) fue un lapsus narrativo en prosa sin correlato en base de datos.
+- **Integridad del Set del Run:** Comprobado inequívocamente: `selected set == attempted set: True`. 79 Entry IDs únicos procesados, 0 duplicados, Livronsa correctamente excluida por tener ya v4 vigente.
+- **Forensics Gormsen (`ada5d125`):** 13 de 14 citas validadas al 100%. Una cita de pleito colectivo combinó dos cláusulas del documento en una frase continua de 208 caracteres. Ni el modelo ni el texto contenían `...` ni `…`; la omisión de wildcard literal preserva el rigor estricto del grounding. Clasificación: `RETRY_V4_REASONABLE`.
+- **Forensics CAT 56 (`4db3fa9a`) y EWCA 814 (`14e036d2`):** Causa raíz compartida: **MAX_TOKENS / Truncamiento**. El razonamiento interno bajo `thinking_level='medium'` consumió 3.199 y 3.933 tokens respectivamente, dejando presupuesto insuficiente para cerrar el JSON dentro del límite de `max_output_tokens: 4096`. Clasificación: `V4_RETRY_UNLIKELY` sin ajuste previo de configuración (e.g. `max_output_tokens: 8192` o `thinking_level: 'low'`).
+
+### 2. Corrección del Budget Guard
+- **Corrección de defecto de reserva fija:** Se eliminó el piso plano de $0.0400 USD.
+- **Cálculo dinámico por etapa y entrada:** Funciones `max_estimated_triage_call_cost` y `max_estimated_deep_call_cost` que calculan cotas superiores basadas en la longitud exacta de la entrada, factor de seguridad de tokenización (2.0 chars/token + 20% margen), `max_output_tokens` del prompt y tarifas configuradas.
+- **Planner de reintentos read-only:** Creado `scripts/plan_v4_failed_retries.py` para consultar y clasificar entradas fallidas sin realizar llamadas a Gemini ni escrituras.
 
 ---
 
-## 24. Roadmap
+## 24. Funcionalidades Deliberadamente Pendientes
+
+Para respetar la delimitación estricta de fases, en este Bloque 7H.1 **NO** se han implementado:
+1. Reintentos automáticos ni llamadas a Gemini (0 llamadas realizadas).
+2. Modificación de prompts v1, v2, v3 o v4 ni creación de prompts v5.
+3. Creación de runner de reintentos con ejecución real.
+4. Normalización de elipsis (`...` o `…`) como wildcards en GroundingValidator.
+5. Scheduler en segundo plano (Celery, APScheduler, cron).
+6. Interfaz gráfica o frontend.
+
+---
+
+## 25. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -855,7 +873,8 @@ Para respetar la delimitación estricta de fases, en este Bloque 7H **NO** se ha
 - [x] **Bloque 7G:** Compatibilidad de resultados (key_points = list[str]), visión canónica de topics, selector de current analysis y planificador dry-run de baseline v4.
 - [x] **Bloque 7G.1:** Auditoría de pricing, modelo dual de costes ($0.75/$3.75) y diagnóstico inequívoco de IDs.
 - [x] **Bloque 7G.2:** Auditoría de identidad de inventario (80/80 IDENTITY_OK, 0 duplicados) y preflight final v4.
-- [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 coste real, 391/391 citas 100% verificadas). *(Cerrado)*
+- [x] **Bloque 7H:** Runner resumible, guardas fail-closed de presupuesto y backfill real v4 (110 llamadas API, 77 v4 vigentes, $0.913752 run estimated cost, 391/391 citas 100% verificadas).
+- [x] **Bloque 7H.1:** Post-backfill integrity, failure forensics (100% analizadas las 3 fallidas, NoParsed por MAX_TOKENS), corrección de budget guard y planificador read-only de reintentos. *(Cerrado)*
 - [ ] **Bloque 8:** Automatización / programación (scheduler).
 - [ ] **Bloque 9:** LinkedIn y fuentes complejas mediante proveedor externo.
 - [ ] **Bloque 10:** Interfaz web.
