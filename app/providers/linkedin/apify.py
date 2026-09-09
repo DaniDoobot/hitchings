@@ -19,6 +19,18 @@ from app.providers.linkedin.base import (
 logger = logging.getLogger(__name__)
 
 
+def normalize_apify_actor_id(actor_id: str) -> str:
+    """Normalize Apify actor ID so that username/actor becomes username~actor for URL paths.
+
+    Apify REST API v2 uses /v2/acts/{username}~{actorName}/run-sync-get-dataset-items
+    when referencing store actors, rather than slashes which break REST path routing.
+    """
+    cleaned = actor_id.strip()
+    if "/" in cleaned:
+        return cleaned.replace("/", "~")
+    return cleaned
+
+
 class ApifyLinkedInProvider(BaseLinkedInProvider):
     """Fallback provider for LinkedIn post discovery using Apify Actors."""
 
@@ -44,7 +56,7 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
                 "Apify API token is not configured (APIFY_API_TOKEN is empty). Fail-closed."
             )
 
-        actor_id = self.settings.APIFY_LINKEDIN_ACTOR_ID
+        actor_id = normalize_apify_actor_id(self.settings.APIFY_LINKEDIN_ACTOR_ID)
         base_endpoint = self.settings.APIFY_LINKEDIN_ENDPOINT.rstrip("/")
         endpoint = f"{base_endpoint}/{actor_id}/run-sync-get-dataset-items"
 
@@ -53,11 +65,12 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
             "Content-Type": "application/json",
             "User-Agent": "HITCHINGS/1.0",
         }
-        # harvestapi/linkedin-post-search input schema (100% no-cookies)
+        # harvestapi/linkedin-profile-posts input schema (100% no-cookies, no reactions/comments)
         payload = {
-            "authorUrls": [target_url],
+            "targetUrls": [target_url],
             "maxPosts": limit,
-            "sortBy": "date",
+            "scrapeReactions": False,
+            "scrapeComments": False,
         }
 
         logger.info(
@@ -132,6 +145,11 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
 
         posts: list[LinkedInDiscoveredPost] = []
         for item in items[:limit]:
+            # Skip nested reaction or comment items if present in dataset
+            item_type = item.get("type")
+            if item_type and item_type not in ("post", "feed", "share"):
+                continue
+
             post_url = item.get("linkedinUrl") or item.get("url") or item.get("postUrl")
             if not post_url or not isinstance(post_url, str):
                 continue

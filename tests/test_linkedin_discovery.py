@@ -187,11 +187,37 @@ MOCK_APIFY_ITEMS = [
 ]
 
 
-def test_apify_provider_success(monkeypatch):
-    """Verify Apify fallback provider executes sync run endpoint and parses harvestapi items."""
+def test_apify_endpoint_shape_and_host_path(monkeypatch):
+    """Verify Apify endpoint generates host 'api.apify.com' and path with '~' actor delimiter (Bloque 9C.2)."""
     settings = get_settings()
     monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
-    monkeypatch.setattr(settings, "APIFY_LINKEDIN_ACTOR_ID", "mock-actor-xyz")
+    monkeypatch.setattr(settings, "APIFY_LINKEDIN_ENDPOINT", "https://api.apify.com/v2/acts")
+    monkeypatch.setattr(settings, "APIFY_LINKEDIN_ACTOR_ID", "harvestapi/linkedin-profile-posts")
+
+    captured = {}
+
+    def mock_transport_handler(request: httpx.Request):
+        captured["host"] = request.url.host
+        captured["path"] = request.url.path
+        return httpx.Response(200, json=[])
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = ApifyLinkedInProvider()
+    provider.discover_posts(
+        target_url="https://www.linkedin.com/company/hausfeld",
+        client=client,
+        limit=5,
+    )
+
+    assert captured["host"] == "api.apify.com"
+    assert captured["path"] == "/v2/acts/harvestapi~linkedin-profile-posts/run-sync-get-dataset-items"
+
+
+def test_apify_provider_company_url_success(monkeypatch):
+    """Verify Apify fallback provider handles Company URLs with harvestapi/linkedin-profile-posts schema."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
+    monkeypatch.setattr(settings, "APIFY_LINKEDIN_ACTOR_ID", "harvestapi/linkedin-profile-posts")
 
     captured_request = {}
 
@@ -211,11 +237,26 @@ def test_apify_provider_success(monkeypatch):
         entity_name="Hausfeld",
     )
 
-    assert "mock-actor-xyz/run-sync-get-dataset-items" in captured_request["url"]
+    # 1. Endpoint path verification
+    assert "/v2/acts/harvestapi~linkedin-profile-posts/run-sync-get-dataset-items" in captured_request["url"]
     assert captured_request["headers"]["authorization"] == "Bearer mock-apify-token"
-    assert captured_request["body"]["authorUrls"] == ["https://www.linkedin.com/company/hausfeld"]
-    assert captured_request["body"]["maxPosts"] == 5
-    assert captured_request["body"]["sortBy"] == "date"
+
+    # 2. Input contract verification: targetUrls, maxPosts, scrapeReactions, scrapeComments
+    body = captured_request["body"]
+    assert body["targetUrls"] == ["https://www.linkedin.com/company/hausfeld"]
+    assert body["maxPosts"] == 5
+    assert body["scrapeReactions"] is False
+    assert body["scrapeComments"] is False
+
+    # 3. Absence of forbidden / deprecated fields
+    forbidden_keys = {
+        "searchqueries", "authorurls", "cookie", "cookies", "li_at",
+        "session", "password", "username", "login", "jsessionid"
+    }
+    for k in body.keys():
+        assert k.lower() not in forbidden_keys, f"Forbidden field '{k}' found in payload"
+
+    # 4. Output parsed verification
     assert len(posts) == 1
     p = posts[0]
     assert p.provider == "apify"
@@ -224,6 +265,66 @@ def test_apify_provider_success(monkeypatch):
     assert p.engagement["likes"] == 42
     assert p.engagement["reposts"] == 8
     assert p.text == "Groundbreaking developments in European private enforcement and cartel damages litigation."
+
+
+def test_apify_provider_person_url_success(monkeypatch):
+    """Verify Apify fallback provider handles Person profile URLs (Bloque 9C.2)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
+    monkeypatch.setattr(settings, "APIFY_LINKEDIN_ACTOR_ID", "harvestapi/linkedin-profile-posts")
+
+    mock_person_post = [
+        {
+            "id": "7999888777",
+            "linkedinUrl": "https://www.linkedin.com/posts/expert-jurist_antitrust-digital-markets-7999888777",
+            "content": "Key takeaways from the CJEU judgment on abuse of dominance and digital platforms.",
+            "author": {
+                "name": "Dr. Expert Jurist",
+                "publicIdentifier": "expert-jurist",
+                "type": "profile",
+                "linkedinUrl": "https://www.linkedin.com/in/expert-jurist",
+            },
+            "postedAt": {
+                "date": "2026-03-18T09:15:00Z",
+            },
+            "engagement": {
+                "likes": 95,
+                "comments": 14,
+                "shares": 12,
+            },
+            "type": "post",
+        }
+    ]
+
+    captured_request = {}
+
+    def mock_transport_handler(request: httpx.Request):
+        captured_request["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json=mock_person_post)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = ApifyLinkedInProvider()
+
+    posts = provider.discover_posts(
+        target_url="https://www.linkedin.com/in/expert-jurist",
+        client=client,
+        limit=3,
+        entity_name="Dr. Expert Jurist",
+    )
+
+    body = captured_request["body"]
+    assert body["targetUrls"] == ["https://www.linkedin.com/in/expert-jurist"]
+    assert body["maxPosts"] == 3
+    assert body["scrapeReactions"] is False
+    assert body["scrapeComments"] is False
+
+    assert len(posts) == 1
+    p = posts[0]
+    assert p.provider == "apify"
+    assert p.provider_item_id == "7999888777"
+    assert p.author_name == "Dr. Expert Jurist"
+    assert p.author_profile_url == "https://www.linkedin.com/in/expert-jurist"
+    assert p.engagement["likes"] == 95
 
 
 def test_apify_payload_contains_no_cookies(monkeypatch):
@@ -250,8 +351,11 @@ def test_apify_payload_contains_no_cookies(monkeypatch):
     body = captured_request["body"]
     headers = captured_request["headers"]
 
-    # Assert no cookie fields in payload
-    forbidden_keys = {"cookie", "cookies", "li_at", "session", "password", "username", "login", "jsessionid"}
+    # Assert no cookie/credential/deprecated fields in payload
+    forbidden_keys = {
+        "searchqueries", "authorurls", "cookie", "cookies", "li_at",
+        "session", "password", "username", "login", "jsessionid"
+    }
     for k in body.keys():
         assert k.lower() not in forbidden_keys, f"Forbidden key '{k}' found in Apify payload"
 

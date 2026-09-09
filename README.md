@@ -1367,17 +1367,37 @@ Para evitar falsos positivos por homónimos o páginas erróneas, el sistema **n
 - Ordena deterministamente: Instituciones (90) > Organizaciones (80) > Personas (70), desempate por nombre alfabético.
 - Aplica límite de entidades (`LINKEDIN_MAX_ENTITIES_PER_RUN`, por defecto 10).
 
-### 5. Proveedor Fallback Apify 100% No-Cookie (`harvestapi/linkedin-post-search`)
-- **Actor Veteado**: En sustitución de actores que requerían cookies de sesión (`li_at`), se adoptó **`harvestapi/linkedin-post-search`** (5M+ ejecuciones, mantenido activamente, coste \$0.002/registro).
-- **Garantía No-Cookie**: Ejecuta búsquedas públicas de publicaciones mediante parámetro `authorUrls` sin requerir cookies, credenciales de usuario ni cuentas de LinkedIn.
-- **Política Fail-Closed**:
-  - **Fallos de Autenticación (401/403)**: Fallan de forma cerrada (*fail-closed* con `LinkedInAuthError`). **NUNCA** disparan fallback a Apify para evitar agotar créditos alternativos por problemas de API token.
-  - **Fallos Recuperables (Timeout, 5xx, 429)**: Si Apify está configurado con token válido, se dispara el fallback y se anota `fallback_used = True` y `fallback_reason`.
-  - **Aislamiento de Errores**: El fallo en una entidad no detiene el procesamiento de las restantes.
+### 5. Proveedor Fallback Apify 100% No-Cookie (`harvestapi/linkedin-profile-posts`)
+- **Actor Veteado Definitivo**: En sustitución de `harvestapi/linkedin-post-search` (que requería obligatoriamente una query de búsqueda textual `searchQueries`), se adoptó **`harvestapi/linkedin-profile-posts`** (*LinkedIn Profile Posts Scraper - No Cookies*).
+- **Por qué Profile Posts y no Post Search**: El planificador de HITCHINGS parte de URLs verificadas de entidades (`TrackedEntity.metadata_["linkedin_url"]`), no de búsquedas textuales arbitrarias. El actor `linkedin-profile-posts` está diseñado específicamente para extraer cronológicamente las publicaciones directas de páginas corporativas (`company/`) y perfiles personales (`in/`).
+- **Garantía No-Cookie y No-Account**: Ejecuta extracciones directas sin requerir cookies (`li_at`), contraseñas ni cuentas de usuario personales.
+- **Minimización de Datos y Costes**:
+  - Parámetros de entrada: `targetUrls: [url]`, `maxPosts: limit`, `scrapeReactions: False`, `scrapeComments: False`.
+  - Se desactivan explícitamente comentarios y reacciones detalladas para no incrementar costes ni recopilar datos personales innecesarios.
+  - Ausencia absoluta en el payload de `searchQueries`, `authorUrls`, `cookie`, `cookies`, `li_at`, `username`, `password`.
+- **Normalización de Actor ID en la API REST de Apify**: La API REST v2 de Apify utiliza el delimitador tilde (`~`) para rutas públicas (`/v2/acts/{username}~{actorName}/run-sync-get-dataset-items`). El helper `normalize_apify_actor_id` convierte transparentemente cualquier formato con barra (`harvestapi/linkedin-profile-posts`) a `harvestapi~linkedin-profile-posts` para evitar colisiones de rutas HTTP.
+- **Pricing y Control de Costes**:
+  - Las tarifas de Apify varían según la versión del actor, el plan contratado y descuentos por volumen.
+  - `APIFY_COST_PER_RECORD_USD` permanece como opcional (`None` por defecto).
+  - Si no hay una tarifa configurada explícitamente, `estimated_provider_cost` permanece en `None` (la facturación del proveedor es autoritativa; nunca se asume un coste arbitrario de \$0).
+- **Política Fail-Closed y Estado del Smoke Real**:
+  - Fallos de autenticación (401/403) fallan de forma cerrada (*fail-closed* con `LinkedInAuthError`) y nunca disparan fallback.
+  - El smoke test real contra proveedores de pago permanece como *Provider Integration Gate* pendiente, ejecutándose únicamente cuando se configuren credenciales válidas y el flag explícito `--confirm-real-calls`.
 
 ### 6. Modelado de Source, Entry y Migración 0006
 - **Source Canónica**: `name="LinkedIn"`, `type=SourceType.LINKEDIN` (`"linkedin"`), `provider="external"`, `tracked_entity_id=None`. Representa el canal general de descubrimiento en la plataforma LinkedIn (análogo a `google_news`), reservándose `linkedin_company` / `linkedin_profile` para flujos directos vinculados a una única entidad.
-- **Verificación de Migración `0006_add_linkedin_source_type`**: Se verificó formalmente en un esquema aislado de PostgreSQL que la migración Alembic añade `'linkedin'` al tipo ENUM `sourcetype` de forma idempotente y segura sin requerir `ALTER TYPE` manual.
+- **Nombre Real del Tipo ENUM en PostgreSQL**:
+  - Definido originalmente en `0001_initial_schema.py` como `name="source_type"` (con guion bajo).
+  - La migración `0006_add_linkedin_source_type.py` referencia de forma exacta el nombre real:
+    ```sql
+    ALTER TYPE source_type ADD VALUE IF NOT EXISTS 'linkedin';
+    ```
+- **Replay Real 0005 → 0006 en Esquema Aislado de PostgreSQL**:
+  - Se ejecutó un replay completo de migraciones Alembic dentro de un esquema aislado (`alembic_replay_isolation`):
+    1. `alembic upgrade 0005_users_and_auth_sessions`: creó el tipo ENUM `source_type` con sus 8 valores iniciales, dejando `alembic_version = 0005_users_and_auth_sessions`.
+    2. `alembic upgrade 0006_add_linkedin_source_type`: aplicó `ALTER TYPE source_type ADD VALUE IF NOT EXISTS 'linkedin'`, confirmando 9 valores y `alembic_version = 0006_add_linkedin_source_type`.
+    3. El esquema temporal fue destruido limpiamente con `CASCADE`, garantizando 0 impacto sobre la base de datos operativa.
+- **Comportamiento de Downgrade**: PostgreSQL no soporta eliminar valores de un tipo ENUM sin recrear la tabla. Por ende, la función `downgrade()` es un no-op documentado formalmente en la migración.
 - **Título Técnico**: `LinkedIn — {author_name} — {YYYY-MM-DD}` (documentado como título técnico determinista).
 - **Atribución de Autor**: `Entry.author` registra el autor real devuelto por el post. El contexto de la entidad vigilada se preserva en `raw_metadata["tracked_entity_id"]` y `raw_metadata["tracked_entity_name"]`.
 
@@ -1435,6 +1455,7 @@ python -m scripts.ingest_linkedin --entity "Hausfeld" --confirm-real-calls
 - [x] **Bloque 9B.1:** Hardening Semántico de Sources Directas (separación de propiedad de fuente y autores de artículos). *(Cerrado)*
 - [x] **Bloque 9C:** LinkedIn Discovery mediante Proveedor Externo (Bright Data primary, Apify fallback, planeador, cross-dedupe, control de costes). *(Cerrado)*
 - [x] **Bloque 9C.1:** Hardening de Identidad LinkedIn, Fallback No-Cookie y Migración (corrección identidad CNMC, harvestapi no-cookie actor, procedencia verificada). *(Cerrado)*
+- [x] **Bloque 9C.2:** Corrección Final del Fallback Apify y Replay Real de Migración 0006 (harvestapi/linkedin-profile-posts, normalización de endpoint, replay aislado 0005→0006). *(Cerrado)*
 - [ ] **Bloque 9D:** Pipeline continuo de ingesta / scheduler.
 - [ ] **Futuro:** Módulo de análisis documental.
 
