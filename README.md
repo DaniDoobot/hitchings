@@ -1248,7 +1248,66 @@ python -m scripts.ingest_google_news --confirm-real-calls --max-queries 5 --max-
 
 ---
 
-## 33. Roadmap
+---
+
+## 33. Ingesta de Webs y Fuentes de Referencia Directas (BLOQUE 9B)
+
+### 1. Principio y Arquitectura
+El Bloque 9B separa categóricamente las fuentes de **Descubrimiento** (Google News en 9A) de las fuentes de **Ingesta Directa** (web oficial de despachos, publicaciones especializadas y blogs doctrinales). Una `Source` directa obtiene la publicación directamente desde el editor original:
+- URL canónica real del publisher.
+- Titular íntegro.
+- Fecha verificada conforme a jerarquía estructurada.
+- Cuerpo editorial completo sin maquetación ajena (menús, sidebars, banners, comentarios o widgets sociales).
+- Atribución estricta de autor personal (sin atribuir el publisher como autor).
+
+### 2. Inventario y Selección de Pilotos
+Se auditaron las 38 entidades activas de la matriz HITCHINGS-v0.1 y los publishers detectados en Google News. Se seleccionaron **3 fuentes piloto** altamente representativas y de acceso público sin paywall:
+1. **Kluwer Competition Law Blog (`kluwer_competition`)**:
+   - Tipo: `blog` / `expert_analysis` (Inglés).
+   - Relación doctrinal: Artículos de fondo de autores de la matriz como Christian Bergqvist y Alba Ribera Martínez.
+   - Extracción: RSS discovery (`legalblogs.wolterskluwer.com/competition-blog/rss.xml`) + HTML editorial (`div.cg3-main-article-section-cstm`).
+2. **Chillin'Competition (`chillin_competition`)**:
+   - Tipo: `blog` / `expert_analysis` (Inglés).
+   - Relación con la matriz: Vinculado inequívocamente a la `TrackedEntity` **Pablo Ibáñez Colomo** (catedrático de Derecho de la Competencia).
+   - Extracción: RSS discovery (`chillingcompetition.com/feed/`) + HTML editorial (`div.post`).
+3. **Almacén de Derecho - Competencia (`almacen_derecho`)**:
+   - Tipo: `blog` / `expert_analysis` (Español).
+   - Relación con la matriz: Vinculado inequívocamente a la `TrackedEntity` **Francisco Marcos** (especialista líder en reclamaciones de daños por cárteles en España).
+   - Extracción: RSS discovery (`almacendederecho.org/category/competencia/feed`) + HTML editorial (`div.entry-content`).
+
+### 3. Jerarquía de Fechas y Atribución de Autor
+- **Fechas (Sección 18)**: Precedencia estricta: `JSON-LD datePublished` > `<meta property="article:published_time">` / `<meta name="date">` > `<time datetime="...">` > fallback del feed de descubrimiento (`published_at_source: listing_feed`).
+- **Autores (Sección 17)**: Sólo se persiste `Entry.author` si existe una persona física identificada. Los nombres del medio o publisher se descartan expresamente.
+
+### 4. Normalización de URLs, Deduplicación y Trazabilidad Cruzada con Google News
+- **Normalización**: Se eliminan parámetros de rastreo (`utm_*`, `fbclid`, etc.) y se verifica que `rel=canonical` pertenezca al mismo dominio/sitio que la publicación.
+- **Deduplicación**: Detección intra-ejecución por URL y deduplicación histórica por URL canónica y huella `compute_ingestion_dedupe_hash`.
+- **Cruce con Google News (Sección 24)**: Si una entrada directa coincide por dominio mismo-sitio y titular normalizado con un descubrimiento previo de Google News:
+  - En la nueva entrada directa: `raw_metadata["discovered_via_google_news"] = True`, `raw_metadata["google_news_discovery_entry_id"] = UUID`.
+  - En la entrada de Google News: `raw_metadata["direct_entry_id"] = UUID`.
+  - La entrada directa pasa a ser la fuente de verdad definitiva.
+
+### 5. Suficiencia Documental (`SourceSufficiencyService`)
+A diferencia de los resúmenes superficiales de Google News (`insufficient`), los artículos de fuentes directas recuperan el texto íntegro (a menudo entre 2.000 y 60.000 caracteres), clasificándose con nivel **`full`**, listas para el posterior análisis del motor v6 sin depender de scrapes intermedios.
+
+### 6. Ejecución y CLI (`scripts/ingest_direct_sources.py`)
+```powershell
+# Modo DRY-RUN (por defecto: 0 llamadas de red, 0 escrituras en BD):
+python -m scripts.ingest_direct_sources
+
+# Registro / Seeding idempotente de las fuentes piloto:
+python -m scripts.ingest_direct_sources --seed-sources
+
+# Ejecución real controlada (requiere flag explícito):
+python -m scripts.ingest_direct_sources --confirm-real-calls --limit 5
+
+# Filtrar por fuente o adaptador específico:
+python -m scripts.ingest_direct_sources --source chillin_competition --confirm-real-calls
+```
+
+---
+
+## 34. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1266,8 +1325,10 @@ python -m scripts.ingest_google_news --confirm-real-calls --max-queries 5 --max-
 - [x] **Bloque 8C.1A:** Security Cleanup y Auditoría de Credenciales (rotación QA, reset CLI interactivo, política de longitud). *(Cerrado)*
 - [x] **Bloque 9A:** Google News como Fuente de Descubrimiento (feed RSS público, query planner determinista, límites y dedupe). *(Cerrado)*
 - [x] **Bloque 9A.1:** Hardening de Google News: Semántica, Dedupe y Trazabilidad (author=None, discovery fingerprint, cross-source dedupe, planner DB-driven). *(Cerrado)*
-- [ ] **Bloque 9B:** Scheduler automático en segundo plano.
-- [ ] **Bloque 10:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [x] **Bloque 9A.2:** Verificación Final de Matching de Dominios (jerarquías multinivel, spoofing defense). *(Cerrado)*
+- [x] **Bloque 9B:** Webs y Fuentes de Referencia Directas (adaptadores específicos, registry, extracción limpia de cuerpo, cruce con Google News). *(Cerrado)*
+- [ ] **Bloque 9C:** LinkedIn y fuentes complejas mediante proveedor externo.
+- [ ] **Bloque 9D:** Pipeline continuo de ingesta / scheduler.
 - [ ] **Futuro:** Módulo de análisis documental.
 
 

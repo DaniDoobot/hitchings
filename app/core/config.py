@@ -108,6 +108,13 @@ class Settings(BaseSettings):
     GOOGLE_NEWS_MAX_NEW_ENTRIES_PER_RUN: int = 50
     GOOGLE_NEWS_TIMEOUT_SECONDS: float = 15.0
 
+    # Direct Web Sources (Bloque 9B - Reference Web & Blog Sources)
+    DIRECT_WEB_INGESTION_ENABLED: bool = False
+    DIRECT_WEB_MAX_ITEMS_PER_SOURCE: int = 20
+    DIRECT_WEB_TIMEOUT_SECONDS: float = 15.0
+    DIRECT_WEB_MAX_RESPONSE_BYTES: int = 5_000_000
+    DIRECT_WEB_MAX_CONTENT_CHARS: int = 250_000
+
     @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
     @classmethod
     def assemble_languages(cls, v: Any) -> list[str]:
