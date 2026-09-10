@@ -51,7 +51,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
                 </div>
                 <div>
                   <span className="text-xl font-bold tracking-tight font-serif text-white flex items-center gap-2">
-                    HITCHINGS
+                    HITCHINGS Y GONZALEZ
                     <span className="text-[10px] font-sans font-semibold tracking-wider uppercase px-1.5 py-0.5 rounded bg-legal-gold/20 text-legal-gold border border-legal-gold/40">
                       LEGAL AI
                     </span>
@@ -188,7 +188,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
       <footer className="bg-white border-t border-slate-200 text-slate-500 text-xs py-6 mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-700">HITCHINGS</span>
+            <span className="font-semibold text-slate-700">HITCHINGS Y GONZALEZ</span>
             <span>—</span>
             <span>Plataforma de Inteligencia Jurídica en Derecho de la Competencia</span>
           </div>

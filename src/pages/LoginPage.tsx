@@ -61,7 +61,7 @@ export const LoginPage: React.FC = () => {
         </div>
 
         <h1 className="text-center text-2xl font-bold font-serif text-slate-950 tracking-tight">
-          HITCHINGS
+          HITCHINGS Y GONZALEZ
         </h1>
         <p className="text-center text-xs font-sans text-slate-500 uppercase tracking-wider mt-1">
           Observatorio de Derecho de la Competencia

@@ -24,7 +24,7 @@ describe('Frontend Authentication & Route Protection (Bloque 8C.1)', () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText('HITCHINGS')).toBeInTheDocument();
+    expect(screen.getByText('HITCHINGS Y GONZALEZ')).toBeInTheDocument();
     expect(screen.getByText('Observatorio de Derecho de la Competencia')).toBeInTheDocument();
     expect(screen.getByLabelText(/correo electrónico/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/contraseña/i)).toBeInTheDocument();
