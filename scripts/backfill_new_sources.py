@@ -51,7 +51,9 @@ def print_backfill_report(report: NewSourcesBackfillReport) -> None:
     print(f"  Lookback Window        : {report.lookback_days} days")
     print(f"  Active Matrix          : {report.active_matrix_code or 'None'}")
     print(f"  Max New Entries Guard  : {report.max_new_entries}")
-    print(f"  Max Analysis Guard     : {report.max_analysis_calls}")
+    print(f"  Max Analysis Entries   : {report.max_analysis_entries}")
+    print(f"  Max LLM Calls Guard    : {report.max_analysis_calls}")
+    print(f"  Actual LLM Calls Made  : {report.actual_analysis_calls}")
     print(f"  Duration               : {report.duration_seconds}s")
     print("-" * 95)
 
@@ -81,6 +83,7 @@ def print_backfill_report(report: NewSourcesBackfillReport) -> None:
     print(f"  Potential Analysis     : {report.potential_analysis}")
     print(f"  Analysis Completed     : {report.analysis_completed}")
     print(f"  Analysis Failed        : {report.analysis_failed}")
+    print(f"  Actual LLM Calls Made  : {report.actual_analysis_calls}")
     print("-" * 95)
 
     if report.db_counts_before and report.db_counts_after:
@@ -123,10 +126,16 @@ async def main_async() -> int:
         help="Safety volume circuit breaker: aborts before persistence if new items exceed this limit (default: 30).",
     )
     parser.add_argument(
-        "--max-analysis-calls",
+        "--max-analysis-entries",
         type=int,
         default=15,
-        help="Safety cost circuit breaker: aborts before calling Gemini if eligible items exceed this limit (default: 15).",
+        help="Safety cost circuit breaker: aborts before calling Gemini if eligible entries exceed this limit (default: 15).",
+    )
+    parser.add_argument(
+        "--max-analysis-calls",
+        type=int,
+        default=30,
+        help="Safety cost circuit breaker: aborts if actual LLM provider calls exceed this limit (default: 30).",
     )
 
     args = parser.parse_args()
@@ -140,6 +149,7 @@ async def main_async() -> int:
             confirm_real_calls=args.confirm_real_calls,
             source_filter=args.source,
             max_new_entries=args.max_new_entries,
+            max_analysis_entries=args.max_analysis_entries,
             max_analysis_calls=args.max_analysis_calls,
         )
         print_backfill_report(report)

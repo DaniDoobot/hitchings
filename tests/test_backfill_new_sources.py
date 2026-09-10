@@ -38,10 +38,14 @@ from scripts.preview_source_discovery import (
 )
 
 
-class MockSpyAIProvider(BaseAIProvider):
+from app.providers.ai.mock import MockAIProvider
+
+
+class MockSpyAIProvider(MockAIProvider):
     """Test spy AI provider recording calls with zero external network."""
 
-    def __init__(self) -> None:
+    def __init__(self, force_failure: bool = False) -> None:
+        super().__init__(force_failure=force_failure)
         self.analyze_calls: list[dict[str, Any]] = []
 
     @property
@@ -62,30 +66,12 @@ class MockSpyAIProvider(BaseAIProvider):
             "prompt_code": prompt_version.code,
             "matrix_id": matrix_snapshot.get("matrix_id"),
         })
-
-        if prompt_version.code == "observatory_triage":
-            raw_json = json.dumps({
-                "relevance_score": 85,
-                "relevance_status": "relevant",
-                "reason": "Clear competition antitrust development",
-                "topics": [{"code": "carteles", "is_primary": True, "confidence": 0.9}],
-                "evidence_quote": "substantive antitrust",
-            })
-        else:
-            raw_json = json.dumps({
-                "summary": "Deep antitrust investigation summary.",
-                "key_points": ["Point 1: Key legal precedent."],
-                "evidence_quote": "substantive antitrust",
-            })
-
-        return AIProviderResult(
-            success=True,
-            provider_name=self.provider_name,
-            model="mock-v6",
-            raw_response=raw_json,
-            input_tokens=200,
-            output_tokens=100,
-            estimated_cost_usd=0.0001,
+        return await super().analyze(
+            prompt_version=prompt_version,
+            entry=entry,
+            matrix_snapshot=matrix_snapshot,
+            extra_call_metadata=extra_call_metadata,
+            triage_result=triage_result,
         )
 
 
@@ -708,3 +694,224 @@ async def test_source_failure_isolation(
     assert dma_res.created == 1
     assert dma_res.analyzed == 1
     assert report.entries_created >= 1
+
+
+@pytest.mark.asyncio
+async def test_race_real_discovery_exceeds_volume_guard_aborts_with_zero_entries_persisted(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Race condition test: Preview discovers 20 items (<= 30), but real discovery discovers 31 (> 30).
+    Guarantees that 0 new Entries are persisted in the database.
+    """
+    call_count = 0
+
+    def race_volume_router(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        url_str = str(request.url)
+        if "digital-markets-act.ec.europa.eu/news_en" in url_str:
+            if "page=" in url_str and "page=0" not in url_str:
+                return httpx.Response(200, text="<!DOCTYPE html><html><body><div class='ecl-container'></div></body></html>")
+            call_count += 1
+            # Call 1 (preview): 20 items. Call 2 (real prospective discovery): 31 items.
+            count = 20 if call_count == 1 else 31
+            articles_html = "".join(
+                f"""<article class="ecl-content-item">
+                   <ul class="ecl-content-block__primary-meta">
+                     <li class="ecl-content-block__primary-meta-item">News article</li>
+                     <li class="ecl-content-block__primary-meta-item"><time datetime="2026-08-20T10:00:00Z">20 August 2026</time></li>
+                   </ul>
+                   <h1 class="ecl-content-block__title">
+                     <a href="/dma-article-{i}" class="ecl-link">DMA Investigation {i}</a>
+                   </h1>
+                   <div class="ecl-content-block__description">Formal DMA proceedings {i}.</div>
+                 </article>"""
+                for i in range(count)
+            )
+            return httpx.Response(200, text=f"<!DOCTYPE html><html><body><div class='ecl-container'>{articles_html}</div></body></html>")
+        elif "dma-article-" in url_str:
+            return httpx.Response(200, text="<!DOCTYPE html><html><body><article><p>" + ("DMA substantive content. " * 30) + "</p></article></body></html>")
+        return httpx.Response(200, text="<!DOCTYPE html><html><body></body></html>")
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(race_volume_router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(race_volume_router))
+    spy_ai = MockSpyAIProvider()
+
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=50,
+        max_analysis_calls=50,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    # Must abort due to real discovery volume guard
+    assert report.status == "aborted_max_new_entries"
+    assert "Real discovery volume guard triggered" in (report.guard_triggered or "")
+    assert "discovered 31 new candidates" in (report.guard_triggered or "")
+    assert report.entries_created == 0
+
+    # EXACTLY 0 entries persisted in database
+    dma_source = backfill_sources["dma"]
+    db_entries_count = db_session.query(Entry).filter(Entry.source_id == dma_source.id).count()
+    assert db_entries_count == 0
+
+
+@pytest.mark.asyncio
+async def test_race_real_plan_exceeds_cost_guard_aborts_with_zero_gemini_calls(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Race condition test: Preview discovers 10 eligible items (<= 15), but real discovery yields 16 (> 15).
+    Guarantees that 0 Gemini calls are made.
+    """
+    call_count = 0
+
+    def race_cost_router(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        url_str = str(request.url)
+        if "digital-markets-act.ec.europa.eu/news_en" in url_str:
+            if "page=" in url_str and "page=0" not in url_str:
+                return httpx.Response(200, text="<!DOCTYPE html><html><body><div class='ecl-container'></div></body></html>")
+            call_count += 1
+            # Call 1 (preview): 10 items. Calls >= 2 (real discovery & detail): 16 items.
+            count = 10 if call_count == 1 else 16
+            articles_html = "".join(
+                f"""<article class="ecl-content-item">
+                   <ul class="ecl-content-block__primary-meta">
+                     <li class="ecl-content-block__primary-meta-item">News article</li>
+                     <li class="ecl-content-block__primary-meta-item"><time datetime="2026-08-20T10:00:00Z">20 August 2026</time></li>
+                   </ul>
+                   <h1 class="ecl-content-block__title">
+                     <a href="/dma-article-{i}" class="ecl-link">DMA Investigation {i}</a>
+                   </h1>
+                   <div class="ecl-content-block__description">Formal DMA proceedings {i}.</div>
+                 </article>"""
+                for i in range(count)
+            )
+            return httpx.Response(200, text=f"<!DOCTYPE html><html><body><div class='ecl-container'>{articles_html}</div></body></html>")
+        elif "dma-article-" in url_str:
+            return httpx.Response(200, text="<!DOCTYPE html><html><body><article><p>" + ("DMA substantive antitrust content. " * 30) + "</p></article></body></html>")
+        return httpx.Response(200, text="<!DOCTYPE html><html><body></body></html>")
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(race_cost_router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(race_cost_router))
+    spy_ai = MockSpyAIProvider()
+
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=15,
+        max_analysis_calls=15,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    # Must abort due to cost guard at analysis dispatch
+    assert report.status == "aborted_max_analysis_calls"
+    assert "Real analysis plan cost guard triggered" in (report.guard_triggered or "")
+    assert report.potential_analysis == 16
+    assert report.analysis_completed == 0
+    assert report.actual_analysis_calls == 0
+
+    # EXACTLY 0 Gemini/LLM calls made
+    assert len(spy_ai.analyze_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_retry_analyzes_existing_entry_after_previous_analysis_failure(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Failure recovery test:
+    Run 1: Entry is persisted successfully, but analysis fails.
+    Run 2: Discovery skips duplicate entry, detects existing entry is eligible and unanalyzed,
+           and successfully completes the pending analysis without duplicating entries or analyses.
+    """
+    router = build_mock_transport_router()
+    sync_client = httpx.Client(transport=httpx.MockTransport(router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(router))
+
+    # Run 1: AI Provider fails
+    failing_ai = MockSpyAIProvider(force_failure=True)
+    service1 = NewSourcesBackfillService(ai_provider=failing_ai)
+    report1 = await service1.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=15,
+        max_analysis_calls=30,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    assert report1.status == "completed"
+    assert report1.entries_created == 1
+    assert report1.analysis_failed == 1
+    assert report1.analysis_completed == 0
+
+    dma_source = backfill_sources["dma"]
+    entries_run1 = db_session.query(Entry).filter(Entry.source_id == dma_source.id).all()
+    assert len(entries_run1) == 1
+    entry_id = entries_run1[0].id
+
+    # Verify that in DB, there is no completed analysis yet
+    analyses_run1 = db_session.query(EntryAnalysis).filter(EntryAnalysis.entry_id == entry_id).all()
+    assert all(a.status != "completed" for a in analyses_run1)
+
+    # Run 2: AI Provider succeeds
+    succeeding_ai = MockSpyAIProvider(force_failure=False)
+    service2 = NewSourcesBackfillService(ai_provider=succeeding_ai)
+    report2 = await service2.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=15,
+        max_analysis_calls=30,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    assert report2.status == "completed"
+    # Zero new entries created (duplicate detected)
+    assert report2.entries_created == 0
+    assert report2.duplicates == 1
+    # Exactly 1 analysis completed for the existing entry!
+    assert report2.analysis_completed == 1
+    assert report2.analysis_failed == 0
+
+    # Verification of database integrity:
+    # 1. No duplicate Entry
+    entries_run2 = db_session.query(Entry).filter(Entry.source_id == dma_source.id).all()
+    assert len(entries_run2) == 1
+    assert entries_run2[0].id == entry_id
+
+    # 2. Exactly 1 completed EntryAnalysis for this entry
+    completed_analyses = (
+        db_session.query(EntryAnalysis)
+        .filter(EntryAnalysis.entry_id == entry_id, EntryAnalysis.status == "completed")
+        .all()
+    )
+    assert len(completed_analyses) == 1
+
+    # 3. Linked to the active tracking matrix
+    assert completed_analyses[0].matrix_id == active_matrix.id

@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 import httpx
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -39,7 +39,10 @@ from app.providers.ai.base import BaseAIProvider
 from app.providers.ai.gemini_api import GeminiAPIProvider
 from app.providers.ai.mock import MockAIProvider
 from app.providers.direct_web.registry import DirectWebAdapterRegistry
-from app.services.analysis_pipeline_service import AnalysisPipelineService
+from app.services.analysis_pipeline_service import (
+    AnalysisPipelineService,
+    PipelineBudgetExceededError,
+)
 from app.services.direct_web_ingestion_service import DirectWebIngestionService
 from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
 from app.services.ingestion_service import IngestionService
@@ -51,6 +54,7 @@ from scripts.preview_source_discovery import (
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
+    ReadOnlyDeduplicationInspector,
     SourceDiscoveryPreviewService,
 )
 
@@ -104,7 +108,9 @@ class NewSourcesBackfillReport(BaseModel):
     is_dry_run: bool = True
     lookback_days: int = 90
     max_new_entries: int = 30
-    max_analysis_calls: int = 15
+    max_analysis_entries: int = 15
+    max_analysis_calls: int = 30
+    actual_analysis_calls: int = 0
     active_matrix_code: Optional[str] = None
     sources_processed: int = 0
     entries_created: int = 0
@@ -151,8 +157,90 @@ class NewSourcesBackfillService:
                 self.ai_provider = GeminiAPIProvider(settings=self.settings)
             elif provider_type == "mock":
                 self.ai_provider = MockAIProvider()
-            else:
-                self.ai_provider = MockAIProvider()
+    async def _count_prospective_new_entries(
+        self,
+        target_sources: list[Source],
+        db: Session,
+        lookback_days: int,
+        sync_client: Optional[httpx.Client] = None,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> tuple[int, dict[str, int]]:
+        """Count prospective new entries across target sources before persisting, protecting against race conditions."""
+        cutoff_dt = utc_now() - timedelta(days=lookback_days)
+        total_new = 0
+        per_source_counts: dict[str, int] = {}
+
+        for source in target_sources:
+            new_for_source = 0
+            if DirectWebAdapterRegistry.has_adapter_for_source(source):
+                adapter = DirectWebAdapterRegistry.get_adapter_for_source(source)
+                try:
+                    items = adapter.discover(source, client=sync_client)
+                    for it in items:
+                        if it.published_at and it.published_at < cutoff_dt:
+                            continue
+                        dedup = ReadOnlyDeduplicationInspector.check_geradin_item(
+                            db=db,
+                            source_id=source.id,
+                            url=it.url,
+                            canonical_url=it.url,
+                            title=it.title,
+                            excerpt=it.excerpt,
+                        )
+                        if not dedup.is_duplicate:
+                            new_for_source += 1
+                except Exception as exc:
+                    logger.warning("[Backfill] Prospective check discovery error for %s: %s", source.name, exc)
+
+            elif source.provider == "native":
+                provider = self.ingestion_service.get_provider(source.provider)
+                try:
+                    import inspect
+                    sig = inspect.signature(provider.fetch_entries)
+                    if "client" in sig.parameters:
+                        raw_entries = await provider.fetch_entries(source, client=async_client)
+                    else:
+                        raw_entries = await provider.fetch_entries(source)
+
+                    for raw in raw_entries:
+                        if raw.published_at and raw.published_at < cutoff_dt:
+                            continue
+                        if "digital markets act" in source.name.lower() or "dma" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_dma_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
+                        elif "oecd" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_oecd_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
+                        else:
+                            from app.services.analysis_service import compute_content_hash
+                            c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+                            existing = db.execute(
+                                select(Entry.id).where(
+                                    Entry.source_id == source.id,
+                                    or_(
+                                        Entry.url == raw.url,
+                                        Entry.canonical_url == raw.url,
+                                        Entry.content_hash == c_hash,
+                                    ),
+                                ).limit(1)
+                            ).scalar_one_or_none()
+                            dedup = type("DedupRes", (), {"is_duplicate": existing is not None})()
+
+                        if not dedup.is_duplicate:
+                            new_for_source += 1
+                except Exception as exc:
+                    logger.warning("[Backfill] Prospective check fetch error for %s: %s", source.name, exc)
+
+            per_source_counts[source.name] = new_for_source
+            total_new += new_for_source
+
+        return total_new, per_source_counts
 
     async def execute_backfill(
         self,
@@ -161,16 +249,19 @@ class NewSourcesBackfillService:
         confirm_real_calls: bool = False,
         source_filter: Optional[str] = None,
         max_new_entries: int = 30,
-        max_analysis_calls: int = 15,
+        max_analysis_entries: int = 15,
+        max_analysis_calls: int = 30,
         sync_client: Optional[httpx.Client] = None,
         async_client: Optional[httpx.AsyncClient] = None,
     ) -> NewSourcesBackfillReport:
         """Execute or dry-run the backfill of new sources with circuit-breaker guards."""
         start_time = utc_now()
+        effective_max_analysis_entries = min(max_analysis_entries, max_analysis_calls)
         report = NewSourcesBackfillReport(
             is_dry_run=not confirm_real_calls,
             lookback_days=lookback_days,
             max_new_entries=max_new_entries,
+            max_analysis_entries=max_analysis_entries,
             max_analysis_calls=max_analysis_calls,
             started_at=start_time,
         )
@@ -206,12 +297,13 @@ class NewSourcesBackfillService:
         # 4. DRY-RUN MODE: Zero HTTP calls, zero DB writes, zero Gemini calls
         if not confirm_real_calls:
             logger.info(
-                "[Backfill DRY RUN] Configured sources: %s, matrix=%s, lookback=%dd, max_new=%d, max_calls=%d. "
+                "[Backfill DRY RUN] Configured sources: %s, matrix=%s, lookback=%dd, max_new=%d, max_analysis_entries=%d, max_calls=%d. "
                 "0 HTTP calls, 0 DB writes, 0 Gemini calls executed.",
                 [s.name for s in target_sources],
                 active_matrix.code,
                 lookback_days,
                 max_new_entries,
+                max_analysis_entries,
                 max_analysis_calls,
             )
             for s in target_sources:
@@ -250,10 +342,10 @@ class NewSourcesBackfillService:
             total_new_candidates,
             max_new_entries,
             potential_analyses,
-            max_analysis_calls,
+            effective_max_analysis_entries,
         )
 
-        # GUARD 9: Volume Guard — Abort BEFORE persistence if new entries exceed limit
+        # GUARD 9: Volume Guard — Abort BEFORE persistence if preview new entries exceed limit
         if total_new_candidates > max_new_entries:
             msg = (
                 f"Volume guard triggered: discovered {total_new_candidates} new candidates, "
@@ -267,14 +359,35 @@ class NewSourcesBackfillService:
             report.db_counts_after = query_db_inventory_counts(db)
             return report
 
-        # GUARD 8: Cost Guard — Abort BEFORE calling Gemini if eligible analyses exceed limit
-        if potential_analyses > max_analysis_calls:
+        # GUARD 8: Cost Guard — Abort BEFORE calling Gemini if preview eligible analyses exceed limit
+        if potential_analyses > effective_max_analysis_entries:
             msg = (
                 f"Cost guard triggered: discovered {potential_analyses} eligible analyses, "
-                f"which exceeds --max-analysis-calls limit of {max_analysis_calls}. Aborting before calling Gemini!"
+                f"which exceeds --max-analysis-calls limit of {effective_max_analysis_entries}. Aborting before calling Gemini!"
             )
             logger.warning("[Backfill GUARD] %s", msg)
             report.status = "aborted_max_analysis_calls"
+            report.guard_triggered = msg
+            report.finished_at = utc_now()
+            report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+            report.db_counts_after = query_db_inventory_counts(db)
+            return report
+
+        # Re-check real discovery prospective counts before persisting to prevent race conditions
+        real_new_candidates, _ = await self._count_prospective_new_entries(
+            target_sources=target_sources,
+            db=db,
+            lookback_days=lookback_days,
+            sync_client=sync_client,
+            async_client=async_client,
+        )
+        if real_new_candidates > max_new_entries:
+            msg = (
+                f"Real discovery volume guard triggered: discovered {real_new_candidates} new candidates, "
+                f"which exceeds --max-new-entries limit of {max_new_entries}. Aborting before persistence!"
+            )
+            logger.warning("[Backfill GUARD] %s", msg)
+            report.status = "aborted_max_new_entries"
             report.guard_triggered = msg
             report.finished_at = utc_now()
             report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
@@ -389,10 +502,32 @@ class NewSourcesBackfillService:
             report.duplicates += source_res.duplicates
 
         # 7. Step 5C — Analysis Planning & AI Execution
+        cutoff_dt = start_time - timedelta(days=lookback_days)
+        target_source_ids = [s.id for s in target_sources]
+
+        candidate_entries_dict: dict[uuid.UUID, Entry] = {}
+        for e in (
+            db.query(Entry)
+            .filter(
+                Entry.source_id.in_(target_source_ids),
+                or_(
+                    Entry.published_at >= cutoff_dt,
+                    Entry.captured_at >= cutoff_dt,
+                ),
+            )
+            .all()
+        ):
+            candidate_entries_dict[e.id] = e
+
+        for e in all_created_entries:
+            candidate_entries_dict[e.id] = e
+
+        candidate_entries = list(candidate_entries_dict.values())
+
         planner = IncrementalAnalysisPlanner(db)
         eligible_entries: list[Entry] = []
 
-        for entry in all_created_entries:
+        for entry in candidate_entries:
             cand = planner.evaluate_entry(entry)
             if cand.reason == "eligible":
                 eligible_entries.append(entry)
@@ -404,11 +539,11 @@ class NewSourcesBackfillService:
 
         report.potential_analysis = len(eligible_entries)
 
-        # Secondary runtime cost guard check against actually persisted eligible entries
-        if len(eligible_entries) > max_analysis_calls:
+        # Real plan cost guard check immediately before calling Gemini
+        if len(eligible_entries) > effective_max_analysis_entries:
             msg = (
-                f"Cost guard triggered at analysis dispatch: {len(eligible_entries)} eligible entries "
-                f"exceeds limit {max_analysis_calls}. Aborting before calling Gemini!"
+                f"Real analysis plan cost guard triggered: {len(eligible_entries)} eligible entries "
+                f"exceeds limit of {effective_max_analysis_entries}. Aborting before calling Gemini!"
             )
             logger.warning("[Backfill GUARD] %s", msg)
             report.status = "aborted_max_analysis_calls"
@@ -457,6 +592,15 @@ class NewSourcesBackfillService:
                 return report
 
             pipeline = AnalysisPipelineService(provider=self.ai_provider)
+            actual_calls_count = 0
+
+            def budget_stage_hook(stage_name: str, entry: Entry, prompt: Any, analysis: Any):
+                nonlocal actual_calls_count
+                if actual_calls_count >= max_analysis_calls:
+                    raise PipelineBudgetExceededError(
+                        f"Actual provider calls reached limit of {max_analysis_calls}"
+                    )
+                actual_calls_count += 1
 
             for entry in eligible_entries:
                 matching_s_res = next(
@@ -464,7 +608,7 @@ class NewSourcesBackfillService:
                     None,
                 )
                 try:
-                    await pipeline.run_pipeline(
+                    analysis = await pipeline.run_pipeline(
                         entry_id=entry.id,
                         matrix_id=active_matrix.id,
                         triage_prompt_id=triage_prompt.id,
@@ -476,10 +620,22 @@ class NewSourcesBackfillService:
                             "run_type": "new_sources_backfill",
                             "orchestrator": "NewSourcesBackfillService",
                         },
+                        before_stage_hook=budget_stage_hook,
                     )
-                    report.analysis_completed += 1
-                    if matching_s_res:
-                        matching_s_res.analyzed += 1
+                    if analysis.status == "completed":
+                        report.analysis_completed += 1
+                        if matching_s_res:
+                            matching_s_res.analyzed += 1
+                    else:
+                        logger.warning(
+                            "[Backfill] Analysis returned non-completed status '%s' (reason=%s) for entry %s",
+                            analysis.status,
+                            analysis.reason,
+                            entry.id,
+                        )
+                        report.analysis_failed += 1
+                        if matching_s_res:
+                            matching_s_res.analysis_failed += 1
 
                 except Exception as a_exc:
                     logger.exception(
@@ -492,6 +648,8 @@ class NewSourcesBackfillService:
                     if matching_s_res:
                         matching_s_res.analysis_failed += 1
                         matching_s_res.errors.append(f"Analysis error: {a_exc}")
+
+            report.actual_analysis_calls = actual_calls_count
 
         # 8. Step 5D — Finalize Report
         report.finished_at = utc_now()
