@@ -17,7 +17,7 @@ from typing import Any, Iterable, Optional, Sequence, Union
 from sqlalchemy.orm import Session
 
 from app.models.analysis import EntryAnalysisTopic
-from app.models.tracking import TrackingTopic
+from app.models.tracking import TrackingMatrix, TrackingTopic
 
 
 @dataclass(frozen=True)
@@ -85,7 +85,14 @@ class TopicHierarchy:
 
 
 def build_topic_hierarchy(db: Session, matrix_id: Optional[uuid.UUID] = None) -> TopicHierarchy:
-    """Load active TrackingTopics from database and construct TopicHierarchy."""
+    """Load TrackingTopics from database and construct TopicHierarchy.
+    
+    If matrix_id is None, defaults to the currently active TrackingMatrix.
+    """
+    if matrix_id is None:
+        active_matrix = db.query(TrackingMatrix).filter(TrackingMatrix.status == "active").first()
+        if active_matrix is not None:
+            matrix_id = active_matrix.id
     query = db.query(TrackingTopic)
     if matrix_id is not None:
         query = query.filter(TrackingTopic.matrix_id == matrix_id)
@@ -153,16 +160,22 @@ def canonicalize_analysis_topics(
             topic_obj = hierarchy.by_id[topic_id]
 
         if topic_obj and topic_id:
+            active_topic = hierarchy.by_code.get(topic_obj.code)
+            effective_id = active_topic.id if active_topic else topic_id
+            effective_name = active_topic.name if active_topic else topic_obj.name
+            effective_parent_id = active_topic.parent_id if active_topic else topic_obj.parent_id
+            effective_priority = active_topic.priority if active_topic else getattr(topic_obj, "priority", 0)
+
             raw_items.append(
                 CanonicalTopicItem(
-                    topic_id=topic_id,
+                    topic_id=effective_id,
                     topic_code=topic_obj.code,
-                    topic_name=topic_obj.name,
+                    topic_name=effective_name,
                     confidence=confidence,
                     is_primary=is_primary,
                     raw_is_primary=is_primary,
-                    priority=getattr(topic_obj, "priority", 0),
-                    parent_id=topic_obj.parent_id,
+                    priority=effective_priority,
+                    parent_id=effective_parent_id,
                 )
             )
 

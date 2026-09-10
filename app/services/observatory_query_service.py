@@ -684,8 +684,13 @@ def get_dashboard(db: Session) -> ObservatoryDashboard:
 
     top_topics = sorted(
         [
-            ObservatoryTopicCount(code=code, name=info[0], count=info[1])
+            ObservatoryTopicCount(
+                code=code,
+                name=hierarchy.by_code[code].name if code in hierarchy.by_code else info[0],
+                count=info[1],
+            )
             for code, info in topic_counter.items()
+            if (code not in hierarchy.by_code or hierarchy.by_code[code].active)
         ],
         key=lambda x: x.count,
         reverse=True,

@@ -10,6 +10,7 @@ import {
   Layers,
   Building2,
   Calendar,
+  Sliders,
 } from 'lucide-react';
 import { observatoryApi } from '../services/observatoryApi';
 import { ObservatoryDashboard } from '../types/observatory';
@@ -17,6 +18,7 @@ import { RelevanceBadge } from '../components/common/RelevanceBadge';
 import { TopicBadge } from '../components/common/TopicBadge';
 import { KPISkeleton, CardSkeleton } from '../components/common/LoadingSkeleton';
 import { ErrorState } from '../components/common/ErrorState';
+import { TaxonomyManagementModal } from '../components/taxonomy/TaxonomyManagementModal';
 
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
@@ -24,6 +26,7 @@ export const DashboardPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isTaxonomyModalOpen, setIsTaxonomyModalOpen] = useState(false);
 
   const loadData = async () => {
     setLoading(true);
@@ -224,12 +227,22 @@ export const DashboardPage: React.FC = () => {
               <Layers className="w-4 h-4 text-navy-700" />
               Áreas y Temas con Mayor Actividad
             </h3>
-            <Link
-              to="/observatorio"
-              className="text-xs text-navy-700 hover:text-navy-900 font-semibold flex items-center gap-1"
-            >
-              Ver todos <ArrowRight className="w-3.5 h-3.5" />
-            </Link>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => setIsTaxonomyModalOpen(true)}
+                className="text-xs text-navy-800 hover:text-navy-950 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 transition-colors border border-slate-200 shadow-xs"
+              >
+                <Sliders className="w-3.5 h-3.5 text-legal-gold" />
+                <span>Gestionar áreas y temas</span>
+              </button>
+              <Link
+                to="/observatorio"
+                className="text-xs text-navy-700 hover:text-navy-900 font-semibold flex items-center gap-1"
+              >
+                Ver todos <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
           </div>
           <p className="text-xs text-slate-500 mb-5">
             Clasificación canónica no redundante de los asuntos con análisis jurídico vigente.
@@ -402,6 +415,12 @@ export const DashboardPage: React.FC = () => {
           </div>
         )}
       </div>
+
+      <TaxonomyManagementModal
+        isOpen={isTaxonomyModalOpen}
+        onClose={() => setIsTaxonomyModalOpen(false)}
+        onTaxonomyChanged={loadData}
+      />
     </div>
   );
 };
