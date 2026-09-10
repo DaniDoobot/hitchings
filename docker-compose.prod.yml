@@ -20,6 +20,13 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     restart: unless-stopped
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
     expose:
       - "8000"
     networks:
