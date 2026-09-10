@@ -152,4 +152,63 @@ describe('Editable Taxonomy Management (Bloque 11B)', () => {
     expect(screen.getByText('Acciones de daños')).toBeInTheDocument();
     expect(screen.queryByText('Cárteles y acuerdos anticompetitivos')).not.toBeInTheDocument();
   });
+
+  it('does NOT render technical codes in the DOM and cleans legacy description prefixes', async () => {
+    const dataWithLegacyPrefixes: TaxonomyMatrixResponse = {
+      matrix_id: 'mock-matrix-v01',
+      code: 'HITCHINGS-v0.1',
+      name: 'Matriz de Seguimiento HITCHINGS',
+      status: 'active',
+      updated_at: '2026-09-10T12:00:00Z',
+      areas: [
+        {
+          id: 'area-1',
+          code: 'private_enforcement',
+          name: 'Aplicación Privada',
+          description: 'Área principal: Litigación de daños y acciones colectivas.',
+          active: true,
+          priority: 1,
+          children: [
+            {
+              id: 'topic-101',
+              code: 'litigation_funding',
+              name: 'Fondos de litigación',
+              description: 'Subtema provisional: Acuerdos con fondos terceros y costes.',
+              parent_id: 'area-1',
+              parent_code: 'private_enforcement',
+              active: true,
+              priority: 1,
+            },
+          ],
+        },
+      ],
+    };
+
+    vi.spyOn(taxonomyApi, 'getTaxonomy').mockResolvedValue(dataWithLegacyPrefixes);
+
+    render(
+      <TaxonomyManagementModal isOpen={true} onClose={() => {}} />
+    );
+
+    await screen.findByText('Aplicación Privada');
+
+    // 1. Technical codes should NOT be rendered in the document
+    expect(screen.queryByText('private_enforcement')).not.toBeInTheDocument();
+    expect(screen.queryByText('litigation_funding')).not.toBeInTheDocument();
+
+    // 2. Names should be rendered
+    expect(screen.getByText('Aplicación Privada')).toBeInTheDocument();
+    expect(screen.getByText('Fondos de litigación')).toBeInTheDocument();
+
+    // 3. Descriptions should have internal prefixes removed
+    expect(
+      screen.getByText('Litigación de daños y acciones colectivas.')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Acuerdos con fondos terceros y costes.')
+    ).toBeInTheDocument();
+
+    expect(screen.queryByText(/Área principal:/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Subtema provisional:/i)).not.toBeInTheDocument();
+  });
 });

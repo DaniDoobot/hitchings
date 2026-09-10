@@ -29,6 +29,17 @@ interface TaxonomyManagementModalProps {
   onTaxonomyChanged?: () => void;
 }
 
+/**
+ * Strips internal legacy prefixes from area/topic descriptions for client presentation.
+ */
+export const cleanDescription = (desc?: string | null): string => {
+  if (!desc) return '';
+  return desc
+    .replace(/^Subtema provisional:\s*/i, '')
+    .replace(/^[AÁ]rea principal:\s*/i, '')
+    .trim();
+};
+
 export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = ({
   isOpen,
   onClose,
@@ -407,9 +418,6 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-bold text-sm text-slate-900">{area.name}</span>
-                          <span className="text-[11px] font-mono text-slate-400 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-200">
-                            {area.code}
-                          </span>
                           <span
                             className={`text-[10px] uppercase font-semibold px-2 py-0.5 rounded-full ${
                               area.active
@@ -420,8 +428,8 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                             {area.active ? 'Activo' : 'Archivado'}
                           </span>
                         </div>
-                        {area.description && (
-                          <p className="text-xs text-slate-500 mt-0.5 truncate">{area.description}</p>
+                        {cleanDescription(area.description) && (
+                          <p className="text-xs text-slate-500 mt-0.5 truncate">{cleanDescription(area.description)}</p>
                         )}
                       </div>
                     </div>
@@ -451,7 +459,7 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                             mode: 'edit',
                             areaId: area.id,
                             name: area.name,
-                            description: area.description || '',
+                            description: cleanDescription(area.description),
                           })
                         }
                         disabled={actionLoading}
@@ -495,9 +503,6 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                               <div className="min-w-0">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-xs font-semibold text-slate-800">{topic.name}</span>
-                                  <span className="text-[10px] font-mono text-slate-400 bg-slate-50 px-1 py-0.2 rounded border border-slate-200">
-                                    {topic.code}
-                                  </span>
                                   <span
                                     className={`text-[9px] uppercase font-semibold px-1.5 py-0.2 rounded ${
                                       topic.active
@@ -508,8 +513,8 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                                     {topic.active ? 'Activo' : 'Archivado'}
                                   </span>
                                 </div>
-                                {topic.description && (
-                                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">{topic.description}</p>
+                                {cleanDescription(topic.description) && (
+                                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">{cleanDescription(topic.description)}</p>
                                 )}
                               </div>
                             </div>
@@ -522,7 +527,7 @@ export const TaxonomyManagementModal: React.FC<TaxonomyManagementModalProps> = (
                                     topicId: topic.id,
                                     areaId: area.id,
                                     name: topic.name,
-                                    description: topic.description || '',
+                                    description: cleanDescription(topic.description),
                                   })
                                 }
                                 disabled={actionLoading}
