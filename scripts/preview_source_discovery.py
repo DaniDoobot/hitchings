@@ -22,14 +22,15 @@ import asyncio
 import logging
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
-from sqlalchemy import event, or_, select
+from sqlalchemy import event, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -70,6 +71,72 @@ TARGET_SOURCE_NAMES = [
     DMA_SOURCE_NAME,
     OECD_SOURCE_NAME,
 ]
+
+
+# ==============================================================================
+# READ-ONLY SESSION HARDENING (POSTGRESQL + ORM + RAW SQL)
+# ==============================================================================
+
+def configure_read_only_session(db: Session) -> list[Callable[[], None]]:
+    """Enforce fail-closed read-only protection at transaction, ORM, and cursor levels.
+
+    Guarantees:
+    1. PostgreSQL: Issues 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'
+       as the very first statement of the transaction before any SELECT, guaranteeing
+       an immutable point-in-time snapshot and engine-level rejection of any write attempt.
+    2. Raw SQL Blocker: Intercepts before_cursor_execute to reject direct mutating SQL
+       statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE) across all dialects.
+    3. ORM Flush Blocker: Intercepts before_flush to fail-closed if session.new,
+       session.dirty, or session.deleted are non-empty.
+    """
+    cleanups: list[Callable[[], None]] = []
+    bind = db.get_bind()
+    dialect_name = getattr(bind.dialect, "name", "") if bind else ""
+
+    # 1. PostgreSQL transaction-level isolation & read-only enforcement
+    if dialect_name == "postgresql":
+        logger.info("Enforcing PostgreSQL transaction: REPEATABLE READ, READ ONLY")
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+
+    # 2. Raw SQL cursor execution listener (blocks direct mutating SQL across all dialects)
+    def block_mutating_sql(conn, cursor, statement, parameters, context, executemany):
+        cleaned = statement.strip().upper()
+        if any(cleaned.startswith(kw) for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE")):
+            raise RuntimeError(f"READ-ONLY VIOLATION: Mutating SQL execution blocked: {statement[:80]}")
+        return statement, parameters
+
+    if bind is not None:
+        event.listen(bind, "before_cursor_execute", block_mutating_sql)
+        cleanups.append(lambda: event.remove(bind, "before_cursor_execute", block_mutating_sql) if event.contains(bind, "before_cursor_execute", block_mutating_sql) else None)
+
+    # 3. ORM flush listener
+    def fail_on_any_flush(session, flush_context, instances):
+        if session.new or session.dirty or session.deleted:
+            raise RuntimeError(
+                f"READ-ONLY VIOLATION: Preview attempted to modify database! "
+                f"new={len(session.new)}, dirty={len(session.dirty)}, deleted={len(session.deleted)}"
+            )
+
+    event.listen(db, "before_flush", fail_on_any_flush)
+    cleanups.append(lambda: event.remove(db, "before_flush", fail_on_any_flush) if event.contains(db, "before_flush", fail_on_any_flush) else None)
+
+    return cleanups
+
+
+@contextmanager
+def read_only_session_scope(db: Session):
+    """Context manager wrapping a Session with guaranteed read-only protections and cleanup."""
+    cleanups = configure_read_only_session(db)
+    try:
+        yield db
+    finally:
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception as e:
+                logger.debug("Error cleaning up read-only listener: %s", e)
+        db.rollback()
+        db.close()
 
 
 # ==============================================================================
@@ -1022,57 +1089,44 @@ def main() -> int:
     args = parser.parse_args()
 
     db = SessionLocal()
+    try:
+        with read_only_session_scope(db) as ro_db:
+            # Pre-execution DB counts baseline (inside REPEATABLE READ snapshot)
+            counts_before = {
+                "entries": ro_db.query(Entry).count(),
+                "entry_analyses": ro_db.query(EntryAnalysis).count(),
+                "analysis_calls": ro_db.query(AnalysisCall).count(),
+                "ingestion_runs": ro_db.query(IngestionRun).count(),
+                "sources": ro_db.query(Source).count(),
+            }
 
-    # Absolute Fail-Closed Read-Only Protection Listener
-    @event.listens_for(db, "before_flush")
-    def fail_on_any_flush(session, flush_context, instances):
-        if session.new or session.dirty or session.deleted:
-            raise RuntimeError(
-                f"READ-ONLY VIOLATION: Preview attempted to modify database! "
-                f"new={len(session.new)}, dirty={len(session.dirty)}, deleted={len(session.deleted)}"
+            service = SourceDiscoveryPreviewService(db=ro_db)
+            report = service.run_preview(
+                lookback_days=args.lookback_days,
+                source_filter=args.source,
             )
 
-    try:
-        # Pre-execution DB counts baseline
-        counts_before = {
-            "entries": db.query(Entry).count(),
-            "entry_analyses": db.query(EntryAnalysis).count(),
-            "analysis_calls": db.query(AnalysisCall).count(),
-            "ingestion_runs": db.query(IngestionRun).count(),
-            "sources": db.query(Source).count(),
-        }
+            print_preview_report(report)
 
-        service = SourceDiscoveryPreviewService(db=db)
-        report = service.run_preview(
-            lookback_days=args.lookback_days,
-            source_filter=args.source,
-        )
+            # Post-execution DB counts verification (inside the same consistent snapshot)
+            counts_after = {
+                "entries": ro_db.query(Entry).count(),
+                "entry_analyses": ro_db.query(EntryAnalysis).count(),
+                "analysis_calls": ro_db.query(AnalysisCall).count(),
+                "ingestion_runs": ro_db.query(IngestionRun).count(),
+                "sources": ro_db.query(Source).count(),
+            }
 
-        print_preview_report(report)
-
-        # Post-execution DB counts verification
-        counts_after = {
-            "entries": db.query(Entry).count(),
-            "entry_analyses": db.query(EntryAnalysis).count(),
-            "analysis_calls": db.query(AnalysisCall).count(),
-            "ingestion_runs": db.query(IngestionRun).count(),
-            "sources": db.query(Source).count(),
-        }
-
-        assert counts_before == counts_after, (
-            f"DATABASE MUTATION DETECTED! Before: {counts_before}, After: {counts_after}"
-        )
-        print("  [SEGURIDAD] Verificación read-only: 0 escrituras en DB confirmadas (invariantes idénticos).")
-        return 0
+            assert counts_before == counts_after, (
+                f"DATABASE MUTATION DETECTED! Before: {counts_before}, After: {counts_after}"
+            )
+            print("  [SEGURIDAD] Verificación read-only: 0 escrituras en DB confirmadas (invariantes idénticos).")
+            return 0
 
     except Exception as exc:
         logger.error("Error executing preview: %s", exc, exc_info=True)
         print(f"\nERROR: Falló el preview de discovery: {exc}")
         return 1
-
-    finally:
-        db.rollback()
-        db.close()
 
 
 if __name__ == "__main__":

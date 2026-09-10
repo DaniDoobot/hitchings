@@ -625,7 +625,12 @@ def test_preview_geradin_google_news_cross_match(db_session: Session):
 
 
 def test_preview_sufficiency_and_analysis_eligibility_classification(db_session: Session):
-    """Verify sufficiency levels (FULL, PARTIAL, INSUFFICIENT) and analysis eligibility rules."""
+    """Verify source-aware sufficiency assessment and incremental analysis eligibility rules.
+
+    Classification is delegated strictly to SourceSufficiencyService.assess(entry), which applies
+    domain-specific rules (CAT judgments/summaries, CURIA documents, EC press releases, etc.)
+    and generic fallbacks. The preview defines zero custom thresholds.
+    """
     from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
     from app.services.source_sufficiency_service import SourceSufficiencyService
 
@@ -633,7 +638,7 @@ def test_preview_sufficiency_and_analysis_eligibility_classification(db_session:
     db_session.add(source)
     db_session.commit()
 
-    # 1. Full content (>= 1500 chars) -> FULL, eligible
+    # 1. SourceSufficiencyLevel.FULL -> eligible for analysis
     entry_full = Entry(
         id=uuid.uuid4(),
         source_id=source.id,
@@ -647,20 +652,20 @@ def test_preview_sufficiency_and_analysis_eligibility_classification(db_session:
     cand_full = planner.evaluate_entry(entry_full)
     assert cand_full.reason == "eligible"
 
-    # 2. Partial content (300-1499 chars) -> PARTIAL, NOT eligible
+    # 2. SourceSufficiencyLevel.PARTIAL -> NOT eligible
     entry_partial = Entry(
         id=uuid.uuid4(),
         source_id=source.id,
         source=source,
         title="Partial Article",
-        content="Short update on court proceedings. " * 15,  # ~500 chars
+        content="Short update on court proceedings. " * 15,
     )
     suff_partial = SourceSufficiencyService.assess(entry_partial)
     assert suff_partial.level.value == "partial"
     cand_partial = planner.evaluate_entry(entry_partial)
     assert cand_partial.reason == "partial"
 
-    # 3. Insufficient content (< 300 chars) -> INSUFFICIENT, NOT eligible
+    # 3. SourceSufficiencyLevel.INSUFFICIENT -> NOT eligible
     entry_insufficient = Entry(
         id=uuid.uuid4(),
         source_id=source.id,
@@ -675,21 +680,84 @@ def test_preview_sufficiency_and_analysis_eligibility_classification(db_session:
 
 
 def test_preview_fail_closed_on_mutation_attempt(db_session: Session):
-    """Verify fail-closed listener blocks any database flush containing new/dirty/deleted entities."""
-    from sqlalchemy import event
+    """Verify fail-closed ORM flush listener blocks any database flush containing new/dirty/deleted entities."""
+    from scripts.preview_source_discovery import configure_read_only_session
 
-    # Attach the same listener used in main()
-    @event.listens_for(db_session, "before_flush")
-    def fail_on_any_flush(session, flush_context, instances):
-        if session.new or session.dirty or session.deleted:
-            raise RuntimeError("READ-ONLY VIOLATION")
+    cleanups = configure_read_only_session(db_session)
+    try:
+        new_entry = Entry(id=uuid.uuid4(), title="Unauthorized ORM write")
+        db_session.add(new_entry)
 
-    # Attempt to add an entry and flush
-    new_entry = Entry(id=uuid.uuid4(), title="Unauthorized write")
-    db_session.add(new_entry)
+        with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION: Preview attempted to modify database"):
+            db_session.flush()
+    finally:
+        for cb in cleanups:
+            cb()
+        db_session.rollback()
 
-    with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION"):
-        db_session.flush()
 
-    db_session.rollback()
+def test_preview_fail_closed_on_raw_sql_mutation(db_session: Session):
+    """Verify raw SQL mutation blocker intercepts and rejects direct INSERT/UPDATE/DELETE/DROP statements."""
+    from sqlalchemy import text
+    from scripts.preview_source_discovery import configure_read_only_session
+
+    cleanups = configure_read_only_session(db_session)
+    try:
+        # 1. SELECT query is allowed
+        res = db_session.execute(text("SELECT 1")).scalar()
+        assert res == 1
+
+        # 2. Direct UPDATE is blocked
+        with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION: Mutating SQL execution blocked"):
+            db_session.execute(text("UPDATE entries SET title='injected' WHERE 1=1"))
+
+        # 3. Direct INSERT is blocked
+        with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION: Mutating SQL execution blocked"):
+            db_session.execute(text("INSERT INTO entries (id, title) VALUES ('foo', 'bar')"))
+
+        # 4. Direct DELETE is blocked
+        with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION: Mutating SQL execution blocked"):
+            db_session.execute(text("DELETE FROM entries WHERE 1=1"))
+
+        # 5. Direct DROP is blocked
+        with pytest.raises(RuntimeError, match="READ-ONLY VIOLATION: Mutating SQL execution blocked"):
+            db_session.execute(text("DROP TABLE entries"))
+    finally:
+        for cb in cleanups:
+            cb()
+        db_session.rollback()
+
+
+def test_preview_postgresql_isolation_and_read_only_configured():
+    """Verify that for PostgreSQL dialect, SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY is issued first."""
+    from unittest.mock import patch
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from scripts.preview_source_discovery import configure_read_only_session
+
+    engine = create_engine("sqlite:///:memory:")
+    engine.dialect.name = "postgresql"
+
+    TestSession = sessionmaker(bind=engine)
+    db = TestSession()
+
+    executed_statements = []
+    orig_execute = db.execute
+
+    def spy_execute(stmt, *args, **kwargs):
+        stmt_str = str(stmt)
+        executed_statements.append(stmt_str)
+        if "SET TRANSACTION" in stmt_str:
+            return None
+        return orig_execute(stmt, *args, **kwargs)
+
+    with patch.object(db, "execute", side_effect=spy_execute):
+        cleanups = configure_read_only_session(db)
+        try:
+            assert len(executed_statements) == 1
+            assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY" in executed_statements[0]
+        finally:
+            for cb in cleanups:
+                cb()
+            db.close()
 
