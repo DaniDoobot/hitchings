@@ -69,6 +69,18 @@ PILOT_SOURCES_CONFIG = [
         },
         "tracked_entity_name": None,
     },
+    {
+        "name": "Geradin Partners - EU Competition & Litigation",
+        "type": SourceType.BLOG,
+        "provider": "native",
+        "category": "expert_analysis",
+        "url": "https://www.geradinpartners.com/news/",
+        "config": {
+            "adapter": "geradin_partners",
+            "listing_url": "https://www.geradinpartners.com/news/",
+        },
+        "tracked_entity_name": "Geradin Partners Monthly EU litigation briefing",
+    },
 ]
 
 

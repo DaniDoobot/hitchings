@@ -253,8 +253,8 @@ def _safe_parse_datetime(dt_str: str | None) -> Optional[datetime]:
     except Exception:
         pass
 
-    # 3. Try standard date strings
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+    # 3. Try standard date strings (both 4-digit and 2-digit year formats)
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d", "%d/%m/%y", "%m/%d/%y"):
         try:
             dt = datetime.strptime(raw[:10], fmt).replace(tzinfo=timezone.utc)
             return dt

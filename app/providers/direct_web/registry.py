@@ -6,6 +6,7 @@ from typing import Optional
 from app.models.source import Source
 from app.providers.direct_web.adapters.almacen_derecho import AlmacenDerechoAdapter
 from app.providers.direct_web.adapters.chillin_competition import ChillinCompetitionAdapter
+from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAdapter
 from app.providers.direct_web.adapters.kluwer_competition import KluwerCompetitionAdapter
 from app.providers.direct_web.base import BaseWebSourceAdapter
 
@@ -22,6 +23,7 @@ class DirectWebAdapterRegistry:
         "kluwer_competition": KluwerCompetitionAdapter(),
         "chillin_competition": ChillinCompetitionAdapter(),
         "almacen_derecho": AlmacenDerechoAdapter(),
+        "geradin_partners": GeradinPartnersAdapter(),
     }
 
     @classmethod
