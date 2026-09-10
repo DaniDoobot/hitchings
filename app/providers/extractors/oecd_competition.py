@@ -65,6 +65,7 @@ class OECDCompetitionExtractor:
         source: Source,
         lookback_days: Optional[int] = None,
         limit: Optional[int] = None,
+        now: Optional[datetime] = None,
     ) -> list[RawEntryData]:
         """Extract OECD competition publications matching series and lookback configuration."""
         config = source.config or {}
@@ -85,6 +86,7 @@ class OECDCompetitionExtractor:
             issn=issn,
             limit=effective_limit,
             lookback_days=effective_lookback,
+            now=now,
         )
         logger.info("Found %d candidate OECD publications from Crossref", len(records))
 
@@ -108,6 +110,7 @@ class OECDCompetitionExtractor:
         issn: str,
         limit: int,
         lookback_days: Optional[int] = None,
+        now: Optional[datetime] = None,
     ) -> list[dict]:
         """Fetch works from Crossref API ordered by publication date descending."""
         # Query slightly more items to account for potential date filtering
@@ -136,15 +139,35 @@ class OECDCompetitionExtractor:
             logger.error("Failed to parse Crossref JSON response: %s", exc)
             raise ProviderError(f"Malformed JSON from Crossref API: {exc}") from exc
 
-        cutoff_dt: Optional[datetime] = None
-        if lookback_days is not None and lookback_days > 0:
-            cutoff_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        reference_dt = now or datetime.now(timezone.utc)
+        current_date = reference_dt.date()
+
+        cutoff_date = (
+            (reference_dt - timedelta(days=lookback_days)).date()
+            if lookback_days is not None and lookback_days > 0
+            else None
+        )
 
         candidate_records: list[dict] = []
         for it in items:
             pub_date = self.parse_crossref_date(it)
-            if cutoff_dt and pub_date and pub_date < cutoff_dt:
-                # Items are ordered desc; once past cutoff, stop
+            if not pub_date:
+                continue
+
+            pub_calendar_date = pub_date.date()
+
+            # 1. Future date guard: publications dated after today must NOT be returned yet
+            if pub_calendar_date > current_date:
+                logger.debug(
+                    "Skipping future-dated OECD publication '%s' (published_at=%s > today=%s)",
+                    it.get("DOI"),
+                    pub_calendar_date,
+                    current_date,
+                )
+                continue
+
+            # 2. Lookback filter: exclude publications older than cutoff_date
+            if cutoff_date and pub_calendar_date < cutoff_date:
                 continue
 
             candidate_records.append(it)
@@ -208,12 +231,14 @@ class OECDCompetitionExtractor:
         except Exception as exc:
             logger.debug("OECD portal direct fetch skipped for %s (%s)", resource_url, exc)
 
-        # Final content and excerpt assembly
+        # Final content, excerpt, and provenance assembly
         if report_text:
             content = report_text
+            content_provider = "oecd_html"
             content_source = "portal_html"
         elif abstract:
             content = abstract
+            content_provider = abstract_source  # "openalex" or "crossref"
             content_source = abstract_source
         else:
             # Informative fallback
@@ -224,6 +249,7 @@ class OECDCompetitionExtractor:
                 f"Official DOI: {doi}\n"
                 f"Permanent Link: {canonical_url}\n"
             )
+            content_provider = "metadata_fallback"
             content_source = "metadata_fallback"
 
         excerpt = (abstract or content)[:400]
@@ -253,9 +279,11 @@ class OECDCompetitionExtractor:
             "resource_url": resource_url,
             "full_report_url": full_report_url,
             "pdf_url": pdf_url,
-            "content_sufficiency": sufficiency,
+            "discovery_provider": "crossref",
+            "content_provider": content_provider,
             "content_source": content_source,
             "abstract_source": abstract_source,
+            "content_sufficiency": sufficiency,
             "text_length": text_len,
             "tags": tags,
             "type": "report",
