@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from sqlalchemy import String, Integer, Boolean, DateTime, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
