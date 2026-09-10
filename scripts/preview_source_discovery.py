@@ -389,7 +389,9 @@ class SourcePreviewSummary(BaseModel):
     partial_count: int = 0
     insufficient_count: int = 0
     eligible_for_analysis: int = 0
-    estimated_input_chars: int = 0
+    new_candidate_chars: int = 0
+    eligible_input_chars: int = 0
+    estimated_input_chars: int = 0  # retained for backwards compatibility
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -407,7 +409,9 @@ class GlobalPreviewReport(BaseModel):
     total_partial: int = 0
     total_insufficient: int = 0
     potential_gemini_analyses: int = 0
-    total_estimated_input_chars: int = 0
+    total_new_candidate_chars: int = 0
+    total_eligible_input_chars: int = 0
+    total_estimated_input_chars: int = 0  # retained for backwards compatibility
     new_candidates_table: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -478,6 +482,8 @@ class SourceDiscoveryPreviewService:
             report.total_partial += summary.partial_count
             report.total_insufficient += summary.insufficient_count
             report.potential_gemini_analyses += summary.eligible_for_analysis
+            report.total_new_candidate_chars += summary.new_candidate_chars
+            report.total_eligible_input_chars += summary.eligible_input_chars
             report.total_estimated_input_chars += summary.estimated_input_chars
             report.new_candidates_table.extend(summary.new_items)
 
@@ -719,6 +725,9 @@ class SourceDiscoveryPreviewService:
                         summary.eligible_for_analysis += 1
 
                     content_len = len(article.content or "")
+                    summary.new_candidate_chars += content_len
+                    if eligible:
+                        summary.eligible_input_chars += content_len
                     summary.estimated_input_chars += content_len
 
                     pub_str = article.published_at.strftime("%Y-%m-%d") if article.published_at else "Unknown"
@@ -845,6 +854,9 @@ class SourceDiscoveryPreviewService:
                     summary.eligible_for_analysis += 1
 
                 content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
                 summary.estimated_input_chars += content_len
 
                 pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
@@ -976,6 +988,9 @@ class SourceDiscoveryPreviewService:
                     summary.eligible_for_analysis += 1
 
                 content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
                 summary.estimated_input_chars += content_len
 
                 pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
@@ -1026,6 +1041,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
         print(f"  PARTIAL                : {summary.partial_count}")
         print(f"  INSUFFICIENT           : {summary.insufficient_count}")
         print(f"  eligible_for_analysis  : {summary.eligible_for_analysis}")
+        print(f"  new_candidate_chars    : {summary.new_candidate_chars}")
+        print(f"  eligible_input_chars   : {summary.eligible_input_chars}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -1037,7 +1054,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
     print(f"  PARTIAL                    : {report.total_partial}")
     print(f"  INSUFFICIENT               : {report.total_insufficient}")
     print(f"  potential_gemini_analyses  : {report.potential_gemini_analyses}")
-    print(f"  estimated_input_chars      : {report.total_estimated_input_chars}")
+    print(f"  new_candidate_chars        : {report.total_new_candidate_chars}")
+    print(f"  eligible_input_chars       : {report.total_eligible_input_chars}")
     print("-" * 95)
     print("  Coste de análisis          : Se calculará formalmente durante el plan de backfill v6.")
     print("                               (0 llamadas de Gemini ejecutadas en este preview).")

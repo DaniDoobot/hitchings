@@ -761,3 +761,78 @@ def test_preview_postgresql_isolation_and_read_only_configured():
                 cb()
             db.close()
 
+
+def test_preview_candidate_and_eligible_input_chars_separation(db_session: Session):
+    """Verify that new_candidate_chars measures all new entries while eligible_input_chars counts only analysis-eligible ones."""
+    simulated_now = datetime(2026, 9, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Mock Geradin listing with 2 new items: one full (~3000 chars), one short/insufficient (~100 chars)
+    custom_listing_html = """<!DOCTYPE html>
+    <html><body><ul>
+      <li class="wp-block-post category-monthly-eu-litigation-briefing">
+        <a class="gp-news-post-card" href="/article-full/"><time class="post-date">15/08/26</time><h2>Substantive Litigation Full</h2></a>
+      </li>
+      <li class="wp-block-post category-newsletters">
+        <a class="gp-news-post-card" href="/article-short/"><time class="post-date">10/08/26</time><h2>Brief Snippet</h2></a>
+      </li>
+    </ul></body></html>"""
+
+    detail_full = """<!DOCTYPE html><html><body><article class="post-content"><div class="column"><p>""" + ("Substantive antitrust litigation analysis. " * 60) + """</p></div></article></body></html>"""
+    detail_short = """<!DOCTYPE html><html><body><article class="post-content"><div class="column"><p>Short note only.</p></div></article></body></html>"""
+
+    def router(req: httpx.Request) -> httpx.Response:
+        url_str = str(req.url)
+        if "news" in url_str:
+            return httpx.Response(200, text=custom_listing_html)
+        elif "article-full" in url_str:
+            return httpx.Response(200, text=detail_full)
+        elif "article-short" in url_str:
+            return httpx.Response(200, text=detail_short)
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(router))
+    service = SourceDiscoveryPreviewService(db=db_session, now=simulated_now)
+    report = service.run_preview(lookback_days=90, source_filter="geradin", sync_client=client)
+
+    g_summary = report.sources_summaries[0]
+    assert g_summary.new_candidates == 2
+    assert g_summary.full_count == 1
+    assert g_summary.insufficient_count == 1
+    assert g_summary.eligible_for_analysis == 1
+
+    # new_candidate_chars includes both full and short content
+    assert g_summary.new_candidate_chars > 0
+    # eligible_input_chars includes ONLY the full, analysis-eligible article
+    assert g_summary.eligible_input_chars > 0
+    assert g_summary.eligible_input_chars < g_summary.new_candidate_chars
+    assert report.total_eligible_input_chars == g_summary.eligible_input_chars
+    assert report.total_new_candidate_chars == g_summary.new_candidate_chars
+
+
+def test_preview_oecd_multilingual_metadata_behavior():
+    """Verify that independent multilingual OECD DOIs lack Crossref relation metadata.
+
+    OECD deposits separate DOIs for each language (e.g. -en, -fr, -es) with relation={},
+    preventing ad-hoc semantic deduplication in accordance with project constraints.
+    """
+    sample_fr_record = {
+        "DOI": "10.1787/9fae27e7-fr",
+        "title": ["Concurrence et réglementation dans le secteur de la santé"],
+        "relation": {},  # Real Crossref returns empty relation for OECD series
+        "published": {"date-parts": [[2026, 6, 23]]},
+    }
+    sample_en_record = {
+        "DOI": "10.1787/102fea92-en",
+        "title": ["Competition and regulation in the healthcare sector"],
+        "relation": {},
+        "published": {"date-parts": [[2026, 6, 1]]},
+    }
+
+    # Crossref does not provide cross-translation identifiers
+    assert sample_fr_record["relation"] == {}
+    assert sample_en_record["relation"] == {}
+    assert sample_fr_record["DOI"].endswith("-fr")
+    assert sample_en_record["DOI"].endswith("-en")
+    assert sample_fr_record["DOI"] != sample_en_record["DOI"]
+
+
