@@ -115,6 +115,43 @@ class IngestionService:
                     c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
 
                     # Deduplication hierarchy:
+                    # 0. Cross-source deduplication for European Commission (e.g. DMA vs DG COMP Press Corner)
+                    presscorner_ref = raw.raw_metadata.get("presscorner_ref") if raw.raw_metadata else None
+                    presscorner_url = raw.raw_metadata.get("presscorner_url") if raw.raw_metadata else None
+
+                    if presscorner_ref or presscorner_url:
+                        ref_conditions = []
+                        if presscorner_url:
+                            ref_conditions.append(Entry.url == presscorner_url)
+                            ref_conditions.append(Entry.canonical_url == presscorner_url)
+                        if presscorner_ref:
+                            ref_slug = presscorner_ref.lower().replace("/", "_")
+                            ref_conditions.append(Entry.url.ilike(f"%{ref_slug}%"))
+                            ref_conditions.append(Entry.canonical_url.ilike(f"%{ref_slug}%"))
+                            ref_conditions.append(Entry.external_id.ilike(f"%{ref_slug}%"))
+
+                        existing_cross = db.execute(
+                            select(Entry).where(or_(*ref_conditions)).limit(1)
+                        ).scalar_one_or_none()
+
+                        if existing_cross:
+                            meta = dict(existing_cross.raw_metadata or {})
+                            meta["cross_source_matched"] = True
+                            meta["cross_source_matched_from"] = source.name
+                            if (
+                                "digital-markets-act" in raw.url.lower()
+                                or "dma" in (source.name or "").lower()
+                                or "digital markets act" in (source.name or "").lower()
+                            ):
+                                meta["dma_portal_url"] = raw.url
+                            existing_cross.raw_metadata = meta
+                            logger.info(
+                                "Cross-source deduplication: Entry '%s' matched existing Entry id=%s via Press Corner %s",
+                                raw.title, existing_cross.id, presscorner_ref or presscorner_url
+                            )
+                            duplicates += 1
+                            continue
+
                     # 1. source_id + external_id (if available)
                     # 2. source_id + url or canonical_url
                     # 3. source_id + content_hash (fallback)
@@ -122,8 +159,13 @@ class IngestionService:
                     if raw.external_id:
                         dup_conditions.append(Entry.external_id == raw.external_id)
 
+                    resolved_canonical_url = (
+                        presscorner_url if presscorner_url else raw.url
+                    )
+
                     dup_conditions.append(Entry.url == raw.url)
                     dup_conditions.append(Entry.canonical_url == raw.url)
+                    dup_conditions.append(Entry.canonical_url == resolved_canonical_url)
                     dup_conditions.append(Entry.content_hash == c_hash)
 
                     existing = db.execute(
@@ -141,7 +183,7 @@ class IngestionService:
                         source_id=source.id,
                         external_id=raw.external_id,
                         url=raw.url,
-                        canonical_url=raw.url,
+                        canonical_url=resolved_canonical_url,
                         title=raw.title,
                         content=raw.content,
                         excerpt=raw.excerpt,

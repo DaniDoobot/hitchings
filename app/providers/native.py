@@ -62,7 +62,15 @@ class NativeProvider(BaseSourceProvider):
 
         url_lower = (source.url or "").lower()
 
-        # 1. European Commission / DG Competition adapter
+        # 1. European Commission / Digital Markets Act (DMA) adapter
+        if "digital-markets-act.ec.europa.eu" in url_lower:
+            from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
+            extractor = EuropeanCommissionDMAExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # 2. European Commission / DG Competition adapter
         if "competition-policy.ec.europa.eu" in url_lower or "ec.europa.eu" in url_lower:
             from app.providers.extractors.european_commission import EuropeanCommissionExtractor
             extractor = EuropeanCommissionExtractor()
@@ -70,7 +78,7 @@ class NativeProvider(BaseSourceProvider):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
 
-        # 2. CJEU / CURIA adapter
+        # 3. CJEU / CURIA adapter
         if "curia.europa.eu" in url_lower:
             from app.providers.extractors.curia import CuriaCaseLawExtractor
             extractor = CuriaCaseLawExtractor()
@@ -115,6 +123,14 @@ class NativeProvider(BaseSourceProvider):
         if "curia.europa.eu" in source.url.lower():
             from app.providers.extractors.curia import CuriaCaseLawExtractor
             extractor = CuriaCaseLawExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: European Commission / Digital Markets Act (DMA)
+        if "digital-markets-act.ec.europa.eu" in source.url.lower():
+            from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
+            extractor = EuropeanCommissionDMAExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
