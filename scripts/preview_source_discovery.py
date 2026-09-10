@@ -427,14 +427,14 @@ class SourceDiscoveryPreviewService:
         self.now = now or datetime.now(timezone.utc)
         self.current_date = self.now.date()
 
-    def run_preview(
+    async def run_preview_async(
         self,
         lookback_days: int = 90,
         source_filter: Optional[str] = None,
-        async_client: Optional[httpx.AsyncClient] = None,
         sync_client: Optional[httpx.Client] = None,
+        async_client: Optional[httpx.AsyncClient] = None,
     ) -> GlobalPreviewReport:
-        """Execute discovery preview across target sources."""
+        """Asynchronously execute discovery preview over target sources without modifying DB."""
         cutoff_date = (self.now - timedelta(days=lookback_days)).date()
 
         report = GlobalPreviewReport(
@@ -453,22 +453,18 @@ class SourceDiscoveryPreviewService:
                     sync_client=sync_client,
                 )
             elif "digital markets act" in source.name.lower() or "dma" in source.name.lower():
-                summary = asyncio.run(
-                    self._preview_dma_async(
-                        source=source,
-                        cutoff_date=cutoff_date,
-                        lookback_days=lookback_days,
-                        async_client=async_client,
-                    )
+                summary = await self._preview_dma_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
                 )
             elif "oecd" in source.name.lower():
-                summary = asyncio.run(
-                    self._preview_oecd_async(
-                        source=source,
-                        cutoff_date=cutoff_date,
-                        lookback_days=lookback_days,
-                        async_client=async_client,
-                    )
+                summary = await self._preview_oecd_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
                 )
             else:
                 logger.warning("Unrecognized target source: %s", source.name)
@@ -488,6 +484,42 @@ class SourceDiscoveryPreviewService:
             report.new_candidates_table.extend(summary.new_items)
 
         return report
+
+    def run_preview(
+        self,
+        lookback_days: int = 90,
+        source_filter: Optional[str] = None,
+        sync_client: Optional[httpx.Client] = None,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> GlobalPreviewReport:
+        """Execute discovery preview synchronously with event loop safety."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                return executor.submit(
+                    lambda: asyncio.run(
+                        self.run_preview_async(
+                            lookback_days=lookback_days,
+                            source_filter=source_filter,
+                            sync_client=sync_client,
+                            async_client=async_client,
+                        )
+                    )
+                ).result()
+        else:
+            return asyncio.run(
+                self.run_preview_async(
+                    lookback_days=lookback_days,
+                    source_filter=source_filter,
+                    sync_client=sync_client,
+                    async_client=async_client,
+                )
+            )
 
     def _resolve_sources(self, source_filter: Optional[str]) -> list[Source]:
         """Resolve Source entities from database or instantiate transient representations."""

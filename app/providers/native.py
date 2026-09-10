@@ -55,44 +55,45 @@ class NativeProvider(BaseSourceProvider):
     def check_limit_available(self, estimated_records: int = 1) -> bool:
         return True
 
-    async def fetch_entries(self, source: Source) -> list[RawEntryData]:
+    def __init__(self, client: Optional[httpx.AsyncClient] = None) -> None:
+        self._client = client
+
+    async def fetch_entries(
+        self, source: Source, client: Optional[httpx.AsyncClient] = None
+    ) -> list[RawEntryData]:
         """Fetch raw entries from the given source."""
         if not self.can_handle(source):
             raise ValueError(f"NativeProvider cannot handle source {source.name} (type={source.type})")
 
+        active_client = client or self._client
         url_lower = (source.url or "").lower()
+
+        async def _run_with_extractor(extractor_instance):
+            if active_client is not None:
+                return await extractor_instance.extract(active_client, source)
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as new_cli:
+                return await extractor_instance.extract(new_cli, source)
 
         # 1. European Commission / Digital Markets Act (DMA) adapter
         if "digital-markets-act.ec.europa.eu" in url_lower:
             from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
-            extractor = EuropeanCommissionDMAExtractor()
-            headers = {"User-Agent": USER_AGENT}
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
-                return await extractor.extract(client, source)
+            return await _run_with_extractor(EuropeanCommissionDMAExtractor())
 
         # 2. European Commission / DG Competition adapter
         if "competition-policy.ec.europa.eu" in url_lower or "ec.europa.eu" in url_lower:
             from app.providers.extractors.european_commission import EuropeanCommissionExtractor
-            extractor = EuropeanCommissionExtractor()
-            headers = {"User-Agent": USER_AGENT}
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
-                return await extractor.extract(client, source)
+            return await _run_with_extractor(EuropeanCommissionExtractor())
 
         # 3. CJEU / CURIA adapter
         if "curia.europa.eu" in url_lower:
             from app.providers.extractors.curia import CuriaCaseLawExtractor
-            extractor = CuriaCaseLawExtractor()
-            headers = {"User-Agent": USER_AGENT}
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
-                return await extractor.extract(client, source)
+            return await _run_with_extractor(CuriaCaseLawExtractor())
 
         # 4. OECD / Competition Law and Policy adapter
         if "oecd.org" in url_lower or "oecd" in (source.name or "").lower():
             from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
-            extractor = OECDCompetitionExtractor()
-            headers = {"User-Agent": USER_AGENT}
-            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
-                return await extractor.extract(client, source)
+            return await _run_with_extractor(OECDCompetitionExtractor())
 
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)

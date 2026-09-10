@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
+
 from sqlalchemy import select, or_, func
 from sqlalchemy.orm import Session
 
@@ -57,7 +59,12 @@ class IngestionService:
             raise ValueError(f"Unknown provider: '{provider_name}'")
         return provider
 
-    async def ingest_source(self, source_id: uuid.UUID, db: Session) -> IngestionResult:
+    async def ingest_source(
+        self,
+        source_id: uuid.UUID,
+        db: Session,
+        client: Optional[httpx.AsyncClient] = None,
+    ) -> IngestionResult:
         """Execute ingestion for a single source, deduplicating and persisting entries."""
         source = db.get(Source, source_id)
         if not source:
@@ -90,7 +97,12 @@ class IngestionService:
 
         # 2. Execute provider extraction with failure capture
         try:
-            raw_entries: list[RawEntryData] = await provider.fetch_entries(source)
+            import inspect
+            sig = inspect.signature(provider.fetch_entries)
+            if "client" in sig.parameters:
+                raw_entries: list[RawEntryData] = await provider.fetch_entries(source, client=client)
+            else:
+                raw_entries = await provider.fetch_entries(source)
         except Exception as exc:
             logger.error(
                 "Ingestion fetch failed for source '%s' (run_id=%s): %s",

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 import httpx
 from pydantic import BaseModel, Field
@@ -84,6 +84,9 @@ class DirectWebIngestionReport(BaseModel):
 class DirectWebIngestionService:
     """Coordinates discovery, detail extraction, deduplication, GN traceability, and metrics for Direct Web Sources."""
 
+    def __init__(self, settings: Optional[Settings] = None) -> None:
+        self.settings = settings or get_settings()
+
     def execute_ingestion(
         self,
         db: Session,
@@ -93,7 +96,7 @@ class DirectWebIngestionService:
         client: Optional[httpx.Client] = None,
     ) -> DirectWebIngestionReport:
         """Execute ingestion for direct web sources with fail-closed safety and failure isolation."""
-        settings = get_settings()
+        settings = self.settings
         is_dry_run = not (settings.DIRECT_WEB_INGESTION_ENABLED and confirm_real_calls)
 
         report = DirectWebIngestionReport(is_dry_run=is_dry_run)
@@ -235,6 +238,13 @@ class DirectWebIngestionService:
                         result.duplicates_count += 1
                         continue
 
+                    # Filter by lookback_days if configured on source
+                    lookback_days = (source.config or {}).get("lookback_days")
+                    if lookback_days and item.published_at:
+                        cutoff_dt = utc_now() - timedelta(days=lookback_days)
+                        if item.published_at < cutoff_dt:
+                            continue
+
                     # 2. Fetch detail (Failure isolation Section 27)
                     try:
                         raw_html = adapter.fetch_detail(item, client=client)
@@ -253,6 +263,11 @@ class DirectWebIngestionService:
                         result.failed_count += 1
                         result.errors.append(f"Parse failed for {item.url[:60]}: {str(exc)[:100]}")
                         continue
+
+                    if lookback_days and article.published_at:
+                        cutoff_dt = utc_now() - timedelta(days=lookback_days)
+                        if article.published_at < cutoff_dt:
+                            continue
 
                     # Deduplicate by canonical URL
                     norm_canonical = normalize_url(article.canonical_url)

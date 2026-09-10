@@ -257,6 +257,45 @@ class SourceSufficiencyService:
                 signals=signals,
             )
 
+        # 6. OECD (Organisation for Economic Co-operation and Development)
+        if "oecd" in source_name:
+            if content_chars >= 500:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.FULL,
+                    reason="Publicación oficial de la OCDE con abstract o texto sustantivo suficiente.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "crossref_abstract",
+                        full_text_available=True,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            elif content_chars >= 200:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.PARTIAL,
+                    reason="Publicación oficial de la OCDE con metadatos catalográficos básicos.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "metadata_fallback",
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            else:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.INSUFFICIENT,
+                    reason="Publicación oficial de la OCDE sin contenido suficiente.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "metadata_fallback",
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=False,
+                    ),
+                )
+
         # Fallback for generic sources
         if content_chars >= 1500:
             return SourceSufficiencyResult(

@@ -1,4 +1,4 @@
-﻿"""Adapter for Geradin Partners Direct Web Source (Bloque 12A).
+"""Adapter for Geradin Partners Direct Web Source (Bloque 12A).
 
 Follows the Direct Web architecture (Bloque 9B) for monitoring:
 - Monthly EU Litigation Briefing
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -185,6 +186,13 @@ class GeradinPartnersAdapter(BaseWebSourceAdapter):
                     published_at = None
                     if time_el and time_el.get_text(strip=True):
                         published_at = _safe_parse_datetime(time_el.get_text(strip=True))
+
+                    lookback_days = (source.config or {}).get("lookback_days")
+                    if lookback_days and published_at:
+                        cutoff_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+                        if published_at < cutoff_date:
+                            logger.debug("Excluded Geradin item '%s' (older than %d days: %s)", title[:60], lookback_days, published_at)
+                            continue
 
                     # External ID
                     external_id = url
