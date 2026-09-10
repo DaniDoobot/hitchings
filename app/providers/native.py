@@ -86,6 +86,14 @@ class NativeProvider(BaseSourceProvider):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
 
+        # 4. OECD / Competition Law and Policy adapter
+        if "oecd.org" in url_lower or "oecd" in (source.name or "").lower():
+            from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
+            extractor = OECDCompetitionExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -131,6 +139,14 @@ class NativeProvider(BaseSourceProvider):
         if "digital-markets-act.ec.europa.eu" in source.url.lower():
             from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
             extractor = EuropeanCommissionDMAExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: OECD
+        if "oecd.org" in source.url.lower() or "oecd" in (source.name or "").lower():
+            from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
+            extractor = OECDCompetitionExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
