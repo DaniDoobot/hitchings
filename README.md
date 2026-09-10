@@ -1605,38 +1605,26 @@ INTERNET
 
 ### Variables de Entorno en Dokploy
 
-Configura las siguientes variables en la sección de entorno de la aplicación Compose en Dokploy:
+En `docker-compose.prod.yml`, todos los valores de seguridad (`ENV=production`, `ANALYSIS_PROVIDER=disabled`, desactivación de ingestas, orígenes CORS y configuración de cookies) ya vienen fijados con valores seguros por defecto.
 
-#### 1. Obligatorias para el Primer Despliegue
+Por tanto, para el primer despliegue la **única variable secreta realmente obligatoria** que debes configurar en la pestaña Environment de Dokploy es:
 
-| Variable | Valor Recomendado / Requerido | Propósito |
+| Variable | Valor Requerido | Propósito |
 | :--- | :--- | :--- |
-| `DATABASE_URL` | `postgresql+psycopg://hitchings:<PASSWORD>@<HOST>:5432/hitchings-news` | Cadena de conexión a la PostgreSQL de Dokploy |
-| `ENV` | `production` | Modo de ejecución de la aplicación |
-| `LOG_LEVEL` | `INFO` | Nivel de logging |
-| `FRONTEND_URL` | `https://hitchings-gonzalez-news.doobot.ai` | URL canónica del portal cliente |
-| `CORS_ALLOWED_ORIGINS` | `https://hitchings-gonzalez-news.doobot.ai` | Orígenes permitidos (mismo dominio) |
-| `AUTH_COOKIE_NAME` | `hitchings_session` | Nombre de la cookie de sesión |
-| `AUTH_SESSION_TTL_HOURS` | `24` | Duración de la sesión en horas |
-| `AUTH_COOKIE_SECURE` | `true` | Exige HTTPS para la cookie de autenticación |
-| `AUTH_COOKIE_DOMAIN` | `""` *(vacío)* | Host-only cookie para el dominio exacto |
-| `ANALYSIS_PROVIDER` | `disabled` | Desactiva llamadas a Gemini en producción inicial |
-| `GOOGLE_NEWS_ENABLED` | `false` | Desactiva ingestión automática de Google News |
-| `DIRECT_WEB_INGESTION_ENABLED` | `false` | Desactiva ingestión automática de webs/blogs |
-| `LINKEDIN_DISCOVERY_ENABLED` | `false` | Desactiva búsqueda en LinkedIn |
+| `DATABASE_URL` | `postgresql+psycopg://<USER>:<PASSWORD>@<INTERNAL_HOST>:5432/hitchings-news` | Cadena de conexión interna a la base de datos PostgreSQL de Dokploy |
 
-#### 2. Opcionales / Futuras (cuando se automaticen ingestas y análisis)
-
-| Variable | Valor por Defecto | Propósito |
-| :--- | :--- | :--- |
-| `GEMINI_API_KEY` | *(vacío)* | API Key para ejecución de pipeline analítico |
-| `GEMINI_MODEL` | `gemini-3.8-flash` | Modelo de producción para análisis |
-| `BRIGHTDATA_API_TOKEN` | *(vacío)* | Credencial para discovery de LinkedIn |
-| `APIFY_API_TOKEN` | *(vacío)* | Credencial fallback para LinkedIn |
+> [!NOTE]
+> - `LOG_LEVEL` es opcional (default: `INFO`).
+> - `GEMINI_API_KEY` **no** es obligatoria para la demo porque `ANALYSIS_PROVIDER=disabled`.
+> - Variables como `AUTH_SECRET_KEY` o `INITIAL_ADMIN_*` **no existen** en `app/core/config.py` (la autenticación usa tokens criptográficos en base de datos y los usuarios se crean en la DB).
 
 ---
 
-### Conectividad con la Base de Datos PostgreSQL en Dokploy
+### Redes de Dokploy (`docker-compose.prod.yml`)
+
+Los contenedores `frontend` y `backend` están conectados a dos redes:
+1. `hitchings-net` (bridge interna): Comunicación directa Nginx (`frontend`) → Uvicorn (`backend:8000`).
+2. `dokploy-network` (externa de Dokploy): Permite a Traefik alcanzar al `frontend:80` y al `backend` conectarse a la PostgreSQL independiente de Dokploy mediante su Internal Connection URL.
 
 La base de datos `hitchings-news` ya está creada como servicio Database independiente en Dokploy.
 

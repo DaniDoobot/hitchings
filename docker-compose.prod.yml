@@ -24,6 +24,7 @@ services:
       - "8000"
     networks:
       - hitchings-net
+      - dokploy-network
     environment:
       ENV: production
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -63,6 +64,7 @@ services:
       - "80"
     networks:
       - hitchings-net
+      - dokploy-network
     depends_on:
       backend:
         condition: service_healthy
@@ -70,3 +72,5 @@ services:
 networks:
   hitchings-net:
     driver: bridge
+  dokploy-network:
+    external: true
