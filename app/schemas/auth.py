@@ -21,6 +21,8 @@ class UserPublic(BaseModel):
     id: uuid.UUID
     email: str
     display_name: str
+    role: str = "user"
+    is_active: bool = True
 
 
 class LoginResponse(BaseModel):

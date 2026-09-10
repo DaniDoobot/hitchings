@@ -36,10 +36,18 @@ def main() -> int:
         default=None,
         help="Contraseña en texto plano (opcional; si se omite se solicitará de forma segura por getpass).",
     )
+    parser.add_argument(
+        "--role",
+        required=False,
+        default="user",
+        choices=["user", "admin"],
+        help="Rol de autorización del usuario ('user' o 'admin'). Por defecto: 'user'.",
+    )
 
     args = parser.parse_args()
     normalized_email = args.email.strip().lower()
     display_name = args.display_name.strip()
+    role = args.role.strip().lower()
 
     if not normalized_email or "@" not in normalized_email:
         print(f"Error: La dirección de correo '{args.email}' no es válida.", file=sys.stderr)
@@ -84,6 +92,7 @@ def main() -> int:
             email=normalized_email,
             display_name=display_name,
             password_hash=pw_hash,
+            role=role,
             is_active=True,
         )
 
@@ -95,6 +104,7 @@ def main() -> int:
         print(f"  ID:           {new_user.id}")
         print(f"  Email:        {new_user.email}")
         print(f"  Display Name: {new_user.display_name}")
+        print(f"  Rol:          {new_user.role}")
         print(f"  Activo:       {new_user.is_active}")
         return 0
 

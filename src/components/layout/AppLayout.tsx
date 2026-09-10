@@ -7,6 +7,7 @@ import {
   X,
   Scale,
   LogOut,
+  Users,
 } from 'lucide-react';
 import { observatoryApi } from '../../services/observatoryApi';
 import { useAuth } from '../../context/AuthContext';
@@ -31,6 +32,10 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
     { name: 'Cuadro de Mando', path: '/', icon: LayoutDashboard },
     { name: 'Observatorio', path: '/observatorio', icon: Compass },
   ];
+
+  if (user?.role === 'admin') {
+    navItems.push({ name: 'Usuarios', path: '/admin/usuarios', icon: Users });
+  }
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';
@@ -100,9 +105,16 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
                 {user && (
                   <div className="flex items-center gap-2.5">
                     <div className="text-right">
-                      <span className="block text-xs font-medium text-white truncate max-w-[140px]">
-                        {user.display_name}
-                      </span>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span className="block text-xs font-medium text-white truncate max-w-[140px]">
+                          {user.display_name}
+                        </span>
+                        {user.role === 'admin' && (
+                          <span className="text-[9px] font-sans font-bold tracking-wider uppercase px-1.5 py-0.5 rounded bg-legal-gold/20 text-legal-gold border border-legal-gold/40">
+                            ADMIN
+                          </span>
+                        )}
+                      </div>
                       <span className="block text-[10px] text-navy-400 truncate max-w-[140px]">
                         {user.email}
                       </span>
@@ -162,7 +174,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
             {user && (
               <div className="pt-3 mt-2 border-t border-navy-800 flex items-center justify-between px-3">
                 <div>
-                  <span className="block text-xs font-medium text-white">{user.display_name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="block text-xs font-medium text-white">{user.display_name}</span>
+                    {user.role === 'admin' && (
+                      <span className="text-[9px] font-sans font-bold tracking-wider uppercase px-1.5 py-0.5 rounded bg-legal-gold/20 text-legal-gold border border-legal-gold/40">
+                        ADMIN
+                      </span>
+                    )}
+                  </div>
                   <span className="block text-[10px] text-navy-400">{user.email}</span>
                 </div>
                 <button

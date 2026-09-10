@@ -17,6 +17,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: 'dev-mock-user-001',
         email: 'cliente@hitchings.local',
         display_name: 'Cliente Demo (DEV)',
+        role: 'admin',
+        is_active: true,
       });
       setStatus('authenticated');
       return;
@@ -52,6 +54,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: 'dev-mock-user-001',
         email: credentials.email || 'cliente@hitchings.local',
         display_name: 'Cliente Demo (DEV)',
+        role: 'admin',
+        is_active: true,
       });
       setStatus('authenticated');
       return;

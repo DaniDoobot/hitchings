@@ -18,6 +18,13 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class UserRole:
+    """Supported portal user authorization roles."""
+    ADMIN = "admin"
+    USER = "user"
+    ALL = (ADMIN, USER)
+
+
 class User(Base):
     """Registered portal user account."""
 
@@ -41,6 +48,13 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
+    )
+    role: Mapped[str] = mapped_column(
+        String(50),
+        default=UserRole.USER,
+        server_default="user",
+        nullable=False,
+        index=True,
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean,

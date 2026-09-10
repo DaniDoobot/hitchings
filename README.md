@@ -1698,8 +1698,10 @@ Tras la importación, el portal mostrará de inmediato las **89 publicaciones an
 - [x] **Bloque 9D:** Análisis Incremental Controlado de Nuevas Entries (planeador agnóstico, filtro de suficiencia FULL, budget guard \$0.50, pipeline v6, 9 direct web entries analizadas). *(Cerrado)*
 - [x] **Bloque 10A:** Cierre de Producto y Finalización del Frontend (portal cliente conectado a datos reales en PostgreSQL, 7 fuentes activas, badges y filtros normalizados, visual audit completa). *(Cerrado)*
 - [x] **Bloque 10B:** Empaquetado de Producción Dokploy Compose (`docker-compose.prod.yml`, Nginx reverse proxy, same-origin, migraciones automáticas). *(Cerrado)*
-- [ ] **Bloque 10C:** Módulo de análisis documental y generación de informes.
-- [ ] **Bloque 10D:** Automatización y scheduler de ingestas continuas.
+- [x] **Bloque 11A:** Usuarios y Roles Administrativos (rol admin/user, migración 0007, endpoints protegidos `/api/v1/admin/users`, script `scripts.set_user_role`, portal web de gestión de usuarios). *(Cerrado)*
+- [ ] **Bloque 11B:** Módulo de análisis documental y generación de informes.
+- [ ] **Bloque 11C:** Automatización y scheduler de ingestas continuas.
+
 
 
 

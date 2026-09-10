@@ -62,6 +62,7 @@ describe('Frontend Authentication & Route Protection (Bloque 8C.1)', () => {
       id: 'u-123',
       email: 'test@example.com',
       display_name: 'Test Client',
+      role: 'user',
     });
 
     render(
@@ -120,6 +121,7 @@ describe('Frontend Authentication & Route Protection (Bloque 8C.1)', () => {
       id: 'u-123',
       email: 'auth@example.com',
       display_name: 'Auth User',
+      role: 'user',
     });
 
     render(

@@ -183,6 +183,8 @@ def test_me_authenticated_returns_profile(real_auth_client: TestClient, db_sessi
         "id": str(user.id),
         "email": "me_user@example.com",
         "display_name": "Profile User",
+        "role": "user",
+        "is_active": True,
     }
 
 
