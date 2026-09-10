@@ -50,6 +50,15 @@ class DirectWebAdapterRegistry:
         return cls.get_adapter(str(adapter_code))
 
     @classmethod
+    def has_adapter_for_source(cls, source: Source) -> bool:
+        """Check if source has an explicit registered direct web adapter."""
+        try:
+            cls.get_adapter_for_source(source)
+            return True
+        except Exception:
+            return False
+
+    @classmethod
     def list_adapters(cls) -> list[str]:
         """List all registered adapter codes."""
         return sorted(cls._adapters.keys())

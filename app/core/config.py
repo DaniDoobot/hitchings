@@ -137,6 +137,15 @@ class Settings(BaseSettings):
     INCREMENTAL_ANALYSIS_MAX_ESTIMATED_COST_USD: float = 0.50
     INCREMENTAL_ANALYSIS_DEFAULT_LIMIT: int = 10
 
+    # Weekly Refresh (Bloque 11C - Automated Weekly Source Ingestion & Analysis)
+    WEEKLY_REFRESH_ENABLED: bool = True
+    WEEKLY_REFRESH_TIMEZONE: str = "Europe/Madrid"
+    WEEKLY_REFRESH_DAY: str = "monday"
+    WEEKLY_REFRESH_HOUR: int = 6
+    WEEKLY_REFRESH_MINUTE: int = 0
+    WEEKLY_REFRESH_LOOKBACK_DAYS: int = 8
+    WEEKLY_REFRESH_CONFIRM_REAL_CALLS: bool = False
+
     @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
     @classmethod
     def assemble_languages(cls, v: Any) -> list[str]:
