@@ -46,6 +46,13 @@ describe('ObservatoryApiService - Fail-Closed & Parameter Hardening', () => {
     await expect(api.getTopics()).rejects.toThrow('VITE_API_BASE_URL is required when mock data is disabled');
   });
 
+  it('supports same-origin relative API in production when VITE_API_BASE_URL is empty', () => {
+    const api = new ObservatoryApiService({ apiBaseUrl: '', useMock: false, isProd: true });
+
+    expect(api.isUsingMock()).toBe(false);
+    expect(api.getBaseUrl()).toBe('');
+  });
+
   it('strictly blocks mock data in production environment', async () => {
     const api = new ObservatoryApiService({ apiBaseUrl: 'http://127.0.0.1:8000', useMock: true, isProd: true });
 

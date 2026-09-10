@@ -298,11 +298,52 @@ def test_observatory_endpoints_require_authentication(real_auth_client: TestClie
     res_entries = real_auth_client.get("/api/v1/observatory/entries")
     assert res_entries.status_code == status.HTTP_401_UNAUTHORIZED
 
+    res_entry = real_auth_client.get(f"/api/v1/observatory/entries/{uuid.uuid4()}")
+    assert res_entry.status_code == status.HTTP_401_UNAUTHORIZED
+
     res_sources = real_auth_client.get("/api/v1/observatory/sources")
     assert res_sources.status_code == status.HTTP_401_UNAUTHORIZED
 
     res_topics = real_auth_client.get("/api/v1/observatory/topics")
     assert res_topics.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_observatory_endpoints_succeed_with_valid_session(real_auth_client: TestClient, db_session: Session):
+    """Observatory endpoints succeed (200) when accessed with active session cookie."""
+    raw_token = generate_session_token()
+    token_hash = hash_session_token(raw_token)
+    user = User(
+        email="observatory_viewer@example.com",
+        display_name="Viewer User",
+        password_hash="hash",
+        is_active=True,
+    )
+    db_session.add(user)
+    db_session.flush()
+
+    sess = AuthSession(
+        user_id=user.id,
+        token_hash=token_hash,
+        created_at=datetime.now(timezone.utc),
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=24),
+        last_seen_at=datetime.now(timezone.utc),
+    )
+    db_session.add(sess)
+    db_session.commit()
+
+    real_auth_client.cookies.set(settings.AUTH_COOKIE_NAME, raw_token)
+
+    res_dash = real_auth_client.get("/api/v1/observatory/dashboard")
+    assert res_dash.status_code == status.HTTP_200_OK
+
+    res_entries = real_auth_client.get("/api/v1/observatory/entries")
+    assert res_entries.status_code == status.HTTP_200_OK
+
+    res_sources = real_auth_client.get("/api/v1/observatory/sources")
+    assert res_sources.status_code == status.HTTP_200_OK
+
+    res_topics = real_auth_client.get("/api/v1/observatory/topics")
+    assert res_topics.status_code == status.HTTP_200_OK
 
 
 def test_health_endpoints_remain_public(real_auth_client: TestClient):

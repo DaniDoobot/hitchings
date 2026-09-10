@@ -1,0 +1,44 @@
+# Production Dockerfile for HITCHINGS Frontend
+# Multi-stage: builder (Bun) + runtime (Nginx Alpine)
+
+# -----------------------------------------------------------
+# Stage 1: Build React SPA
+# -----------------------------------------------------------
+FROM oven/bun:1 AS builder
+
+WORKDIR /app
+
+# Copy dependency manifests first for build cache efficiency
+COPY package.json bun.lock ./
+
+# Install dependencies strictly matching lockfile
+RUN bun install --frozen-lockfile
+
+# Copy source code and build config
+COPY . .
+
+# Build for production with same-origin relative API and disabled mock data
+ENV VITE_API_BASE_URL=""
+ENV VITE_USE_MOCK_DATA="false"
+
+RUN bun run build
+
+# -----------------------------------------------------------
+# Stage 2: Runtime — Nginx Alpine reverse proxy & SPA server
+# -----------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+# Copy custom Nginx configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy compiled frontend build artifacts
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# Validate Nginx syntax at build time (substituting upstream host to avoid DNS resolution failure during build)
+RUN sed 's|http://backend:8000|http://127.0.0.1:8000|g' /etc/nginx/nginx.conf > /tmp/nginx-test.conf \
+    && nginx -t -c /tmp/nginx-test.conf \
+    && rm -f /tmp/nginx-test.conf
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

@@ -4,10 +4,22 @@ export class AuthApiService {
   private baseUrl: string;
 
   constructor(customBaseUrl?: string) {
-    const rawBaseUrl =
-      customBaseUrl !== undefined
-        ? customBaseUrl
-        : (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) || 'http://127.0.0.1:8000';
+    const isProd = typeof import.meta !== 'undefined' && import.meta.env?.PROD === true;
+    const envBaseUrl =
+      typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL !== undefined
+        ? import.meta.env.VITE_API_BASE_URL
+        : undefined;
+
+    let rawBaseUrl: string;
+    if (customBaseUrl !== undefined) {
+      rawBaseUrl = customBaseUrl;
+    } else if (envBaseUrl !== undefined) {
+      rawBaseUrl = envBaseUrl;
+    } else if (isProd) {
+      rawBaseUrl = '';
+    } else {
+      rawBaseUrl = 'http://127.0.0.1:8000';
+    }
     this.baseUrl = rawBaseUrl.trim().replace(/\/$/, '');
   }
 

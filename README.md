@@ -1553,7 +1553,137 @@ La aplicación web estará accesible en: `http://localhost:5173/`.
 
 ---
 
-## 36. Roadmap
+## 36. Despliegue en Producción — Dokploy Compose (`docker-compose.prod.yml`)
+
+El empaquetado de producción de **HITCHINGS** sigue el patrón probado de despliegue multi-servicio coordinado bajo un único Docker Compose en Dokploy, con separación limpia de capas y un único dominio público.
+
+```text
+INTERNET
+   │
+   ▼
+[ https://hitchings-gonzalez-news.doobot.ai ]
+   │
+   ▼  (Traefik / Dokploy SSL termination)
+[ Servicio Frontend: Nginx 1.27 Alpine ] (:80)
+   ├── /               → React SPA compilado (Vite + Tailwind)
+   ├── /login, /observatorio/* → SPA fallback seguro (index.html)
+   ├── /assets/*       → Assets estáticos cacheados
+   ├── /health         → Proxy reverso a backend /health
+   ├── /health/db      → Proxy reverso a backend /health/db
+   └── /api/*          → Proxy reverso a backend FastAPI (:8000)
+                              │
+                              ▼
+           [ Servicio Backend: FastAPI Python 3.12 ] (:8000)
+           (Red interna `hitchings-net` — Puerto 8000 NO publicado al host)
+                              │
+                              ▼
+           [ PostgreSQL Dokploy (hitchings-news:5432) ]
+           (Base de datos administrada externamente en Dokploy)
+```
+
+### Principios de la Arquitectura de Despliegue
+
+1. **Un Solo Dominio Público**:
+   - Todo el tráfico cliente y de API fluye a través de `https://hitchings-gonzalez-news.doobot.ai`.
+   - No se requiere un subdominio adicional para la API (cero problemas de CORS o cookies entre dominios).
+2. **Same-Origin API**:
+   - El frontend se compila con `VITE_API_BASE_URL=""` y `VITE_USE_MOCK_DATA="false"`.
+   - Todas las llamadas del cliente se dirigen a rutas relativas `/api/v1/...` y son enrutadas por Nginx al contenedor `backend:8000`.
+   - Rutas no existentes bajo `/api/*` devuelven el error 404 JSON nativo de FastAPI (nunca el `index.html` del SPA).
+3. **Backend Aislado y No Expuesto**:
+   - El contenedor FastAPI no publica el puerto 8000 al host exterior (`expose: ["8000"]`).
+   - Solo es accesible internamente dentro de la red Docker compartida con Nginx.
+4. **Ciclo de Vida de Base de Datos en Startup**:
+   - El script `scripts/docker_entrypoint.sh` ejecuta automáticamente `alembic upgrade head` antes de lanzar Uvicorn.
+   - Si la base de datos está recién creada en Dokploy, el esquema completo se aplica de forma determinista e idempotente.
+   - No se ejecutan seeds, ni ingestiones, ni llamadas a Gemini en el arranque del contenedor.
+5. **Autenticación Host-Only Segura**:
+   - Cookie de sesión `hitchings_session` configurada con `HttpOnly=True`, `Secure=True`, y `SameSite=Lax`.
+   - Sin dominio de cookie (`AUTH_COOKIE_DOMAIN=""`), restringida exclusivamente al host exacto.
+
+---
+
+### Variables de Entorno en Dokploy
+
+Configura las siguientes variables en la sección de entorno de la aplicación Compose en Dokploy:
+
+#### 1. Obligatorias para el Primer Despliegue
+
+| Variable | Valor Recomendado / Requerido | Propósito |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | `postgresql+psycopg://hitchings:<PASSWORD>@<HOST>:5432/hitchings-news` | Cadena de conexión a la PostgreSQL de Dokploy |
+| `ENV` | `production` | Modo de ejecución de la aplicación |
+| `LOG_LEVEL` | `INFO` | Nivel de logging |
+| `FRONTEND_URL` | `https://hitchings-gonzalez-news.doobot.ai` | URL canónica del portal cliente |
+| `CORS_ALLOWED_ORIGINS` | `https://hitchings-gonzalez-news.doobot.ai` | Orígenes permitidos (mismo dominio) |
+| `AUTH_COOKIE_NAME` | `hitchings_session` | Nombre de la cookie de sesión |
+| `AUTH_SESSION_TTL_HOURS` | `24` | Duración de la sesión en horas |
+| `AUTH_COOKIE_SECURE` | `true` | Exige HTTPS para la cookie de autenticación |
+| `AUTH_COOKIE_DOMAIN` | `""` *(vacío)* | Host-only cookie para el dominio exacto |
+| `ANALYSIS_PROVIDER` | `disabled` | Desactiva llamadas a Gemini en producción inicial |
+| `GOOGLE_NEWS_ENABLED` | `false` | Desactiva ingestión automática de Google News |
+| `DIRECT_WEB_INGESTION_ENABLED` | `false` | Desactiva ingestión automática de webs/blogs |
+| `LINKEDIN_DISCOVERY_ENABLED` | `false` | Desactiva búsqueda en LinkedIn |
+
+#### 2. Opcionales / Futuras (cuando se automaticen ingestas y análisis)
+
+| Variable | Valor por Defecto | Propósito |
+| :--- | :--- | :--- |
+| `GEMINI_API_KEY` | *(vacío)* | API Key para ejecución de pipeline analítico |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Modelo de producción para análisis |
+| `BRIGHTDATA_API_TOKEN` | *(vacío)* | Credencial para discovery de LinkedIn |
+| `APIFY_API_TOKEN` | *(vacío)* | Credencial fallback para LinkedIn |
+
+---
+
+### Conectividad con la Base de Datos PostgreSQL en Dokploy
+
+La base de datos `hitchings-news` ya está creada como servicio Database independiente en Dokploy.
+
+1. **Host Interno**: En Dokploy, los servicios Database exponen una URL de conexión interna accesible a través de la red del proyecto (por ejemplo `hitchings-news:5432` o el container name asignado por Dokploy).
+2. **Configuración de `DATABASE_URL`**: Copia la *Internal Connection URL* que muestra Dokploy en la pestaña de la base de datos y configúrala como variable `DATABASE_URL` en la aplicación Compose:
+   ```bash
+   DATABASE_URL=postgresql+psycopg://hitchings:<PASSWORD>@<INTERNAL_HOST>:5432/hitchings-news
+   ```
+   *(Nota: Asegúrate de que use el driver `postgresql+psycopg://`).*
+
+---
+
+### Paso a Paso de Despliegue en Dokploy
+
+1. En el panel de Dokploy, ve a tu proyecto y selecciona o crea la aplicación como **Compose**.
+2. En la configuración de Compose:
+   - **Compose File**: selecciona `docker-compose.prod.yml`.
+3. En la pestaña de **Environment**, introduce las variables obligatorias detalladas arriba.
+4. En la pestaña de **Domains**:
+   - **Domain**: `hitchings-gonzalez-news.doobot.ai`
+   - **Service**: `frontend`
+   - **Port**: `80`
+   - Habilita **HTTPS / SSL (Let's Encrypt)**.
+5. Haz clic en **Deploy**.
+6. Dokploy construirá las dos etapas:
+   - `Dockerfile.frontend`: compilará el bundle React con Bun y empaquetará Nginx.
+   - `Dockerfile.backend`: instalará dependencias Python, ejecutará migraciones de Alembic y arrancará FastAPI.
+
+---
+
+### Importación Posterior de Datos (Operación Separada)
+
+Una vez desplegada la aplicación y verificado que el frontend y backend responden correctamente (`/health` devuelve `status: ok` y la base de datos tiene las tablas creadas por Alembic):
+
+```powershell
+# 1. Exportar datos limpios de la base de datos local (solo datos, omitiendo schema ya creado por Alembic):
+pg_dump -U hitchings -h localhost -p 5432 -d hitchings --data-only --exclude-table=alembic_version -F p -f dump_data.sql
+
+# 2. Restaurar datos en la base de datos de Dokploy (via CLI de Dokploy o conexión psql):
+psql -U hitchings -h <DOKPLOY_POSTGRES_HOST> -p 5432 -d hitchings-news -f dump_data.sql
+```
+
+Tras la importación, el portal mostrará de inmediato las **89 publicaciones analizadas**, las **7 fuentes activas** y todo el fondo jurisprudencial sin requerir ninguna llamada a Gemini ni ingestiones adicionales.
+
+---
+
+## 37. Roadmap
 
 - [x] **Bloque 0:** Arquitectura base, persistencia, contratos y Docker.
 - [x] **Bloque 1:** Catálogo y gestión de fuentes, matriz de seguimiento v0.1.
@@ -1579,8 +1709,9 @@ La aplicación web estará accesible en: `http://localhost:5173/`.
 - [x] **Bloque 9C.2:** Corrección Final del Fallback Apify y Replay Real de Migración 0006 (harvestapi/linkedin-profile-posts, normalización de endpoint, replay aislado 0005→0006). *(Cerrado)*
 - [x] **Bloque 9D:** Análisis Incremental Controlado de Nuevas Entries (planeador agnóstico, filtro de suficiencia FULL, budget guard \$0.50, pipeline v6, 9 direct web entries analizadas). *(Cerrado)*
 - [x] **Bloque 10A:** Cierre de Producto y Finalización del Frontend (portal cliente conectado a datos reales en PostgreSQL, 7 fuentes activas, badges y filtros normalizados, visual audit completa). *(Cerrado)*
-- [ ] **Bloque 10B:** Módulo de análisis documental y generación de informes.
-- [ ] **Bloque 10C:** Automatización y scheduler de ingestas continuas.
+- [x] **Bloque 10B:** Empaquetado de Producción Dokploy Compose (`docker-compose.prod.yml`, Nginx reverse proxy, same-origin, migraciones automáticas). *(Cerrado)*
+- [ ] **Bloque 10C:** Módulo de análisis documental y generación de informes.
+- [ ] **Bloque 10D:** Automatización y scheduler de ingestas continuas.
 
 
 

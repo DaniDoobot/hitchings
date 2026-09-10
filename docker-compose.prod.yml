@@ -1,0 +1,72 @@
+# =============================================================
+# HITCHINGS Observatorio — docker-compose PRODUCCIÓN (Dokploy)
+# =============================================================
+# Arquitectura:
+#   - frontend: Nginx 1.27 Alpine + React SPA compilado (:80)
+#   - backend: FastAPI Python 3.12 (:8000, solo red interna)
+#   - Database: PostgreSQL administrada por Dokploy (externa al compose)
+#
+# Dominio único de producción:
+#   https://hitchings-gonzalez-news.doobot.ai
+# =============================================================
+
+services:
+
+  # -----------------------------------------------------------
+  # Backend — FastAPI (solo red interna Docker, NO expuesto al host)
+  # -----------------------------------------------------------
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+    networks:
+      - hitchings-net
+    environment:
+      ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DATABASE_URL: ${DATABASE_URL}
+      FRONTEND_URL: ${FRONTEND_URL:-https://hitchings-gonzalez-news.doobot.ai}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://hitchings-gonzalez-news.doobot.ai}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-hitchings_session}
+      AUTH_SESSION_TTL_HOURS: ${AUTH_SESSION_TTL_HOURS:-24}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+      # Production safeguards: zero background LLM / scrapers on startup
+      ANALYSIS_PROVIDER: disabled
+      GOOGLE_NEWS_ENABLED: "false"
+      DIRECT_WEB_INGESTION_ENABLED: "false"
+      LINKEDIN_DISCOVERY_ENABLED: "false"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # -----------------------------------------------------------
+  # Frontend — Nginx + React SPA (único servicio expuesto al exterior)
+  # Dokploy / Traefik enruta https://hitchings-gonzalez-news.doobot.ai -> :80
+  # -----------------------------------------------------------
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - hitchings-net
+    depends_on:
+      backend:
+        condition: service_healthy
+
+networks:
+  hitchings-net:
+    driver: bridge

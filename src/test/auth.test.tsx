@@ -186,4 +186,21 @@ describe('Frontend Authentication & Route Protection (Bloque 8C.1)', () => {
       expect.objectContaining({ credentials: 'include' })
     );
   });
+
+  it('supports empty base URL for same-origin relative endpoints in production', async () => {
+    const { AuthApiService } = await import('../services/authApi');
+    const prodAuth = new AuthApiService('');
+    expect(prodAuth.getBaseUrl()).toBe('');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ user: { email: 'test@example.com' } }),
+    } as Response);
+
+    await prodAuth.login({ email: 'test@example.com', password: 'secretpassword' });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/v1/auth/login',
+      expect.objectContaining({ credentials: 'include' })
+    );
+  });
 });

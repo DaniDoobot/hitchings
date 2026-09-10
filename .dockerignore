@@ -1,0 +1,30 @@
+# Git and development
+.git
+.gitignore
+README.md
+
+# Environment and secrets (CRITICAL: never bake into image context)
+.env
+.env.*
+!.env.example
+
+# Virtual environments and dependencies
+.venv
+node_modules
+dist
+
+# Python and test caches
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+
+# Temporary files, logs, and artifacts
+scratch
+*.tmp
+logs
+*.log
+*.png

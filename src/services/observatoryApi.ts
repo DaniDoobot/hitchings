@@ -57,16 +57,16 @@ export class ObservatoryApiService {
         console.info('[ObservatoryApi] Running in explicit DEVELOPMENT MOCK mode.');
       }
     }
-    // Rule 3: Fail-Closed when Mock is False and Base URL is Missing
-    else if (!baseUrl) {
+    // Rule 3: Fail-Closed when Mock is False and Base URL is Missing in development
+    else if (!baseUrl && !isProd) {
       this.configError = 'VITE_API_BASE_URL is required when mock data is disabled';
     }
-    // Normal connected mode
+    // Normal connected mode (production same-origin or configured base URL)
     else {
       this.apiBaseUrl = baseUrl;
       this.isMockMode = false;
       if (typeof console !== 'undefined') {
-        console.info(`[ObservatoryApi] Connected to backend API: ${this.apiBaseUrl}`);
+        console.info(`[ObservatoryApi] Connected to backend API: ${this.apiBaseUrl || '(same-origin)'}`);
       }
     }
 
