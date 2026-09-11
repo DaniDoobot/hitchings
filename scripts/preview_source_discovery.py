@@ -61,6 +61,11 @@ from app.services.source_sufficiency_service import (
     SourceSufficiencyLevel,
     SourceSufficiencyService,
 )
+from app.services.cma_event_service import (
+    classify_cma_event_note,
+    get_derivative_family,
+    get_primary_family,
+)
 
 logger = logging.getLogger("preview_source_discovery")
 
@@ -1461,6 +1466,9 @@ class SourceDiscoveryPreviewService:
             "events_total_in_window": 0,
             "events_substantive": 0,
             "events_administrative": 0,
+            "responses_submissions_skipped": 0,
+            "derivative_summaries_skipped": 0,
+            "administrative_skipped": 0,
             "events_latest": 0,
             "events_historical": 0,
             "events_with_exact_attachment": 0,
@@ -1492,6 +1500,7 @@ class SourceDiscoveryPreviewService:
                         cdata = resp.json()
                         details = cdata.get("details", {})
                         change_history = details.get("change_history", [])
+                        valid_case_events = []
                         for ch in change_history:
                             ts_str = ch.get("public_timestamp")
                             note = (ch.get("note") or "").strip()
@@ -1504,12 +1513,23 @@ class SourceDiscoveryPreviewService:
                             cma_metrics["events_total_in_window"] += 1
                             summary.inside_lookback += 1
 
-                            ev_cls, _ = classify_cma_event_note(note)
+                            ev_cls, matched_rule = classify_cma_event_note(note)
                             if ev_cls == "SUBSTANTIVE":
                                 cma_metrics["events_substantive"] += 1
+                                valid_case_events.append(note)
                             else:
                                 cma_metrics["events_administrative"] += 1
+                                if matched_rule.startswith("third_party_response:"):
+                                    cma_metrics["responses_submissions_skipped"] += 1
+                                else:
+                                    cma_metrics["administrative_skipped"] += 1
                                 summary.excluded_editorially += 1
+
+                        prim_families = {fam for n in valid_case_events if (fam := get_primary_family(n)) is not None}
+                        for n in valid_case_events:
+                            deriv_fam = get_derivative_family(n)
+                            if deriv_fam and deriv_fam in prim_families:
+                                cma_metrics["derivative_summaries_skipped"] += 1
                 except Exception:
                     pass
 
@@ -1663,6 +1683,9 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  cases_updated_in_window: {cm.get('cases_updated_in_window')}")
             print(f"  events_total_in_window : {cm.get('events_total_in_window')}")
             print(f"  events_substantive     : {cm.get('events_substantive')}")
+            print(f"  responses_submissions_skipped : {cm.get('responses_submissions_skipped')}")
+            print(f"  derivative_summaries_skipped  : {cm.get('derivative_summaries_skipped')}")
+            print(f"  administrative_skipped        : {cm.get('administrative_skipped')}")
             print(f"  events_administrative  : {cm.get('events_administrative')}")
             print(f"  events_latest          : {cm.get('events_latest')}")
             print(f"  events_historical      : {cm.get('events_historical')}")

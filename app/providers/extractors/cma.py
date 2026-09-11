@@ -28,6 +28,8 @@ from app.providers.base import RawEntryData, ProviderError
 from app.services.source_sufficiency_service import SourceSufficiencyService, SourceSufficiencyLevel
 from app.services.cma_event_service import (
     is_cma_event_substantive,
+    get_derivative_family,
+    get_primary_family,
     format_cma_external_id,
     format_cma_event_url,
     map_cma_content_type,
@@ -220,7 +222,8 @@ class CMAExtractor:
 
         entries: list[RawEntryData] = []
 
-        # Evaluate ALL events in change_history within lookback window
+        # 1. Pre-filter substantive events within lookback window
+        valid_events = []
         for event_idx, event in enumerate(change_history):
             event_ts_str = event.get("public_timestamp")
             event_note = (event.get("note") or "").strip()
@@ -231,9 +234,26 @@ class CMAExtractor:
             if not event_dt or event_dt < cutoff_dt:
                 continue
 
-            # Deterministic substantive event classification
             if not is_cma_event_substantive(event_note):
                 logger.debug("Skipping administrative/non-substantive CMA event: '%s'", event_note)
+                continue
+
+            valid_events.append((event_idx, event, event_dt, event_note, event_ts_str))
+
+        # 2. Identify primary milestone families present in this window
+        primary_families_present = {
+            fam for _, _, _, note, _ in valid_events
+            if (fam := get_primary_family(note)) is not None
+        }
+
+        # 3. Process candidate events, suppressing derivative summaries if primary exists
+        for event_idx, event, event_dt, event_note, event_ts_str in valid_events:
+            deriv_fam = get_derivative_family(event_note)
+            if deriv_fam and deriv_fam in primary_families_present:
+                logger.info(
+                    "Skipping derivative summary event '%s' because primary milestone '%s' exists in the same window for '%s'",
+                    event_note, deriv_fam, case_title,
+                )
                 continue
 
             # Determine whether this is the latest/current event

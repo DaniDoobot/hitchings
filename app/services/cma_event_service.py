@@ -7,60 +7,90 @@ import re
 from datetime import datetime, timezone
 from typing import Optional, Any
 
-STRONG_SUBSTANTIVE: list[str] = [
+AUTHORITATIVE_STRONG_PATTERNS: list[str] = [
+    # Decisions & Outcomes
     "infringement decision",
-    "full text decision",
-    "final decision",
     "clearance decision",
+    "full text decision",
+    "non-confidential decision",
+    "final decision",
+    "proposed decision",
+    "decision to refer",
+    "reference decision",
+    "decision published",
+    "decision announced",
+    "decision made",
+    "decision issued",
+    "phase 1 decision",
+    "phase 2 referral",
+    "referred to phase 2",
+    "referral to phase 2",
+    # Reports & Findings
     "final report",
     "provisional findings",
     "provisional decision",
+    # Undertakings & Commitments & Remedies
+    "undertakings accepted",
+    "undertaking accepted",
+    "acceptance of undertakings",
+    "acceptance of final undertakings",
+    "acceptance of interim undertakings",
+    "interim undertakings accepted",
+    "interim undertakings",
+    "interim undertaking",
+    "commitments accepted",
+    "commitment accepted",
+    "acceptance of commitments",
     "undertaking",
     "undertakings",
-    "commitment",
-    "commitments",
-    "phase 2",
-    "referral",
-    "remedies",
+    "remedies working paper",
+    # Orders & Remedies
+    "final order",
+    "interim order",
+    "enforcement order",
+    "order made",
+    "order published",
+    "directions issued",
+    # Digital Markets (DMCC)
     "conduct requirement",
     "strategic market status",
-    "final order",
+    "sms designation",
+    # Inquiries & Statements & Launches
+    "statement of objections",
+    "issues statement",
+    "statement of issues",
+    "working paper published",
+    "inquiry launched",
+    "investigation launched",
+    "commencement notice",
     "director disqualification",
+    "penalty imposed",
+    "penalty of",
+    "first published",
 ]
 
-GENERAL_SUBSTANTIVE: list[str] = [
-    "decision",
-    "clearance",
-    "infringement",
-    "commencement",
-    "investigation launched",
-    "inquiry launched",
-    "launched",
-    "statement of issues",
-    "issues statement",
-    "order",
-    "direction",
-    "penalty",
-    "first published",
+THIRD_PARTY_RESPONSE_PATTERNS: list[str] = [
+    r"\bresponses?\b",
+    r"\bsubmissions?\b",
+    r"\brepresentations?\b",
+    r"\bthird[- ]part(y|ies)\b",
+    r"\bpart(y|ies)['’]? response\b",
+    r"\bsupplementa(l|ry) response\b",
+    r"\bconsultation response\b",
+    r"\broundtable summar(y|ies)\b",
+    r"\bconsumer survey\b",
+    r"\bhearing summar(y|ies)\b",
 ]
 
 ADMIN_EXCLUDES: list[str] = [
     "administrative timetable",
     "timetable updated",
     "timetable published",
-    "responses to areas of focus",
-    "response to areas of focus",
-    "third party response",
-    "third party responses",
     "deadline extended",
     "contact details",
     "typographical",
     "inaccessible",
     "extension under section",
-    "hearing summaries",
-    "submissions published",
-    "submission published",
-    "summary of hearing",
     "penalty paid",
     "derogation letters",
     "derogation letter",
@@ -68,15 +98,85 @@ ADMIN_EXCLUDES: list[str] = [
     "derogation published",
 ]
 
+GENERAL_SUBSTANTIVE: list[str] = [
+    "decision",
+    "clearance",
+    "infringement",
+    "commencement",
+    "launched",
+    "order",
+    "direction",
+]
+
+DERIVATIVE_SUMMARY_PATTERNS: dict[str, list[str]] = {
+    "final_report": [
+        "summary of final report",
+        "summary of the final report",
+        "summary of final decision report",
+        "summary of report",
+    ],
+    "provisional_findings": [
+        "summary of provisional findings",
+        "summary of the provisional findings",
+        "summary of provisional decision",
+    ],
+    "decision": [
+        "summary of phase 1 decision",
+        "summary of final decision",
+        "summary of decision",
+        "summary of infringement decision",
+    ],
+}
+
+PRIMARY_MILESTONE_PATTERNS: dict[str, list[str]] = {
+    "final_report": [
+        "final report",
+        "final decision report",
+        "full report",
+    ],
+    "provisional_findings": [
+        "full text of provisional findings",
+        "notice of provisional findings",
+        "provisional findings",
+        "provisional decision",
+    ],
+    "decision": [
+        "full text decision",
+        "non-confidential decision",
+        "infringement decision",
+        "clearance decision",
+        "final decision published",
+        "phase 1 decision",
+    ],
+}
+
+
+def _has_response_indicator(text: str) -> Optional[str]:
+    """Check if text contains any third-party response/submission pattern."""
+    for pat in THIRD_PARTY_RESPONSE_PATTERNS:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return m.group(0)
+    return None
+
+
+def _has_authoritative_pattern(text: str) -> Optional[str]:
+    """Check if text contains any authoritative formal CMA action pattern."""
+    for pat in AUTHORITATIVE_STRONG_PATTERNS:
+        if pat in text:
+            return pat
+    return None
+
 
 def classify_cma_event_note(note: str) -> tuple[str, str]:
     """Classify a change_history event note into SUBSTANTIVE, ADMINISTRATIVE, or NON_SUBSTANTIVE.
     
     Deterministic Precedence:
-    1. STRONG_SUBSTANTIVE -> "SUBSTANTIVE"
-    2. ADMIN_EXCLUDES -> "ADMINISTRATIVE"
-    3. GENERAL_SUBSTANTIVE -> "SUBSTANTIVE"
-    4. Rest -> "NON_SUBSTANTIVE"
+    1. Independent Authoritative Action (clause free of response indicators) -> SUBSTANTIVE
+    2. Third-Party Response / Submission -> ADMINISTRATIVE (SKIP)
+    3. Administrative Excludes (timetable, etc.) -> ADMINISTRATIVE (SKIP)
+    4. General Substantive (if free of response indicators) -> SUBSTANTIVE
+    5. Rest -> NON_SUBSTANTIVE
     
     Returns:
         tuple[str, str]: (classification, matched_rule)
@@ -85,20 +185,30 @@ def classify_cma_event_note(note: str) -> tuple[str, str]:
     if not n:
         return "NON_SUBSTANTIVE", "empty_note"
 
-    # 1. STRONG_SUBSTANTIVE takes absolute precedence
-    for pattern in STRONG_SUBSTANTIVE:
-        if pattern in n:
-            return "SUBSTANTIVE", f"strong:{pattern}"
+    # Split note into candidate clauses by commas, semicolons, 'and', '&'
+    clauses = [c.strip() for c in re.split(r"[,;&]|\band\b", n) if c.strip()]
 
-    # 2. ADMIN_EXCLUDES
-    for pattern in ADMIN_EXCLUDES:
-        if pattern in n:
-            return "ADMINISTRATIVE", f"admin_exclude:{pattern}"
+    # 1. If an independent clause describes a formal CMA action free of response words:
+    for clause in clauses:
+        if not _has_response_indicator(clause):
+            auth_match = _has_authoritative_pattern(clause)
+            if auth_match:
+                return "SUBSTANTIVE", f"authoritative:{auth_match}"
 
-    # 3. GENERAL_SUBSTANTIVE
-    for pattern in GENERAL_SUBSTANTIVE:
-        if pattern in n:
-            return "SUBSTANTIVE", f"general:{pattern}"
+    # 2. Third-party response / submission
+    resp_match = _has_response_indicator(n)
+    if resp_match:
+        return "ADMINISTRATIVE", f"third_party_response:{resp_match}"
+
+    # 3. Administrative excludes
+    for admin_pat in ADMIN_EXCLUDES:
+        if admin_pat in n:
+            return "ADMINISTRATIVE", f"admin_exclude:{admin_pat}"
+
+    # 4. General substantive
+    for gen_pat in GENERAL_SUBSTANTIVE:
+        if gen_pat in n:
+            return "SUBSTANTIVE", f"general:{gen_pat}"
 
     return "NON_SUBSTANTIVE", "no_match"
 
@@ -107,6 +217,31 @@ def is_cma_event_substantive(note: str) -> bool:
     """Return True if the event note is classified as SUBSTANTIVE."""
     cls, _ = classify_cma_event_note(note)
     return cls == "SUBSTANTIVE"
+
+
+def get_derivative_family(note: str) -> Optional[str]:
+    """Return milestone family if note describes a derivative summary document."""
+    n = " ".join(note.lower().strip().split())
+    for family, patterns in DERIVATIVE_SUMMARY_PATTERNS.items():
+        for p in patterns:
+            if p in n:
+                return family
+    if "executive summary" in n:
+        return "general_summary"
+    return None
+
+
+def get_primary_family(note: str) -> Optional[str]:
+    """Return milestone family if note describes a primary authoritative document."""
+    n = " ".join(note.lower().strip().split())
+    # If the note is itself a summary, it cannot be the primary document
+    if get_derivative_family(note) is not None:
+        return None
+    for family, patterns in PRIMARY_MILESTONE_PATTERNS.items():
+        for p in patterns:
+            if p in n:
+                return family
+    return None
 
 
 def normalize_event_note(note: str) -> str:

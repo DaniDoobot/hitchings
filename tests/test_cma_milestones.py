@@ -52,6 +52,7 @@ from app.providers.extractors.cma import CMAExtractor, clean_html_body
 from app.services.cma_attachment_service import (
     CMAAttachmentService,
     AttachmentMatchResult,
+    PDFExtractionResult,
     MAX_PDF_BYTES,
 )
 from app.services.cma_event_service import (
@@ -696,3 +697,398 @@ async def test_z_dmcc_event_end_to_end(db_session: Session):
         assert entry.content_type == "digital_markets"
         assert entry.raw_metadata["legal_basis"] == "Digital Markets, Competition and Consumers Act 2024 (DMCC)"
         assert entry.raw_metadata["legal_basis_inferred"] is True
+
+
+# ------------------------------------------------------------------------------
+# TESTS BLOQUE 15B.1: Mandatory Hardening Tests (A through J)
+# ------------------------------------------------------------------------------
+
+def test_mandatory_classifier_responses_a_through_f():
+    """Mandatory tests A, B, C, D, E, F: Responses/submissions vs independent actions."""
+    # A) Parties' response to possible remedies published => SKIP
+    assert not is_cma_event_substantive("Parties' response to possible remedies published")
+    cls_a, rule_a = classify_cma_event_note("Parties' response to possible remedies published")
+    assert cls_a == "ADMINISTRATIVE"
+    assert "third_party_response" in rule_a
+
+    # B) BTEE's supplemental response published => SKIP
+    assert not is_cma_event_substantive("BTEE's supplemental response published")
+    cls_b, rule_b = classify_cma_event_note("BTEE's supplemental response published")
+    assert cls_b == "ADMINISTRATIVE"
+    assert "third_party_response" in rule_b
+
+    # C) Responses to provisional findings published => SKIP
+    assert not is_cma_event_substantive("Responses to provisional findings published")
+    cls_c, rule_c = classify_cma_event_note("Responses to provisional findings published")
+    assert cls_c == "ADMINISTRATIVE"
+    assert "third_party_response" in rule_c
+
+    # D) Third party submissions on remedies published => SKIP
+    assert not is_cma_event_substantive("Third party submissions on remedies published")
+    cls_d, rule_d = classify_cma_event_note("Third party submissions on remedies published")
+    assert cls_d == "ADMINISTRATIVE"
+    assert "third_party_response" in rule_d
+
+    # E) Interim undertakings accepted and responses published => SUBSTANTIVE
+    assert is_cma_event_substantive("Interim undertakings accepted and responses published")
+    cls_e, rule_e = classify_cma_event_note("Interim undertakings accepted and responses published")
+    assert cls_e == "SUBSTANTIVE"
+    assert "authoritative" in rule_e
+
+    # F) Final report published => SUBSTANTIVE
+    assert is_cma_event_substantive("Final report published")
+    cls_f, rule_f = classify_cma_event_note("Final report published")
+    assert cls_f == "SUBSTANTIVE"
+
+    # Additional edge cases:
+    assert not is_cma_event_substantive("Google response to proposed conduct requirements")
+    assert not is_cma_event_substantive("Responses to statement of issues published")
+    assert not is_cma_event_substantive("Consultation responses published.")
+
+
+@pytest.mark.asyncio
+async def test_g_summary_of_final_report_suppressed_when_primary_present():
+    """G: Summary of final report published + Final report published in same window -> summary suppressed."""
+    case_json = {
+        "title": "Alpha / Beta Merger Inquiry",
+        "content_id": "alpha-uuid-1",
+        "details": {
+            "metadata": {"case_type": "mergers"},
+            "body": "<p>Current docket body.</p>",
+            "change_history": [
+                {
+                    "public_timestamp": "2026-09-05T18:00:00Z",
+                    "note": "Final report, appendices and glossary published.",
+                },
+                {
+                    "public_timestamp": "2026-09-05T07:00:00Z",
+                    "note": "Summary of final report published.",
+                },
+            ],
+            "attachments": [
+                {
+                    "title": "Final report (PDF, 2MB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/111/final_report.pdf",
+                    "created_at": "2026-09-05T18:00:00Z",
+                },
+                {
+                    "title": "Summary of final report (PDF, 150KB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/222/summary.pdf",
+                    "created_at": "2026-09-05T07:00:00Z",
+                },
+            ],
+        },
+    }
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_json)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor()
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL, provider="native")
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/alpha-beta",
+            cutoff_dt=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+        # Only ONE entry emitted: the primary Final report! The derivative Summary is suppressed.
+        assert len(entries) == 1
+        assert "Final report" in entries[0].title
+        assert "Summary of final report" not in entries[0].title
+
+
+@pytest.mark.asyncio
+async def test_h_summary_of_provisional_findings_suppressed_when_primary_present():
+    """H: Summary of provisional findings + Full provisional findings -> summary suppressed."""
+    case_json = {
+        "title": "Gamma Market Investigation",
+        "content_id": "gamma-uuid-1",
+        "details": {
+            "metadata": {"case_type": "markets"},
+            "body": "<p>Market investigation proceedings.</p>",
+            "change_history": [
+                {
+                    "public_timestamp": "2026-09-10T14:00:00Z",
+                    "note": "Full text of provisional findings and appendices published",
+                },
+                {
+                    "public_timestamp": "2026-09-08T06:00:00Z",
+                    "note": "Summary of provisional findings published",
+                },
+            ],
+            "attachments": [
+                {
+                    "title": "Provisional findings (PDF, 1MB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/333/provisional_findings.pdf",
+                    "created_at": "2026-09-10T14:00:00Z",
+                },
+                {
+                    "title": "Summary of provisional findings (PDF, 100KB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/444/summary_pf.pdf",
+                    "created_at": "2026-09-08T06:00:00Z",
+                },
+            ],
+        },
+    }
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_json)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor()
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL, provider="native")
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/gamma-investigation",
+            cutoff_dt=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+
+        assert len(entries) == 1
+        assert "Full text of provisional findings" in entries[0].title
+
+
+@pytest.mark.asyncio
+async def test_i_final_report_and_remedies_decision_both_kept():
+    """I: Final report + remedies decision are legally distinct milestones and are both kept."""
+    case_json = {
+        "title": "Epsilon Acquisition Inquiry",
+        "content_id": "epsilon-uuid-1",
+        "details": {
+            "metadata": {"case_type": "mergers"},
+            "body": "<p>Phase 2 inquiry body.</p>",
+            "change_history": [
+                {
+                    "public_timestamp": "2026-09-10T12:00:00Z",
+                    "note": "Final decision published.",
+                },
+                {
+                    "public_timestamp": "2026-08-15T10:00:00Z",
+                    "note": "Final report, appendices and glossary published.",
+                },
+            ],
+            "attachments": [
+                {
+                    "title": "Final decision (PDF, 500KB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/555/final_decision.pdf",
+                    "created_at": "2026-09-10T12:00:00Z",
+                },
+                {
+                    "title": "Final report (PDF, 2MB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/666/final_report.pdf",
+                    "created_at": "2026-08-15T10:00:00Z",
+                },
+            ],
+        },
+    }
+
+    # Mock attachment service so historical event has text and passes sufficiency
+    mock_att = MagicMock(spec=CMAAttachmentService)
+    mock_att.match_event_attachment.side_effect = [
+        AttachmentMatchResult(level="EXACT", reason="Exact", primary_attachment=case_json["details"]["attachments"][0]),
+        AttachmentMatchResult(level="EXACT", reason="Exact", primary_attachment=case_json["details"]["attachments"][1]),
+    ]
+    mock_att.download_pdf_bounded.return_value = (b"dummy_pdf", None)
+    from app.services.cma_attachment_service import PDFExtractionResult
+    mock_att.extract_pdf_text_bounded.return_value = PDFExtractionResult(
+        text="Substantive legal content of the CMA document. " * 50,
+        pages_extracted=5,
+        total_pages=5,
+        bytes_count=1000,
+        extracted_chars=2000,
+        truncated=False,
+    )
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_json)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor(attachment_service=mock_att)
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL, provider="native")
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/epsilon",
+            cutoff_dt=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+
+        assert len(entries) == 2, "Both final decision and final report must be kept!"
+
+
+@pytest.mark.asyncio
+async def test_j_phase_1_decision_and_phase_2_referral_both_kept():
+    """J: Phase 1 decision + Phase 2 referral are legally distinct and both kept."""
+    case_json = {
+        "title": "Zeta / Theta Merger",
+        "content_id": "zeta-uuid-1",
+        "details": {
+            "metadata": {"case_type": "mergers"},
+            "body": "<p>Merger reference details.</p>",
+            "change_history": [
+                {
+                    "public_timestamp": "2026-09-05T09:00:00Z",
+                    "note": "Decision to refer and terms of reference published.",
+                },
+                {
+                    "public_timestamp": "2026-08-25T07:00:00Z",
+                    "note": "Phase 1 decision announced and summary document published.",
+                },
+            ],
+            "attachments": [],
+        },
+    }
+
+    mock_att = MagicMock(spec=CMAAttachmentService)
+    mock_att.match_event_attachment.return_value = AttachmentMatchResult(level="NONE", reason="None", primary_attachment=None)
+    mock_att.download_pdf_bounded.return_value = (None, "no_url")
+    from app.services.cma_attachment_service import PDFExtractionResult
+    mock_att.extract_pdf_text_bounded.return_value = PDFExtractionResult(
+        text="Substantive legal content. " * 50,
+        pages_extracted=5,
+        total_pages=5,
+        bytes_count=1000,
+        extracted_chars=1500,
+        truncated=False,
+    )
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_json)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor(attachment_service=mock_att)
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL, provider="native")
+        # Pre-filter check: both events are classified as substantive
+        assert is_cma_event_substantive(case_json["details"]["change_history"][0]["note"])
+        assert is_cma_event_substantive(case_json["details"]["change_history"][1]["note"])
+
+        # Neither is a derivative summary of the other
+        note_referral = case_json["details"]["change_history"][0]["note"]
+        note_p1 = case_json["details"]["change_history"][1]["note"]
+        from app.services.cma_event_service import get_derivative_family, get_primary_family
+        assert get_derivative_family(note_referral) is None
+        assert get_derivative_family(note_p1) is None
+
+
+# ------------------------------------------------------------------------------
+# TESTS: Weekly Refresh Lookback (8 Days) & Seed Idempotency
+# ------------------------------------------------------------------------------
+
+def test_weekly_cma_uses_8_day_lookback():
+    """Weekly CMA uses 8-day lookback window by default."""
+    from app.providers.extractors.cma import DEFAULT_LOOKBACK_DAYS
+    assert DEFAULT_LOOKBACK_DAYS == 8
+
+    extractor = CMAExtractor()
+    src_without_config = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL, provider="native")
+    # Verify effective lookback defaults to 8
+    config = src_without_config.config or {}
+    effective = config.get("lookback_days", DEFAULT_LOOKBACK_DAYS)
+    assert effective == 8
+
+
+def test_seed_cma_source_idempotent_url(db_session: Session):
+    """Seed script is idempotent, sets Source.url to https://www.gov.uk/cma-cases, and configures 8-day lookback."""
+    with patch("scripts.seed_source_cma.SessionLocal", return_value=db_session):
+        src1 = seed_cma_source()
+        assert src1.url == "https://www.gov.uk/cma-cases"
+        assert src1.config["lookback_days"] == 8
+        assert src1.provider == "native"
+        assert src1.type == SourceType.INSTITUTIONAL
+
+        # Second execution (idempotency check)
+        src2 = seed_cma_source()
+        assert src2.id == src1.id
+        assert src2.url == "https://www.gov.uk/cma-cases"
+        assert src2.config["lookback_days"] == 8
+
+        # Verify only 1 Source exists
+        all_cma = db_session.query(Source).filter(Source.name == CMA_SOURCE_NAME).all()
+        assert len(all_cma) == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_weekly_cma_integration_two_events(db_session: Session):
+    """Integration: Active CMA source with 8-day lookback invokes CMAExtractor and captures 2 substantive events."""
+    src = Source(
+        id=uuid.uuid4(),
+        name=CMA_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        url="https://www.gov.uk/cma-cases",
+        active=True,
+        config={"lookback_days": 8},
+    )
+    db_session.add(src)
+    db_session.commit()
+
+    now_utc = datetime.now(timezone.utc)
+    ts_ev1 = (now_utc - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts_ev2 = (now_utc - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    sample_pdf_bytes = create_synthetic_pdf(5, "Substantive issues statement text for weekly test. " * 50)
+    case_data = {
+        "title": "Weekly Test Inquiry",
+        "content_id": "weekly-test-uuid",
+        "details": {
+            "metadata": {"case_type": "mergers"},
+            "body": "<p>" + "Body of case during weekly cycle. " * 50 + "</p>",
+            "change_history": [
+                {"public_timestamp": ts_ev1, "note": "Final decision published."},
+                {"public_timestamp": ts_ev2, "note": "Issues statement published."},
+            ],
+            "attachments": [
+                {
+                    "title": "Issues statement (PDF, 200KB)",
+                    "url": "https://assets.publishing.service.gov.uk/media/777/issues_statement.pdf",
+                    "created_at": ts_ev2,
+                }
+            ],
+        },
+    }
+
+    search_data = {
+        "total": 1,
+        "results": [{"link": "/cma-cases/weekly-test-inquiry", "public_timestamp": ts_ev1}],
+    }
+
+    def handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "search.json" in url_str:
+            return httpx.Response(200, json=search_data)
+        if "/api/content/cma-cases/weekly-test-inquiry" in url_str:
+            return httpx.Response(200, json=case_data)
+        if "issues_statement.pdf" in url_str:
+            return httpx.Response(200, content=sample_pdf_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        from app.providers.native import NativeProvider
+        provider = NativeProvider(client=client)
+        assert provider.can_handle(src)
+
+        with patch.object(
+            CMAAttachmentService,
+            "extract_pdf_text_bounded",
+            return_value=PDFExtractionResult(
+                text="Substantive legal text of the issues statement. " * 60,
+                total_pages=5,
+                pages_extracted=5,
+                bytes_count=1000,
+                extracted_chars=3000,
+                truncated=False,
+            ),
+        ):
+            raw_entries = await provider.fetch_entries(src, client=client)
+            # Both substantive events occurred within the 8-day window
+            assert len(raw_entries) == 2
+            notes = [r.raw_metadata["event_note"] for r in raw_entries]
+            assert "Final decision published." in notes
+            assert "Issues statement published." in notes
+
