@@ -31,7 +31,7 @@ import httpx
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from sqlalchemy import event, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.config import get_settings
 from app.core.url_utils import (
@@ -461,6 +461,10 @@ class SourcePreviewSummary(BaseModel):
     new_candidate_chars: int = 0
     eligible_input_chars: int = 0
     estimated_input_chars: int = 0  # retained for backwards compatibility
+    existing_entries: int = 0
+    existing_with_completed_analysis: int = 0
+    existing_pending_analysis: int = 0
+    existing_failed_only: int = 0
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -481,6 +485,10 @@ class GlobalPreviewReport(BaseModel):
     total_new_candidate_chars: int = 0
     total_eligible_input_chars: int = 0
     total_estimated_input_chars: int = 0  # retained for backwards compatibility
+    total_existing_entries: int = 0
+    total_existing_with_completed_analysis: int = 0
+    total_existing_pending_analysis: int = 0
+    total_existing_failed_only: int = 0
     new_candidates_table: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -495,6 +503,45 @@ class SourceDiscoveryPreviewService:
         self.db = db
         self.now = now or datetime.now(timezone.utc)
         self.current_date = self.now.date()
+
+    def _compute_existing_metrics(self, source: Source) -> tuple[int, int, int, int]:
+        """Compute read-only inventory metrics for existing entries of a source.
+
+        Returns:
+            (existing_entries, existing_with_completed, existing_pending, existing_failed_only)
+        """
+        if not source.id:
+            return 0, 0, 0, 0
+
+        planner = IncrementalAnalysisPlanner(self.db)
+        entries = (
+            self.db.query(Entry)
+            .options(joinedload(Entry.analyses))
+            .filter(Entry.source_id == source.id)
+            .all()
+        )
+
+        total_existing = len(entries)
+        completed_cnt = 0
+        failed_only_cnt = 0
+        pending_cnt = 0
+
+        for e in entries:
+            analyses = e.analyses or []
+            completed = [a for a in analyses if a.status == "completed"]
+            failed = [a for a in analyses if a.status == "failed"]
+
+            if completed:
+                completed_cnt += 1
+            else:
+                if failed:
+                    failed_only_cnt += 1
+                # Check if eligible for analysis (currently FULL / eligible and no valid completed analysis)
+                cand = planner.evaluate_entry(e)
+                if cand.reason == "eligible":
+                    pending_cnt += 1
+
+        return total_existing, completed_cnt, pending_cnt, failed_only_cnt
 
     async def run_preview_async(
         self,
@@ -547,6 +594,12 @@ class SourceDiscoveryPreviewService:
                 logger.warning("Unrecognized target source: %s", source.name)
                 continue
 
+            ext_tot, ext_comp, ext_pend, ext_failed = self._compute_existing_metrics(source)
+            summary.existing_entries = ext_tot
+            summary.existing_with_completed_analysis = ext_comp
+            summary.existing_pending_analysis = ext_pend
+            summary.existing_failed_only = ext_failed
+
             report.sources_summaries.append(summary)
             report.total_discovered += summary.discovered_total
             report.total_duplicates += summary.duplicates
@@ -558,6 +611,10 @@ class SourceDiscoveryPreviewService:
             report.total_new_candidate_chars += summary.new_candidate_chars
             report.total_eligible_input_chars += summary.eligible_input_chars
             report.total_estimated_input_chars += summary.estimated_input_chars
+            report.total_existing_entries += ext_tot
+            report.total_existing_with_completed_analysis += ext_comp
+            report.total_existing_pending_analysis += ext_pend
+            report.total_existing_failed_only += ext_failed
             report.new_candidates_table.extend(summary.new_items)
 
         return report
@@ -1315,6 +1372,11 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
         print(f"  eligible_for_analysis  : {summary.eligible_for_analysis}")
         print(f"  new_candidate_chars    : {summary.new_candidate_chars}")
         print(f"  eligible_input_chars   : {summary.eligible_input_chars}")
+        if summary.existing_entries > 0:
+            print(f"  existing_entries       : {summary.existing_entries}")
+            print(f"  existing_with_completed: {summary.existing_with_completed_analysis}")
+            print(f"  existing_pending       : {summary.existing_pending_analysis}")
+            print(f"  existing_failed_only   : {summary.existing_failed_only}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -1328,6 +1390,11 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
     print(f"  potential_gemini_analyses  : {report.potential_gemini_analyses}")
     print(f"  new_candidate_chars        : {report.total_new_candidate_chars}")
     print(f"  eligible_input_chars       : {report.total_eligible_input_chars}")
+    if report.total_existing_entries > 0:
+        print(f"  existing_entries           : {report.total_existing_entries}")
+        print(f"  existing_with_completed    : {report.total_existing_with_completed_analysis}")
+        print(f"  existing_pending           : {report.total_existing_pending_analysis}")
+        print(f"  existing_failed_only       : {report.total_existing_failed_only}")
     print("-" * 95)
     print("  Coste de análisis          : Se calculará formalmente durante el plan de backfill v6.")
     print("                               (0 llamadas de Gemini ejecutadas en este preview).")
@@ -1342,11 +1409,16 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
         print(header)
         print("  " + "-" * 91)
         for item in report.new_candidates_table:
-            source_abbrev = (
-                "Geradin Partners" if "geradin" in item.source_name.lower() else (
-                    "EC DMA" if "dma" in item.source_name.lower() or "digital" in item.source_name.lower() else "OECD"
-                )
-            )
+            if "geradin" in item.source_name.lower():
+                source_abbrev = "Geradin Partners"
+            elif "dma" in item.source_name.lower() or "digital" in item.source_name.lower():
+                source_abbrev = "EC DMA"
+            elif "bundeskartellamt" in item.source_name.lower():
+                source_abbrev = "Bundeskartellamt"
+            elif "oecd" in item.source_name.lower():
+                source_abbrev = "OECD"
+            else:
+                source_abbrev = item.source_name[:22]
             elig_str = "SÍ" if item.eligible_for_analysis else "NO"
             title_trunc = item.title[:45] + ("..." if len(item.title) > 45 else "")
             print(f"  {item.date:<12} | {source_abbrev:<22} | {item.sufficiency.upper():<8} | {elig_str:<6} | {title_trunc}")

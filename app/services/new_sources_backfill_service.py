@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select, or_
 from sqlalchemy.orm import Session
 
+from app.core.advisory_lock import RefreshAdvisoryLock
 from app.core.config import Settings, get_settings
 from app.models.analysis import AnalysisCall, AnalysisPromptVersion, EntryAnalysis
 from app.models.entry import Entry
@@ -107,7 +108,7 @@ class NewSourcesBackfillReport(BaseModel):
     started_at: datetime = Field(default_factory=utc_now)
     finished_at: Optional[datetime] = None
     duration_seconds: float = 0.0
-    status: str = "completed"  # "completed", "dry_run", "aborted_max_new_entries", "aborted_max_analysis_calls", "failed"
+    status: str = "completed"  # "completed", "dry_run", "already_running", "aborted_max_new_entries", "aborted_max_analysis_calls", "failed"
     guard_triggered: Optional[str] = None
     is_dry_run: bool = True
     lookback_days: int = 90
@@ -269,9 +270,8 @@ class NewSourcesBackfillService:
         sync_client: Optional[httpx.Client] = None,
         async_client: Optional[httpx.AsyncClient] = None,
     ) -> NewSourcesBackfillReport:
-        """Execute or dry-run the backfill of new sources with circuit-breaker guards."""
+        """Execute or dry-run the backfill of new sources with circuit-breaker guards and advisory locking."""
         start_time = utc_now()
-        effective_max_analysis_entries = min(max_analysis_entries, max_analysis_calls)
         report = NewSourcesBackfillReport(
             is_dry_run=not confirm_real_calls,
             lookback_days=lookback_days,
@@ -280,6 +280,51 @@ class NewSourcesBackfillService:
             max_analysis_calls=max_analysis_calls,
             started_at=start_time,
         )
+
+        # Concurrency guard: Ensure single instance execution (mutual exclusion with other backfills and weekly refresh)
+        lock = RefreshAdvisoryLock(db)
+        if not lock.acquire():
+            msg = "Another backfill or weekly refresh process is currently running. Exiting cleanly."
+            logger.warning("[Backfill] %s", msg)
+            report.status = "already_running"
+            report.guard_triggered = msg
+            report.finished_at = utc_now()
+            report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+            report.db_counts_after = query_db_inventory_counts(db)
+            return report
+
+        try:
+            return await self._execute_backfill_locked(
+                db=db,
+                report=report,
+                start_time=start_time,
+                lookback_days=lookback_days,
+                confirm_real_calls=confirm_real_calls,
+                source_filter=source_filter,
+                max_new_entries=max_new_entries,
+                max_analysis_entries=max_analysis_entries,
+                max_analysis_calls=max_analysis_calls,
+                sync_client=sync_client,
+                async_client=async_client,
+            )
+        finally:
+            lock.release()
+
+    async def _execute_backfill_locked(
+        self,
+        db: Session,
+        report: NewSourcesBackfillReport,
+        start_time: datetime,
+        lookback_days: int = 90,
+        confirm_real_calls: bool = False,
+        source_filter: Optional[str] = None,
+        max_new_entries: int = 30,
+        max_analysis_entries: int = 15,
+        max_analysis_calls: int = 30,
+        sync_client: Optional[httpx.Client] = None,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> NewSourcesBackfillReport:
+        effective_max_analysis_entries = min(max_analysis_entries, max_analysis_calls)
 
         # 1. Capture inventory counts before execution
         report.db_counts_before = query_db_inventory_counts(db)

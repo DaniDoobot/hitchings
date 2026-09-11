@@ -836,3 +836,133 @@ def test_preview_oecd_multilingual_metadata_behavior():
     assert sample_fr_record["DOI"] != sample_en_record["DOI"]
 
 
+def test_preview_bundeskartellamt_label_and_existing_metrics(db_session: Session, capsys):
+    """Verify that Bundeskartellamt is correctly labeled in candidate table and existing metrics are accurate."""
+    from scripts.preview_source_discovery import (
+        BUNDESKARTELLAMT_SOURCE_NAME,
+        GlobalPreviewReport,
+        PreviewCandidateItem,
+        SourceDiscoveryPreviewService,
+        SourcePreviewSummary,
+        print_preview_report,
+    )
+    from app.models.entry import Entry
+    from app.models.analysis import EntryAnalysis
+    from app.models.tracking import TrackingMatrix, TrackingTopic
+
+    # 1. Verify label in print_preview_report
+    report = GlobalPreviewReport(
+        is_dry_run=True,
+        reference_date="2026-09-08",
+        cutoff_date="2026-06-10",
+        lookback_days=90,
+        sources_summaries=[
+            SourcePreviewSummary(
+                source_name=BUNDESKARTELLAMT_SOURCE_NAME,
+                discovered_total=1,
+                duplicates=0,
+                new_candidates=1,
+                full_count=1,
+                eligible_for_analysis=1,
+                existing_entries=5,
+                existing_with_completed_analysis=3,
+                existing_pending_analysis=1,
+                existing_failed_only=1,
+                new_items=[
+                    PreviewCandidateItem(
+                        date="2026-08-20",
+                        source_name=BUNDESKARTELLAMT_SOURCE_NAME,
+                        title="Bundeskartellamt Decision Case B12-21/23",
+                        url="https://www.bundeskartellamt.de/decision1",
+                        is_duplicate=False,
+                        sufficiency="full",
+                        content_chars=5000,
+                        eligible_for_analysis=True,
+                    )
+                ],
+            )
+        ],
+        total_discovered=1,
+        total_new=1,
+        total_full=1,
+        potential_gemini_analyses=1,
+        total_existing_entries=5,
+        total_existing_with_completed_analysis=3,
+        total_existing_pending_analysis=1,
+        total_existing_failed_only=1,
+        new_candidates_table=[
+            PreviewCandidateItem(
+                date="2026-08-20",
+                source_name=BUNDESKARTELLAMT_SOURCE_NAME,
+                title="Bundeskartellamt Decision Case B12-21/23",
+                url="https://www.bundeskartellamt.de/decision1",
+                is_duplicate=False,
+                sufficiency="full",
+                content_chars=5000,
+                eligible_for_analysis=True,
+            )
+        ],
+    )
+
+    print_preview_report(report)
+    out = capsys.readouterr().out
+    assert "Bundeskartellamt" in out
+    # Ensure it is not falsely labeled as OECD
+    assert "OECD" not in out
+    assert "existing_entries" in out
+    assert "existing_with_completed" in out
+
+    # 2. Verify _compute_existing_metrics logic
+    src = Source(
+        id=uuid.uuid4(),
+        name=BUNDESKARTELLAMT_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+    )
+    db_session.add(src)
+
+    matrix = TrackingMatrix(code="TEST-MX", name="Matrix", status="active")
+    db_session.add(matrix)
+    db_session.flush()
+
+    # Entry 1: completed analysis
+    e1 = Entry(id=uuid.uuid4(), source_id=src.id, title="E1", url="http://e1", content="A"*2000)
+    db_session.add(e1)
+    db_session.flush()
+    a1 = EntryAnalysis(
+        id=uuid.uuid4(),
+        entry_id=e1.id,
+        matrix_id=matrix.id,
+        status="completed",
+        pipeline_version="v6",
+        entry_content_hash=e1.content_hash or "hash1",
+        matrix_snapshot={"id": str(matrix.id)},
+        matrix_snapshot_hash="mhash1",
+    )
+    db_session.add(a1)
+
+    # Entry 2: failed only analysis, but FULL content -> pending
+    e2 = Entry(id=uuid.uuid4(), source_id=src.id, title="E2", url="http://e2", content="B"*2000)
+    db_session.add(e2)
+    db_session.flush()
+    a2 = EntryAnalysis(
+        id=uuid.uuid4(),
+        entry_id=e2.id,
+        matrix_id=matrix.id,
+        status="failed",
+        pipeline_version="v6",
+        matrix_snapshot={"id": str(matrix.id)},
+        matrix_snapshot_hash="mhash2",
+    )
+    db_session.add(a2)
+
+    db_session.commit()
+
+    preview_svc = SourceDiscoveryPreviewService(db=db_session)
+    tot, comp, pend, failed = preview_svc._compute_existing_metrics(src)
+    assert tot == 2
+    assert comp == 1
+    assert failed == 1
+    assert pend == 1
+
+
+

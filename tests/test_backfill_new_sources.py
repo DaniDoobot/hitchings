@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.advisory_lock import RefreshAdvisoryLock
 from app.core.config import Settings
 from app.models.analysis import AnalysisCall, AnalysisPromptVersion, EntryAnalysis
 from app.models.entry import Entry
@@ -1158,3 +1159,114 @@ async def test_geradin_persistence_no_sawarning(
         if issubclass(w.category, SAWarning) and "Source.entries" in str(w.message)
     ]
     assert len(entry_sawarnings) == 0, f"Unexpected SAWarning emitted: {entry_sawarnings}"
+
+
+# ==============================================================================
+# Bloque 14B.5: Advisory Lock & Concurrency Tests
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_backfill_advisory_lock_blocks_concurrent_execution(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    backfill_sources: dict[str, Source],
+):
+    """When the advisory lock is already held, a concurrent backfill returns status='already_running' immediately with 0 writes/calls."""
+    lock = RefreshAdvisoryLock(db_session)
+    assert lock.acquire() is True
+
+    try:
+        spy_ai = MockSpyAIProvider()
+        service = NewSourcesBackfillService(ai_provider=spy_ai)
+        report = await service.execute_backfill(
+            db=db_session,
+            lookback_days=90,
+            confirm_real_calls=True,
+            source_filter="geradin",
+        )
+
+        assert report.status == "already_running"
+        assert "Another backfill or weekly refresh process is currently running" in (report.guard_triggered or "")
+        assert report.entries_created == 0
+        assert report.actual_analysis_calls == 0
+        assert len(spy_ai.analyze_calls) == 0
+    finally:
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_backfill_advisory_lock_normal_flow_acquires_and_releases(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    backfill_sources: dict[str, Source],
+):
+    """A normal backfill run acquires the advisory lock and cleanly releases it upon completion."""
+    spy_ai = MockSpyAIProvider()
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=False,  # dry run
+        source_filter="geradin",
+    )
+    assert report.status == "dry_run"
+
+    # Verify lock is completely free
+    lock_check = RefreshAdvisoryLock(db_session)
+    assert lock_check.acquire() is True
+    lock_check.release()
+
+
+@pytest.mark.asyncio
+async def test_backfill_advisory_lock_released_on_exception(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    backfill_sources: dict[str, Source],
+):
+    """If an unhandled exception occurs inside backfill, finally block guarantees the lock is released."""
+    service = NewSourcesBackfillService()
+
+    with patch.object(service, "_execute_backfill_locked", side_effect=RuntimeError("Simulated crash")):
+        with pytest.raises(RuntimeError, match="Simulated crash"):
+            await service.execute_backfill(
+                db=db_session,
+                lookback_days=90,
+                confirm_real_calls=True,
+            )
+
+    # Verify lock was released despite the unhandled exception
+    lock_check = RefreshAdvisoryLock(db_session)
+    assert lock_check.acquire() is True
+    lock_check.release()
+
+
+@pytest.mark.asyncio
+async def test_backfill_and_weekly_refresh_mutual_exclusion(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    backfill_sources: dict[str, Source],
+):
+    """Weekly refresh and new sources backfill share the advisory lock and mutually exclude each other."""
+    from app.services.weekly_refresh_service import WeeklyRefreshService
+
+    # 1. Hold lock, verify WeeklyRefresh is blocked
+    lock = RefreshAdvisoryLock(db_session)
+    assert lock.acquire() is True
+
+    try:
+        weekly_service = WeeklyRefreshService()
+        weekly_report = weekly_service.run_weekly_refresh(db=db_session, confirm_real_calls=False)
+        assert weekly_report.status == "already_running"
+
+        # Also verify Backfill is blocked
+        backfill_service = NewSourcesBackfillService()
+        backfill_report = await backfill_service.execute_backfill(db=db_session, confirm_real_calls=False)
+        assert backfill_report.status == "already_running"
+    finally:
+        lock.release()
+
+    # 2. Verify both can acquire after release
+    lock_check = RefreshAdvisoryLock(db_session)
+    assert lock_check.acquire() is True
+    lock_check.release()

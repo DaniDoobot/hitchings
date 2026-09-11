@@ -28,14 +28,20 @@ class AnalysisGroundingError(ValueError):
     """Raised when an AI analysis evidence quote fails strict verbatim verification."""
 
 
-def normalize_text_for_matching(text: Optional[str]) -> str:
+MIN_ELLIPSIS_QUOTE_CHARS: int = 40
+
+
+def normalize_grounding_text(text: Optional[str]) -> str:
     """Normalize text for deterministic verbatim quote matching.
 
     Applies:
-    - Unicode NFKC normalization.
-    - Non-breaking space and special punctuation normalization.
-    - Newline and whitespace collapsing to a single space.
-    - Stripping of leading/trailing whitespace.
+    1. Unicode NFKC normalization.
+    2. Resolves PDF line-wrap hyphenation (word-\\ncontinuation or word-\\r\\ncontinuation -> wordcontinuation).
+       Preserves intra-line hyphens (e.g. 'private-enforcement' remains intact).
+    3. Normalizes smart punctuation and special characters.
+    4. Collapses multiple whitespace chars (spaces, tabs, newlines) into a single space.
+    5. Normalizes whitespace around punctuation.
+    6. Strips leading/trailing whitespace.
     """
     if not text:
         return ""
@@ -43,23 +49,46 @@ def normalize_text_for_matching(text: Optional[str]) -> str:
     # 1. Unicode NFKC
     norm = unicodedata.normalize("NFKC", text)
 
-    # 2. Normalize smart punctuation and special characters
+    # 2. Resolve line-wrap hyphenation typical in PDFs (word-\nnext -> wordnext)
+    # Only matches hyphens immediately followed by newline, preserving intra-line hyphens
+    norm = re.sub(r"(\w+)-\s*[\r\n]+\s*(\w+)", r"\1\2", norm)
+
+    # 3. Normalize smart punctuation and special characters
     norm = norm.replace("\u00a0", " ")  # non-breaking space
     norm = norm.replace("“", '"').replace("”", '"').replace("«", '"').replace("»", '"')
     norm = norm.replace("‘", "'").replace("’", "'").replace("`", "'")
     norm = norm.replace("–", "-").replace("—", "-")
 
-    # 3. Collapse multiple whitespace chars (spaces, tabs, newlines) into a single space
+    # 4. Collapse multiple whitespace chars (spaces, tabs, newlines) into a single space
     norm = re.sub(r"\s+", " ", norm).strip()
 
-    # 4. Remove inadvertent whitespace before closing punctuation and after opening punctuation
+    # 5. Remove inadvertent whitespace before closing punctuation and after opening punctuation
     # (common HTML/PDF extraction artifacts like "Regulation\n\n)" -> "Regulation )")
     norm = re.sub(r"\s+([,.:;!?\)\]])", r"\1", norm)
     norm = re.sub(r"([\(\[])\s+", r"\1", norm)
 
-    # 5. Normalize hyphenation spacing around word/digit boundaries (handles line-wrapped hyphens in PDF text)
+    # 6. Normalize hyphenation spacing around word/digit boundaries if spaces were present
     norm = re.sub(r"(\w)\s*-\s*(\w)", r"\1-\2", norm)
     return norm
+
+
+# Canonical alias for normalize_grounding_text
+normalize_text_for_matching = normalize_grounding_text
+
+
+def strip_trailing_ellipsis(quote: str, min_chars: int = MIN_ELLIPSIS_QUOTE_CHARS) -> str:
+    """If model quote ends with literal trailing ellipsis ('...' or '…'), strip it for comparison.
+
+    Security guard: Only strips if the remaining quote prefix meets min_chars (default >= 40).
+    Does NOT strip internal ellipses.
+    """
+    q = quote.strip()
+    m = re.search(r"(\.{3,}|…)\s*$", q)
+    if m:
+        prefix = q[:m.start()].strip()
+        if len(prefix) >= min_chars:
+            return prefix
+    return q
 
 
 def clean_quote_wrapper(quote: str) -> str:
@@ -152,7 +181,10 @@ def validate_grounding_quote(
             f"Must be 'title', 'content', or 'excerpt'."
         )
 
-    norm_quote = normalize_text_for_matching(raw_quote)
+    # Strip trailing ellipsis marker if remaining quote meets security threshold
+    quote_for_matching = strip_trailing_ellipsis(raw_quote, min_chars=MIN_ELLIPSIS_QUOTE_CHARS)
+
+    norm_quote = normalize_text_for_matching(quote_for_matching)
     norm_source = normalize_text_for_matching(source_text)
 
     if not norm_quote:

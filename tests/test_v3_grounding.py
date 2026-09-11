@@ -848,3 +848,102 @@ def test_v4_prompt_immutability_enforced_on_seed_conflict(db_session: Session):
     db_session.refresh(deep_v4)
     assert deep_v4.config == original_config
 
+
+# ==============================================================================
+# Bloque 14B.5: Hardened Grounding Tests (PDF Hyphenation & Trailing Ellipsis)
+# ==============================================================================
+
+def test_grounding_line_wrap_hyphenation_normalization():
+    """Line-wrap hyphenation is resolved (gesetzli-\\nchen and -\\r\\n -> gesetzlichen)."""
+    source_lf = "Vorliegen der gesetzli-\nchen Voraussetzungen"
+    source_crlf = "Vorliegen der gesetzli-\r\nchen Voraussetzungen"
+    quote = "Vorliegen der gesetzlichen Voraussetzungen"
+
+    # Both source formats match normalized quote
+    ev = GroundingEvidence(source_field="content", quote=quote)
+    assert validate_grounding_quote(ev, Entry(title="T", content=source_lf)) is True
+    assert validate_grounding_quote(ev, Entry(title="T", content=source_crlf)) is True
+
+
+def test_grounding_intra_word_hyphen_preserved():
+    """Intra-word hyphens on a single line are NOT collapsed (e.g. private-enforcement)."""
+    source = "This directive promotes private-enforcement mechanisms across Member States."
+    entry = Entry(title="T", content=source)
+
+    ev_valid = GroundingEvidence(source_field="content", quote="promotes private-enforcement mechanisms")
+    ev_collapsed = GroundingEvidence(source_field="content", quote="promotes privateenforcement mechanisms")
+
+    assert validate_grounding_quote(ev_valid, entry) is True
+    with pytest.raises(AnalysisGroundingError):
+        validate_grounding_quote(ev_collapsed, entry)
+
+
+def test_grounding_trailing_ellipsis_long_quote():
+    """Trailing ellipsis ('...' or '…') on quotes with prefix >= 40 chars is safely stripped and passes."""
+    source = "Personen, denen aus dem Verstoß ein Schaden entstanden ist, können diesen bei Vorliegen der Voraussetzungen geltend machen."
+    entry = Entry(title="T", content=source)
+
+    ev_dots = GroundingEvidence(source_field="content", quote="Personen, denen aus dem Verstoß ein Schaden entstanden ist...")
+    ev_unicode = GroundingEvidence(source_field="content", quote="Personen, denen aus dem Verstoß ein Schaden entstanden ist…")
+
+    assert validate_grounding_quote(ev_dots, entry) is True
+    assert validate_grounding_quote(ev_unicode, entry) is True
+
+
+def test_grounding_trailing_ellipsis_short_quote_fails():
+    """Trailing ellipsis on short quotes (< 40 chars) is NOT stripped, preserving strict security guard."""
+    source = "Personen, denen aus dem Verstoß ein Schaden entstanden ist."
+    entry = Entry(title="T", content=source)
+    ev_short = GroundingEvidence(source_field="content", quote="Personen, denen...")  # prefix is only 15 chars (< 40)
+
+    with pytest.raises(AnalysisGroundingError):
+        validate_grounding_quote(ev_short, entry)
+
+
+def test_grounding_internal_ellipsis_not_stripped():
+    """Internal ellipses in quotes are NOT stripped and must fail exact match if not in source."""
+    source = "Personen, denen aus dem Verstoß ein Schaden entstanden ist, können diesen geltend machen."
+    entry = Entry(title="T", content=source)
+    ev_internal = GroundingEvidence(source_field="content", quote="Personen, denen ... können diesen geltend machen")
+
+    with pytest.raises(AnalysisGroundingError):
+        validate_grounding_quote(ev_internal, entry)
+
+
+def test_grounding_real_bundeskartellamt_b12_21_23_fixture():
+    """Real B12-21/23 fixture quote that failed in production due to line-wrap hyphenation and trailing ellipsis."""
+    source_content = (
+        "Fallbericht B12-21/23 - Zusammenfassung\n\n"
+        "Personen, denen aus dem Verstoß ein Schaden entstanden ist,\n"
+        "können diesen bei Vorliegen der gesetzli-\n"
+        "chen Voraussetzungen vor den Zivilgerichten geltend machen.\n"
+        "Hierbei können sie sich auf die Feststellungen der Entscheidung stützen."
+    )
+    entry = Entry(title="B12-21/23", content=source_content)
+    # The exact quote Gemini produced
+    gemini_quote = (
+        "Personen, denen aus dem Verstoß ein Schaden entstanden ist, "
+        "können diesen bei Vorliegen der gesetzlichen Voraussetzungen..."
+    )
+    ev = GroundingEvidence(source_field="content", quote=gemini_quote)
+
+    # Must pass cleanly without error
+    assert validate_grounding_quote(ev, entry) is True
+
+
+def test_grounding_hallucinated_quote_fails():
+    """Substantively altered or completely fabricated quotes must fail strict grounding."""
+    source_content = (
+        "Personen, denen aus dem Verstoß ein Schaden entstanden ist, "
+        "können diesen bei Vorliegen der gesetzlichen Voraussetzungen vor den Zivilgerichten geltend machen."
+    )
+    entry = Entry(title="B12-21/23", content=source_content)
+    hallucinated_quote = (
+        "Personen haben keinen Anspruch auf Schadensersatz vor den Zivilgerichten."
+    )
+    ev = GroundingEvidence(source_field="content", quote=hallucinated_quote)
+
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev, entry)
+    assert "verbatim quote not found" in str(exc_info.value)
+
