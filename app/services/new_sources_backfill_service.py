@@ -45,7 +45,10 @@ from app.services.analysis_pipeline_service import (
 )
 from app.services.direct_web_ingestion_service import DirectWebIngestionService
 from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
-from app.services.ingestion_service import IngestionService
+from app.services.ingestion_service import (
+    IngestionService,
+    IngestionVolumeLimitExceededError,
+)
 from app.services.source_sufficiency_service import (
     SourceSufficiencyLevel,
     SourceSufficiencyService,
@@ -401,6 +404,20 @@ class NewSourcesBackfillService:
         }
 
         for source in target_sources:
+            remaining_new_budget = max(0, max_new_entries - report.entries_created)
+            if remaining_new_budget <= 0:
+                msg = (
+                    f"Ingestion volume guard triggered: entries created reached limit of {max_new_entries}. "
+                    f"Aborting before persisting source '{source.name}'!"
+                )
+                logger.warning("[Backfill GUARD] %s", msg)
+                report.status = "aborted_max_new_entries"
+                report.guard_triggered = msg
+                report.finished_at = utc_now()
+                report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+                report.db_counts_after = query_db_inventory_counts(db)
+                return report
+
             source_res = SourceBackfillResult(
                 source_id=str(source.id),
                 source_name=source.name,
@@ -417,6 +434,7 @@ class NewSourcesBackfillService:
                         sources=[source],
                         confirm_real_calls=True,
                         client=sync_client,
+                        max_new_entries=remaining_new_budget,
                     )
                     source_res.discovered = dw_report.total_discovered
                     source_res.duplicates = dw_report.total_duplicates
@@ -432,6 +450,7 @@ class NewSourcesBackfillService:
                         source_id=source.id,
                         db=db,
                         client=async_client,
+                        max_new_entries=remaining_new_budget,
                     )
                     source_res.discovered = getattr(
                         ingest_res, "fetched", getattr(ingest_res, "items_extracted", 0)
@@ -488,6 +507,22 @@ class NewSourcesBackfillService:
                 else:
                     source_res.status = "success"
 
+            except IngestionVolumeLimitExceededError as vol_exc:
+                msg = str(vol_exc)
+                logger.warning("[Backfill GUARD] %s", msg)
+                report.status = "aborted_max_new_entries"
+                report.guard_triggered = msg
+                # Rollback / remove any entries created earlier in this backfill run
+                if all_created_entries:
+                    for ent in all_created_entries:
+                        db.delete(ent)
+                    db.commit()
+                    all_created_entries.clear()
+                report.entries_created = 0
+                report.finished_at = utc_now()
+                report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+                report.db_counts_after = query_db_inventory_counts(db)
+                return report
             except Exception as exc:
                 logger.error(
                     "[Backfill] Error ingesting source '%s': %s", source.name, exc, exc_info=True
@@ -500,6 +535,25 @@ class NewSourcesBackfillService:
             report.sources_processed += 1
             report.entries_created += source_res.created
             report.duplicates += source_res.duplicates
+
+        # Post-persistence verification: Invariant check that total created <= max_new_entries
+        if report.entries_created > max_new_entries:
+            msg = (
+                f"Post-ingestion volume guard triggered: created {report.entries_created} entries, "
+                f"which exceeds --max-new-entries limit of {max_new_entries}. Rolling back!"
+            )
+            logger.warning("[Backfill GUARD] %s", msg)
+            report.status = "aborted_max_new_entries"
+            report.guard_triggered = msg
+            for ent in all_created_entries:
+                db.delete(ent)
+            db.commit()
+            all_created_entries.clear()
+            report.entries_created = 0
+            report.finished_at = utc_now()
+            report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+            report.db_counts_after = query_db_inventory_counts(db)
+            return report
 
         # 7. Step 5C — Analysis Planning & AI Execution
         cutoff_dt = start_time - timedelta(days=lookback_days)

@@ -765,6 +765,84 @@ async def test_race_real_discovery_exceeds_volume_guard_aborts_with_zero_entries
 
 
 @pytest.mark.asyncio
+async def test_race_after_volume_preflight_cannot_persist_over_limit(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Race condition test (Bloque 12G.2):
+    Preview discovery       = 20
+    Prospective discovery   = 20
+    Ingestion discovery     = 31
+    Max new entries         = 30
+
+    Guarantees:
+    - entries_created == 0
+    - DB Entry delta == 0
+    - report.status == 'aborted_max_new_entries'
+    """
+    call_count = 0
+
+    def race_post_preflight_router(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        url_str = str(request.url)
+        if "digital-markets-act.ec.europa.eu/news_en" in url_str:
+            if "page=" in url_str and "page=0" not in url_str:
+                return httpx.Response(200, text="<!DOCTYPE html><html><body><div class='ecl-container'></div></body></html>")
+            call_count += 1
+            # Call 1 (preview): 20 items. Call 2 (prospective preflight): 20 items. Call 3 (ingestion discovery): 31 items.
+            count = 20 if call_count <= 2 else 31
+            articles_html = "".join(
+                f"""<article class="ecl-content-item">
+                   <ul class="ecl-content-block__primary-meta">
+                     <li class="ecl-content-block__primary-meta-item">News article</li>
+                     <li class="ecl-content-block__primary-meta-item"><time datetime="2026-08-20T10:00:00Z">20 August 2026</time></li>
+                   </ul>
+                   <h1 class="ecl-content-block__title">
+                     <a href="/dma-article-{i}" class="ecl-link">DMA Investigation {i}</a>
+                   </h1>
+                   <div class="ecl-content-block__description">Formal DMA proceedings {i}.</div>
+                 </article>"""
+                for i in range(count)
+            )
+            return httpx.Response(200, text=f"<!DOCTYPE html><html><body><div class='ecl-container'>{articles_html}</div></body></html>")
+        elif "dma-article-" in url_str:
+            return httpx.Response(200, text="<!DOCTYPE html><html><body><article><p>" + ("DMA substantive content. " * 30) + "</p></article></body></html>")
+        return httpx.Response(200, text="<!DOCTYPE html><html><body></body></html>")
+
+    sync_client = httpx.Client(transport=httpx.MockTransport(race_post_preflight_router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(race_post_preflight_router))
+    spy_ai = MockSpyAIProvider()
+
+    dma_source = backfill_sources["dma"]
+    db_entries_before = db_session.query(Entry).count()
+
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=50,
+        max_analysis_calls=50,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    # Must abort due to ingestion volume guard
+    assert report.status == "aborted_max_new_entries"
+    assert report.entries_created == 0
+
+    # EXACTLY 0 entries persisted in database, DB Entry delta == 0
+    db_entries_after = db_session.query(Entry).count()
+    assert db_entries_after - db_entries_before == 0
+    assert db_session.query(Entry).filter(Entry.source_id == dma_source.id).count() == 0
+
+
+
+@pytest.mark.asyncio
 async def test_race_real_plan_exceeds_cost_guard_aborts_with_zero_gemini_calls(
     db_session: Session,
     active_matrix: TrackingMatrix,

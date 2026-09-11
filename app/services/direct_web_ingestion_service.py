@@ -22,7 +22,10 @@ from app.models.source import Source, SourceType
 from app.models.tracking import TrackedEntity
 from app.providers.direct_web.base import DirectWebExtractionError
 from app.providers.direct_web.registry import DirectWebAdapterRegistry
-from app.services.ingestion_service import compute_ingestion_dedupe_hash
+from app.services.ingestion_service import (
+    IngestionVolumeLimitExceededError,
+    compute_ingestion_dedupe_hash,
+)
 from app.services.source_sufficiency_service import (
     SourceSufficiencyLevel,
     SourceSufficiencyService,
@@ -94,6 +97,7 @@ class DirectWebIngestionService:
         max_items_per_source: Optional[int] = None,
         confirm_real_calls: bool = False,
         client: Optional[httpx.Client] = None,
+        max_new_entries: Optional[int] = None,
     ) -> DirectWebIngestionReport:
         """Execute ingestion for direct web sources with fail-closed safety and failure isolation."""
         settings = self.settings
@@ -139,6 +143,12 @@ class DirectWebIngestionService:
             if not source:
                 continue
 
+            remaining_budget = (
+                max(0, max_new_entries - report.total_created)
+                if max_new_entries is not None
+                else None
+            )
+
             source_result = self._process_single_source(
                 db=db,
                 source=source,
@@ -146,6 +156,7 @@ class DirectWebIngestionService:
                 is_dry_run=is_dry_run,
                 existing_gn_entries=existing_gn_entries,
                 client=client,
+                max_new_entries=remaining_budget,
             )
             report.results_by_source.append(source_result)
             report.sources_processed += 1
@@ -169,6 +180,7 @@ class DirectWebIngestionService:
         is_dry_run: bool,
         existing_gn_entries: list[Entry],
         client: Optional[httpx.Client] = None,
+        max_new_entries: Optional[int] = None,
     ) -> DirectSourceRunResult:
         """Process a single direct source with complete failure isolation and IngestionRun tracking."""
         source_id = source.id
@@ -224,6 +236,28 @@ class DirectWebIngestionService:
                 # 1. Discover items
                 discovered_items = adapter.discover(source, limit=limit, client=client)
                 result.items_discovered = len(discovered_items)
+
+                # Prospective volume guard check before fetching details
+                if max_new_entries is not None:
+                    prospective_new = 0
+                    seen_check_urls: set[str] = set()
+                    for item in discovered_items:
+                        norm_item_url = normalize_url(item.url)
+                        if not norm_item_url or norm_item_url in seen_check_urls or norm_item_url in existing_urls:
+                            continue
+                        seen_check_urls.add(norm_item_url)
+                        lookback_days = (source.config or {}).get("lookback_days")
+                        if lookback_days and item.published_at:
+                            cutoff_dt = utc_now() - timedelta(days=lookback_days)
+                            if item.published_at < cutoff_dt:
+                                continue
+                        prospective_new += 1
+
+                    if prospective_new > max_new_entries:
+                        raise IngestionVolumeLimitExceededError(
+                            f"Direct web volume guard triggered: discovered {prospective_new} new items, "
+                            f"which exceeds --max-new-entries limit of {max_new_entries}."
+                        )
 
                 seen_in_run_urls: set[str] = set()
 
@@ -320,6 +354,12 @@ class DirectWebIngestionService:
                             raw_meta["tracked_author_entity_id"] = str(matched_author_entity.id)
                             raw_meta["tracked_author_entity_name"] = matched_author_entity.display_name
 
+                    # In-loop volume guard check before persisting
+                    if max_new_entries is not None and result.entries_created >= max_new_entries:
+                        raise IngestionVolumeLimitExceededError(
+                            f"Direct web volume guard triggered: created entries reached limit of {max_new_entries}."
+                        )
+
                     entry = Entry(
                         source_id=source.id,
                         external_id=article.external_id,
@@ -398,6 +438,17 @@ class DirectWebIngestionService:
 
             db.commit()
 
+        except IngestionVolumeLimitExceededError as exc:
+            logger.warning(f"Volume limit exceeded for Source {source_name}: {exc}")
+            try:
+                run.finished_at = utc_now()
+                run.status = IngestionRunStatus.FAILED.value
+                run.error_type = type(exc).__name__
+                run.error_message = str(exc)[:500]
+                db.commit()
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             logger.error(f"Fatal error running ingestion for Source {source_name}: {exc}", exc_info=True)
             result.failed_count += 1

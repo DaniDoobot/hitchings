@@ -42,6 +42,11 @@ def compute_ingestion_dedupe_hash(title: Optional[str], url: str, excerpt: Optio
 compute_content_hash = compute_ingestion_dedupe_hash
 
 
+class IngestionVolumeLimitExceededError(Exception):
+    """Raised when prospective or actual new entries exceed the configured volume limit."""
+    pass
+
+
 class IngestionService:
     """Service handling manual or automated ingestion runs for data sources."""
 
@@ -59,11 +64,67 @@ class IngestionService:
             raise ValueError(f"Unknown provider: '{provider_name}'")
         return provider
 
+    def _check_duplicate_entry(
+        self, raw: RawEntryData, source: Source, db: Session
+    ) -> tuple[bool, Optional[Entry], Optional[str]]:
+        """Determine if a raw entry is already present in the database according to deduplication rules."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 0. Cross-source deduplication for European Commission (e.g. DMA vs DG COMP Press Corner)
+        presscorner_ref = raw.raw_metadata.get("presscorner_ref") if raw.raw_metadata else None
+        presscorner_url = raw.raw_metadata.get("presscorner_url") if raw.raw_metadata else None
+
+        if presscorner_ref or presscorner_url:
+            ref_conditions = []
+            if presscorner_url:
+                ref_conditions.append(Entry.url == presscorner_url)
+                ref_conditions.append(Entry.canonical_url == presscorner_url)
+            if presscorner_ref:
+                ref_slug = presscorner_ref.lower().replace("/", "_")
+                ref_conditions.append(Entry.url.ilike(f"%{ref_slug}%"))
+                ref_conditions.append(Entry.canonical_url.ilike(f"%{ref_slug}%"))
+                ref_conditions.append(Entry.external_id.ilike(f"%{ref_slug}%"))
+
+            existing_cross = db.execute(
+                select(Entry).where(or_(*ref_conditions)).limit(1)
+            ).scalar_one_or_none()
+
+            if existing_cross:
+                return True, existing_cross, "presscorner"
+
+        # 1. Within-source deduplication:
+        # - source_id + external_id (if available)
+        # - source_id + url or canonical_url
+        # - source_id + content_hash (fallback)
+        dup_conditions = []
+        if raw.external_id:
+            dup_conditions.append(Entry.external_id == raw.external_id)
+
+        resolved_canonical_url = presscorner_url if presscorner_url else raw.url
+
+        dup_conditions.append(Entry.url == raw.url)
+        dup_conditions.append(Entry.canonical_url == raw.url)
+        dup_conditions.append(Entry.canonical_url == resolved_canonical_url)
+        dup_conditions.append(Entry.content_hash == c_hash)
+
+        existing = db.execute(
+            select(Entry).where(
+                Entry.source_id == source.id,
+                or_(*dup_conditions),
+            ).limit(1)
+        ).scalar_one_or_none()
+
+        if existing:
+            return True, existing, "regular"
+
+        return False, None, None
+
     async def ingest_source(
         self,
         source_id: uuid.UUID,
         db: Session,
         client: Optional[httpx.AsyncClient] = None,
+        max_new_entries: Optional[int] = None,
     ) -> IngestionResult:
         """Execute ingestion for a single source, deduplicating and persisting entries."""
         source = db.get(Source, source_id)
@@ -103,6 +164,33 @@ class IngestionService:
                 raw_entries: list[RawEntryData] = await provider.fetch_entries(source, client=client)
             else:
                 raw_entries = await provider.fetch_entries(source)
+
+            # Circuit-breaker: Fail-closed if prospective new entries exceed max_new_entries
+            if max_new_entries is not None:
+                prospective_new = sum(
+                    1 for raw in raw_entries
+                    if not self._check_duplicate_entry(raw, source, db)[0]
+                )
+                if prospective_new > max_new_entries:
+                    raise IngestionVolumeLimitExceededError(
+                        f"Ingestion volume guard triggered: discovered {prospective_new} new entries, "
+                        f"which exceeds --max-new-entries limit of {max_new_entries}."
+                    )
+
+        except IngestionVolumeLimitExceededError as vol_exc:
+            logger.warning(
+                "Ingestion volume guard triggered for source '%s' (run_id=%s): %s",
+                source.name, run.id, vol_exc
+            )
+            run.finished_at = datetime.now(timezone.utc)
+            run.status = IngestionRunStatus.FAILED.value
+            run.error_type = type(vol_exc).__name__
+            run.error_message = str(vol_exc)[:1000]
+            try:
+                db.commit()
+            except Exception:
+                pass
+            raise
         except Exception as exc:
             logger.error(
                 "Ingestion fetch failed for source '%s' (run_id=%s): %s",
@@ -124,30 +212,15 @@ class IngestionService:
         for raw in raw_entries:
             try:
                 with db.begin_nested():
-                    c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+                    if max_new_entries is not None and created >= max_new_entries:
+                        raise IngestionVolumeLimitExceededError(
+                            f"Ingestion volume guard triggered: created entries reached limit of {max_new_entries}."
+                        )
 
-                    # Deduplication hierarchy:
-                    # 0. Cross-source deduplication for European Commission (e.g. DMA vs DG COMP Press Corner)
-                    presscorner_ref = raw.raw_metadata.get("presscorner_ref") if raw.raw_metadata else None
-                    presscorner_url = raw.raw_metadata.get("presscorner_url") if raw.raw_metadata else None
-
-                    if presscorner_ref or presscorner_url:
-                        ref_conditions = []
-                        if presscorner_url:
-                            ref_conditions.append(Entry.url == presscorner_url)
-                            ref_conditions.append(Entry.canonical_url == presscorner_url)
-                        if presscorner_ref:
-                            ref_slug = presscorner_ref.lower().replace("/", "_")
-                            ref_conditions.append(Entry.url.ilike(f"%{ref_slug}%"))
-                            ref_conditions.append(Entry.canonical_url.ilike(f"%{ref_slug}%"))
-                            ref_conditions.append(Entry.external_id.ilike(f"%{ref_slug}%"))
-
-                        existing_cross = db.execute(
-                            select(Entry).where(or_(*ref_conditions)).limit(1)
-                        ).scalar_one_or_none()
-
-                        if existing_cross:
-                            meta = dict(existing_cross.raw_metadata or {})
+                    is_dup, existing_entry, dup_type = self._check_duplicate_entry(raw, source, db)
+                    if is_dup:
+                        if dup_type == "presscorner" and existing_entry:
+                            meta = dict(existing_entry.raw_metadata or {})
                             meta["cross_source_matched"] = True
                             meta["cross_source_matched_from"] = source.name
                             if (
@@ -156,40 +229,17 @@ class IngestionService:
                                 or "digital markets act" in (source.name or "").lower()
                             ):
                                 meta["dma_portal_url"] = raw.url
-                            existing_cross.raw_metadata = meta
+                            existing_entry.raw_metadata = meta
                             logger.info(
                                 "Cross-source deduplication: Entry '%s' matched existing Entry id=%s via Press Corner %s",
-                                raw.title, existing_cross.id, presscorner_ref or presscorner_url
+                                raw.title, existing_entry.id, raw.raw_metadata.get("presscorner_ref") or raw.raw_metadata.get("presscorner_url")
                             )
-                            duplicates += 1
-                            continue
-
-                    # 1. source_id + external_id (if available)
-                    # 2. source_id + url or canonical_url
-                    # 3. source_id + content_hash (fallback)
-                    dup_conditions = []
-                    if raw.external_id:
-                        dup_conditions.append(Entry.external_id == raw.external_id)
-
-                    resolved_canonical_url = (
-                        presscorner_url if presscorner_url else raw.url
-                    )
-
-                    dup_conditions.append(Entry.url == raw.url)
-                    dup_conditions.append(Entry.canonical_url == raw.url)
-                    dup_conditions.append(Entry.canonical_url == resolved_canonical_url)
-                    dup_conditions.append(Entry.content_hash == c_hash)
-
-                    existing = db.execute(
-                        select(Entry.id).where(
-                            Entry.source_id == source.id,
-                            or_(*dup_conditions)
-                        ).limit(1)
-                    ).scalar_one_or_none()
-
-                    if existing:
                         duplicates += 1
                         continue
+
+                    c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+                    presscorner_url = raw.raw_metadata.get("presscorner_url") if raw.raw_metadata else None
+                    resolved_canonical_url = presscorner_url if presscorner_url else raw.url
 
                     new_entry = Entry(
                         source_id=source.id,
@@ -210,6 +260,8 @@ class IngestionService:
                     db.add(new_entry)
                     created += 1
 
+            except IngestionVolumeLimitExceededError:
+                raise
             except Exception as item_err:
                 logger.warning(
                     "Error processing raw entry for source '%s' (run_id=%s, url=%s): %s",
