@@ -48,6 +48,7 @@ from app.models.source import Source, SourceType
 from app.providers.base import RawEntryData
 from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAdapter
 from app.providers.direct_web.models import DirectWebArticle, DiscoveredItem
+from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
 from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
 from app.providers.extractors.oecd_competition import (
     OECDCompetitionExtractor,
@@ -65,11 +66,13 @@ logger = logging.getLogger("preview_source_discovery")
 GERADIN_SOURCE_NAME = "Geradin Partners - EU Competition & Litigation"
 DMA_SOURCE_NAME = "European Commission - Digital Markets Act"
 OECD_SOURCE_NAME = "OECD - Competition Law and Policy"
+BUNDESKARTELLAMT_SOURCE_NAME = "Bundeskartellamt"
 
 TARGET_SOURCE_NAMES = [
     GERADIN_SOURCE_NAME,
     DMA_SOURCE_NAME,
     OECD_SOURCE_NAME,
+    BUNDESKARTELLAMT_SOURCE_NAME,
 ]
 
 
@@ -281,6 +284,72 @@ class ReadOnlyDeduplicationInspector:
         return ReadOnlyDeduplicationResult(is_duplicate=False)
 
     @staticmethod
+    def check_bundeskartellamt_item(
+        db: Session,
+        source_id: uuid.UUID,
+        raw: RawEntryData,
+    ) -> ReadOnlyDeduplicationResult:
+        """Evaluate Bundeskartellamt publication candidate against database in read-only mode."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 1. External ID check
+        if raw.external_id:
+            existing_ext = db.execute(
+                select(Entry).where(
+                    Entry.source_id == source_id,
+                    Entry.external_id == raw.external_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing_ext:
+                return ReadOnlyDeduplicationResult(
+                    is_duplicate=True,
+                    duplicate_reason="external_id",
+                    matched_entry_id=str(existing_ext.id),
+                    matched_title=existing_ext.title,
+                )
+
+        # 2. Canonical URL or German/English URL check
+        url_conds = [Entry.url == raw.url, Entry.canonical_url == raw.url]
+        if raw.raw_metadata:
+            german_url = raw.raw_metadata.get("german_url")
+            english_url = raw.raw_metadata.get("english_url")
+            if german_url:
+                url_conds.extend([Entry.url == german_url, Entry.canonical_url == german_url])
+            if english_url:
+                url_conds.extend([Entry.url == english_url, Entry.canonical_url == english_url])
+
+        existing_url = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                or_(*url_conds),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_url:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="canonical_url",
+                matched_entry_id=str(existing_url.id),
+                matched_title=existing_url.title,
+            )
+
+        # 3. Content hash check within source
+        existing_hash = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                Entry.content_hash == c_hash,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_hash:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="content_hash",
+                matched_entry_id=str(existing_hash.id),
+                matched_title=existing_hash.title,
+            )
+
+        return ReadOnlyDeduplicationResult(is_duplicate=False)
+
+    @staticmethod
     def check_geradin_item(
         db: Session,
         source_id: uuid.UUID,
@@ -431,6 +500,7 @@ class SourceDiscoveryPreviewService:
         self,
         lookback_days: int = 90,
         source_filter: Optional[str] = None,
+        target_sources: Optional[list[Source]] = None,
         sync_client: Optional[httpx.Client] = None,
         async_client: Optional[httpx.AsyncClient] = None,
     ) -> GlobalPreviewReport:
@@ -443,7 +513,7 @@ class SourceDiscoveryPreviewService:
             reference_date=self.current_date.isoformat(),
         )
 
-        sources_to_run = self._resolve_sources(source_filter)
+        sources_to_run = target_sources if target_sources is not None else self._resolve_sources(source_filter)
 
         for source in sources_to_run:
             if "geradin" in source.name.lower():
@@ -461,6 +531,13 @@ class SourceDiscoveryPreviewService:
                 )
             elif "oecd" in source.name.lower():
                 summary = await self._preview_oecd_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
+                )
+            elif "bundeskartellamt" in source.name.lower():
+                summary = await self._preview_bundeskartellamt_async(
                     source=source,
                     cutoff_date=cutoff_date,
                     lookback_days=lookback_days,
@@ -536,6 +613,8 @@ class SourceDiscoveryPreviewService:
                         continue
                     elif normalized_filter == "oecd" and "oecd" not in name.lower():
                         continue
+                    elif normalized_filter in ("bundeskartellamt", "bkart") and "bundeskartellamt" not in name.lower():
+                        continue
 
             db_source = self.db.execute(
                 select(Source).where(Source.name == name).limit(1)
@@ -569,6 +648,20 @@ class SourceDiscoveryPreviewService:
                 provider="native",
                 url="https://digital-markets-act.ec.europa.eu/news_en",
                 config={"initial_fetch_limit": 50, "portal_url": "https://digital-markets-act.ec.europa.eu/"},
+                active=True,
+            )
+        elif name == BUNDESKARTELLAMT_SOURCE_NAME:
+            return Source(
+                id=uuid.uuid4(),
+                name=BUNDESKARTELLAMT_SOURCE_NAME,
+                type=SourceType.INSTITUTIONAL,
+                provider="native",
+                url="https://www.bundeskartellamt.de/",
+                config={
+                    "initial_fetch_limit": 30,
+                    "rss_url": "https://www.bundeskartellamt.de/DE/Service/RSS/_documents/rssnewsfeed.xml",
+                    "sitemap_url": "https://www.bundeskartellamt.de/Sitemap_XML.xml",
+                },
                 active=True,
             )
         else:
@@ -1060,6 +1153,138 @@ class SourceDiscoveryPreviewService:
 
         return summary
 
+    # --------------------------------------------------------------------------
+    # 4. BUNDESKARTELLAMT PREVIEW
+    # --------------------------------------------------------------------------
+    async def _preview_bundeskartellamt_async(
+        self,
+        source: Source,
+        cutoff_date: Any,
+        lookback_days: int,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> SourcePreviewSummary:
+        """Execute real discovery and read-only preview for Bundeskartellamt."""
+        extractor = BundeskartellamtExtractor()
+        summary = SourcePreviewSummary(source_name=source.name)
+
+        client = async_client
+        should_close = False
+        if client is None:
+            headers = {"User-Agent": "HITCHINGS/0.1 (+https://github.com/hitchings; news-observatory)"}
+            client = httpx.AsyncClient(timeout=15.0, headers=headers, follow_redirects=True)
+            should_close = True
+
+        try:
+            # 1. Discover candidates covering lookback window (RSS for short lookback, Sitemap for 90d)
+            candidates = await extractor.discover_candidates(
+                client=client,
+                source=source,
+                lookback_days=lookback_days,
+                now=self.now,
+            )
+            summary.discovered_total = len(candidates)
+
+            # 2. Process discovered items
+            for cand in candidates:
+                pub_dt = cand.get("published_at")
+                if pub_dt:
+                    pub_date = pub_dt.date()
+                    if pub_date > self.current_date:
+                        summary.excluded_future += 1
+                        continue
+                    if pub_date < cutoff_date:
+                        continue
+
+                summary.inside_lookback += 1
+
+                # Check editorial exclusion
+                if extractor._is_editorially_excluded(cand.get("title", ""), cand.get("url", "")):
+                    summary.excluded_editorially += 1
+                    continue
+
+                # Enrich item with substantive detail text
+                raw = await extractor._enrich_item(client=client, candidate=cand, now=self.now)
+                if not raw:
+                    summary.excluded_editorially += 1
+                    continue
+
+                # Deduplicate against database in read-only mode
+                dedupe = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
+                    db=self.db,
+                    source_id=source.id,
+                    raw=raw,
+                )
+                if dedupe.is_duplicate:
+                    summary.duplicates += 1
+                    continue
+
+                # Item is NEW
+                summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
+                transient_entry = Entry(
+                    id=uuid.uuid4(),
+                    source_id=source.id,
+                    source=detached_source,
+                    external_id=raw.external_id,
+                    url=raw.url,
+                    canonical_url=raw.url,
+                    title=raw.title,
+                    content=raw.content,
+                    excerpt=raw.excerpt,
+                    author=raw.author,
+                    published_at=raw.published_at,
+                    captured_at=self.now,
+                    language=raw.language or "de",
+                    content_type=raw.content_type or "press_release",
+                    raw_metadata=raw.raw_metadata or {},
+                )
+
+                suff_res = SourceSufficiencyService.assess(transient_entry)
+                suff_level = suff_res.level.value
+
+                if suff_level == SourceSufficiencyLevel.FULL.value:
+                    summary.full_count += 1
+                elif suff_level == SourceSufficiencyLevel.PARTIAL.value:
+                    summary.partial_count += 1
+                else:
+                    summary.insufficient_count += 1
+
+                planner = IncrementalAnalysisPlanner(self.db)
+                cand_eval = planner.evaluate_entry(transient_entry)
+                eligible = (cand_eval.reason == "eligible")
+                if eligible:
+                    summary.eligible_for_analysis += 1
+
+                content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
+                summary.estimated_input_chars += content_len
+
+                pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
+                summary.new_items.append(
+                    PreviewCandidateItem(
+                        date=pub_str,
+                        source_name=source.name,
+                        title=raw.title,
+                        url=raw.url,
+                        is_duplicate=False,
+                        sufficiency=suff_level,
+                        content_chars=content_len,
+                        eligible_for_analysis=eligible,
+                    )
+                )
+
+        finally:
+            if should_close:
+                await client.aclose()
+
+        return summary
+
 
 # ==============================================================================
 # REPORT FORMATTING
@@ -1147,8 +1372,8 @@ def main() -> int:
         "--source",
         type=str,
         default=None,
-        choices=["geradin", "dma", "oecd"],
-        help="Limit preview to a specific source (default: all three)",
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart"],
+        help="Limit preview to a specific source (default: all target sources)",
     )
 
     args = parser.parse_args()

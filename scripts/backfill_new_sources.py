@@ -115,9 +115,9 @@ async def main_async() -> int:
     )
     parser.add_argument(
         "--source",
-        choices=["geradin", "dma", "oecd"],
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart"],
         default=None,
-        help="Optional single source filter: 'geradin', 'dma', or 'oecd' (default: all three).",
+        help="Optional single source filter: 'geradin', 'dma', 'oecd', or 'bundeskartellamt' (default: all).",
     )
     parser.add_argument(
         "--max-new-entries",

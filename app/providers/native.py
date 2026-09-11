@@ -95,6 +95,11 @@ class NativeProvider(BaseSourceProvider):
             from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
             return await _run_with_extractor(OECDCompetitionExtractor())
 
+        # 5. Bundeskartellamt (German Federal Cartel Office) adapter
+        if "bundeskartellamt.de" in url_lower or "bundeskartellamt" in (source.name or "").lower():
+            from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
+            return await _run_with_extractor(BundeskartellamtExtractor())
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -148,6 +153,14 @@ class NativeProvider(BaseSourceProvider):
         if "oecd.org" in source.url.lower() or "oecd" in (source.name or "").lower():
             from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
             extractor = OECDCompetitionExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: Bundeskartellamt
+        if "bundeskartellamt.de" in source.url.lower() or "bundeskartellamt" in (source.name or "").lower():
+            from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
+            extractor = BundeskartellamtExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
