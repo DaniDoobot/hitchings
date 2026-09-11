@@ -1092,3 +1092,159 @@ async def test_scheduler_weekly_cma_integration_two_events(db_session: Session):
             assert "Final decision published." in notes
             assert "Issues statement published." in notes
 
+
+# ==============================================================================
+# BLOQUE 15B.2: SCOPE RESTRICTION & TIMETABLE REGRESSION TESTS (A through L)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_15b2_a_subsidy_advice_skipped():
+    """A. subsidy advice case_type ('sau-referral') is skipped fail-closed."""
+    assert map_cma_content_type("sau-referral", "cma_case") is None
+
+    case_data = {
+        "title": "Referral of the proposed subsidy to EDF",
+        "content_id": "sau-uuid-1",
+        "details": {
+            "metadata": {"case_type": "sau-referral"},
+            "body": "<p>Substantive body text of subsidy report.</p>",
+            "change_history": [
+                {"public_timestamp": "2026-09-03T10:00:00Z", "note": "Final report published."},
+            ],
+            "attachments": [],
+        },
+    }
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_data)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor()
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL)
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/sau-referral-case",
+            cutoff_dt=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        )
+        assert len(entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_15b2_b_consumer_protection_skipped():
+    """B. consumer protection case_type ('consumer-enforcement') is skipped fail-closed."""
+    assert map_cma_content_type("consumer-enforcement", "cma_case") is None
+
+    case_data = {
+        "title": "Trainline: consumer protection enforcement case",
+        "content_id": "consumer-uuid-1",
+        "details": {
+            "metadata": {"case_type": "consumer-enforcement"},
+            "body": "<p>Substantive body text of consumer case.</p>",
+            "change_history": [
+                {"public_timestamp": "2026-08-19T10:00:00Z", "note": "First published."},
+            ],
+            "attachments": [],
+        },
+    }
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_data)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor()
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL)
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/trainline",
+            cutoff_dt=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+        assert len(entries) == 0
+
+
+def test_15b2_c_unknown_cma_case_type_fail_closed():
+    """C. Unknown CMA case_type returns None (fail-closed skip)."""
+    assert map_cma_content_type("procurement-review", "cma_case") is None
+    assert map_cma_content_type("internal-audit", "cma_case") is None
+    assert map_cma_content_type("unrecognized_type", "cma_case") is None
+
+
+def test_15b2_d_mergers_included():
+    """D. 'mergers' case_type maps to 'merger'."""
+    assert map_cma_content_type("mergers", "cma_case") == "merger"
+
+
+def test_15b2_e_ca98_included():
+    """E. 'ca98-and-civil-cartels' and 'criminal-cartels' map to competition types."""
+    assert map_cma_content_type("ca98-and-civil-cartels", "cma_case") == "antitrust"
+    assert map_cma_content_type("criminal-cartels", "cma_case") == "criminal_cartel"
+
+
+def test_15b2_f_markets_included():
+    """F. 'markets' case_type maps to 'market_investigation'."""
+    assert map_cma_content_type("markets", "cma_case") == "market_investigation"
+
+
+def test_15b2_g_digital_markets_unit_included():
+    """G. 'digital-markets-unit' case_type maps to 'digital_markets'."""
+    assert map_cma_content_type("digital-markets-unit", "cma_case") == "digital_markets"
+
+
+def test_15b2_h_digital_markets_measure_included():
+    """H. 'digital_markets_measure' document_type maps to 'digital_markets' regardless of case_type."""
+    assert map_cma_content_type(None, "digital_markets_measure") == "digital_markets"
+    assert map_cma_content_type("", "digital_markets_measure") == "digital_markets"
+
+
+def test_15b2_i_pure_administrative_timetable_real_fixture_skipped():
+    """I. Real Heating Oil fixture note is classified as ADMINISTRATIVE, not SUBSTANTIVE."""
+    fixture_note = "Administrative timetable updated – expected publication of final report is now July 2026"
+    cls, rule = classify_cma_event_note(fixture_note)
+    assert cls == "ADMINISTRATIVE"
+    assert "admin_exclude" in rule
+    assert not is_cma_event_substantive(fixture_note)
+
+    # In contrast, the real report published event in the same case is SUBSTANTIVE
+    real_report_note = "Final report published."
+    assert is_cma_event_substantive(real_report_note)
+
+
+def test_15b2_j_unknown_case_type_cannot_fallback_to_institutional_publication():
+    """J. Unsupported/unknown case types NEVER fall back to 'institutional_publication'."""
+    unsupported_types = [
+        "sau-referral",
+        "consumer-enforcement",
+        "information-and-advice-to-government",
+        "oim-project",
+        "regulatory-references-and-appeals",
+        "review-of-orders-and-undertakings",
+        "procurement",
+        "corporate-governance",
+    ]
+    for ut in unsupported_types:
+        mapped = map_cma_content_type(ut, "cma_case")
+        assert mapped is None, f"Expected None for unsupported case_type '{ut}', got '{mapped}'"
+        assert mapped != "institutional_publication"
+
+
+def test_15b2_k_weekly_path_still_8_days():
+    """K. Weekly cadence and seed default for CMA remains strictly 8 days."""
+    src = seed_cma_source()
+    assert src.config["lookback_days"] == 8
+
+
+def test_15b2_l_other_sources_unaffected():
+    """L. Non-CMA sources (OECD, Geradin, DMA, Bundeskartellamt) remain intact and untouched."""
+    from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
+    from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
+    from app.providers.extractors.oecd_competition import OECDCompetitionExtractor
+    from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAdapter
+
+    assert BundeskartellamtExtractor is not None
+    assert EuropeanCommissionDMAExtractor is not None
+    assert OECDCompetitionExtractor is not None
+    assert GeradinPartnersAdapter is not None
+

@@ -84,8 +84,11 @@ THIRD_PARTY_RESPONSE_PATTERNS: list[str] = [
 
 ADMIN_EXCLUDES: list[str] = [
     "administrative timetable",
+    "case timetable",
     "timetable updated",
     "timetable published",
+    "timetable revised",
+    "expected publication",
     "deadline extended",
     "contact details",
     "typographical",
@@ -160,6 +163,14 @@ def _has_response_indicator(text: str) -> Optional[str]:
     return None
 
 
+def _has_admin_indicator(text: str) -> Optional[str]:
+    """Check if text contains any administrative / procedural exclude pattern."""
+    for pat in ADMIN_EXCLUDES:
+        if pat in text:
+            return pat
+    return None
+
+
 def _has_authoritative_pattern(text: str) -> Optional[str]:
     """Check if text contains any authoritative formal CMA action pattern."""
     for pat in AUTHORITATIVE_STRONG_PATTERNS:
@@ -172,7 +183,8 @@ def classify_cma_event_note(note: str) -> tuple[str, str]:
     """Classify a change_history event note into SUBSTANTIVE, ADMINISTRATIVE, or NON_SUBSTANTIVE.
     
     Deterministic Precedence:
-    1. Independent Authoritative Action (clause free of response indicators) -> SUBSTANTIVE
+    1. Independent Authoritative Action (clause free of response indicators and admin indicators,
+       not in a pure timetable announcement) -> SUBSTANTIVE
     2. Third-Party Response / Submission -> ADMINISTRATIVE (SKIP)
     3. Administrative Excludes (timetable, etc.) -> ADMINISTRATIVE (SKIP)
     4. General Substantive (if free of response indicators) -> SUBSTANTIVE
@@ -185,15 +197,18 @@ def classify_cma_event_note(note: str) -> tuple[str, str]:
     if not n:
         return "NON_SUBSTANTIVE", "empty_note"
 
-    # Split note into candidate clauses by commas, semicolons, 'and', '&'
-    clauses = [c.strip() for c in re.split(r"[,;&]|\band\b", n) if c.strip()]
+    admin_match_full = _has_admin_indicator(n)
 
-    # 1. If an independent clause describes a formal CMA action free of response words:
+    # Split note into candidate clauses by commas, semicolons, dashes, colons, pipes, and 'and'
+    clauses = [c.strip() for c in re.split(r"[,;&:|\u2013\u2014\-]|(?:\s+and\s+)", n) if c.strip()]
+
+    # 1. If an independent clause describes a formal CMA action free of response and admin words:
     for clause in clauses:
-        if not _has_response_indicator(clause):
-            auth_match = _has_authoritative_pattern(clause)
-            if auth_match:
-                return "SUBSTANTIVE", f"authoritative:{auth_match}"
+        if not _has_response_indicator(clause) and not _has_admin_indicator(clause):
+            if not (n.startswith("administrative timetable") or n.startswith("case timetable") or n.startswith("timetable updated")):
+                auth_match = _has_authoritative_pattern(clause)
+                if auth_match:
+                    return "SUBSTANTIVE", f"authoritative:{auth_match}"
 
     # 2. Third-party response / submission
     resp_match = _has_response_indicator(n)
@@ -201,9 +216,8 @@ def classify_cma_event_note(note: str) -> tuple[str, str]:
         return "ADMINISTRATIVE", f"third_party_response:{resp_match}"
 
     # 3. Administrative excludes
-    for admin_pat in ADMIN_EXCLUDES:
-        if admin_pat in n:
-            return "ADMINISTRATIVE", f"admin_exclude:{admin_pat}"
+    if admin_match_full:
+        return "ADMINISTRATIVE", f"admin_exclude:{admin_match_full}"
 
     # 4. General substantive
     for gen_pat in GENERAL_SUBSTANTIVE:
@@ -284,35 +298,37 @@ def format_cma_event_url(base_path: str, event_dt: datetime, note: str) -> str:
     return f"https://www.gov.uk{clean_base}#hitchings-event-{ts_slug}-{short_hash}"
 
 
-def map_cma_content_type(case_type_raw: Optional[str], document_type_raw: Optional[str]) -> str:
-    """Map GOV.UK metadata to standard HITCHINGS content_type."""
+SUPPORTED_CMA_CASE_TYPES: dict[str, str] = {
+    "mergers": "merger",
+    "ca98-and-civil-cartels": "antitrust",
+    "criminal-cartels": "criminal_cartel",
+    "competition-disqualification": "director_disqualification",
+    "director-disqualification": "director_disqualification",
+    "markets": "market_investigation",
+    "digital-markets-unit": "digital_markets",
+}
+
+
+def map_cma_content_type(case_type_raw: Optional[str], document_type_raw: Optional[str]) -> Optional[str]:
+    """Map GOV.UK metadata to standard HITCHINGS content_type with strict competition allowlist.
+    
+    Returns None if case/document type is outside the competition law scope (fail-closed).
+    """
     doc_type = (document_type_raw or "").lower().strip()
     if doc_type == "digital_markets_measure":
         return "digital_markets"
 
     case_type = (case_type_raw or "").lower().strip()
-    if "digital" in case_type:
-        return "digital_markets"
-    elif "merger" in case_type:
-        return "merger"
-    elif "ca98" in case_type or ("cartel" in case_type and "criminal" not in case_type):
-        return "antitrust"
-    elif "criminal" in case_type:
-        return "criminal_cartel"
-    elif "market" in case_type:
-        return "market_investigation"
-    elif "regulatory" in case_type or "appeal" in case_type:
-        return "regulatory_appeal"
-    elif "disqualification" in case_type:
-        return "director_disqualification"
-    return "institutional_publication"
+    return SUPPORTED_CMA_CASE_TYPES.get(case_type)
 
 
-def infer_cma_legal_basis(content_type: str) -> tuple[Optional[str], bool]:
+def infer_cma_legal_basis(content_type: Optional[str]) -> tuple[Optional[str], bool]:
     """Derive legal basis from procedural content type if not explicit.
     
     Returns (legal_basis, is_inferred).
     """
+    if not content_type:
+        return None, False
     if content_type == "merger":
         return "Enterprise Act 2002 (Part 3)", True
     elif content_type == "antitrust":
@@ -326,7 +342,7 @@ def infer_cma_legal_basis(content_type: str) -> tuple[Optional[str], bool]:
     return None, False
 
 
-def infer_cma_parties(title: str, content_type: str) -> tuple[Optional[list[str]], bool]:
+def infer_cma_parties(title: str, content_type: Optional[str]) -> tuple[Optional[list[str]], bool]:
     """Extract parties from mergers case title (e.g. 'Company A / Company B merger inquiry').
     
     Returns (parties_list, is_inferred).

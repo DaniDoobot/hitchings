@@ -217,6 +217,10 @@ class CMAExtractor:
         case_public_updated_at = cdata.get("public_updated_at")
 
         mapped_content_type = map_cma_content_type(case_type_str, document_type)
+        if mapped_content_type is None:
+            logger.info("Skipping case outside competition scope: '%s' (case_type=%s, doc_type=%s)", case_title, case_type_str, document_type)
+            return []
+
         legal_basis, legal_basis_inferred = infer_cma_legal_basis(mapped_content_type)
         parties, parties_inferred = infer_cma_parties(case_title, mapped_content_type)
 

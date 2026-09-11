@@ -65,6 +65,7 @@ from app.services.cma_event_service import (
     classify_cma_event_note,
     get_derivative_family,
     get_primary_family,
+    map_cma_content_type,
 )
 
 logger = logging.getLogger("preview_source_discovery")
@@ -507,6 +508,10 @@ class PreviewCandidateItem(BaseModel):
     sufficiency: str = "insufficient"  # full, partial, insufficient
     content_chars: int = 0
     eligible_for_analysis: bool = False
+    case_type: Optional[str] = None
+    content_type: Optional[str] = None
+    event_note: Optional[str] = None
+    event_nature: Optional[str] = None  # latest / historical
 
 
 class SourcePreviewSummary(BaseModel):
@@ -1462,10 +1467,16 @@ class SourceDiscoveryPreviewService:
 
         cma_metrics = {
             "cases_discovered": 0,
+            "cases_competition_scoped": 0,
+            "area_filtered": 0,
+            "unsupported_case_type_skipped": 0,
+            "consumer_protection_skipped": 0,
+            "subsidy_control_skipped": 0,
             "cases_updated_in_window": 0,
             "events_total_in_window": 0,
             "events_substantive": 0,
             "events_administrative": 0,
+            "event_filtered": 0,
             "responses_submissions_skipped": 0,
             "derivative_summaries_skipped": 0,
             "administrative_skipped": 0,
@@ -1482,7 +1493,6 @@ class SourceDiscoveryPreviewService:
             # 1. Discover active case dossiers via Search API
             discovered_cases = await extractor.discover_cases(client, cutoff_dt)
             cma_metrics["cases_discovered"] = len(discovered_cases)
-            cma_metrics["cases_updated_in_window"] = len(discovered_cases)
             summary.discovered_total = len(discovered_cases)
 
             # 2. Inspect events and extract entries across dossiers
@@ -1496,40 +1506,66 @@ class SourceDiscoveryPreviewService:
                 content_url = f"https://www.gov.uk/api/content{clean_path}"
                 try:
                     resp = await client.get(content_url, timeout=25.0)
-                    if resp.status_code == 200:
-                        cdata = resp.json()
-                        details = cdata.get("details", {})
-                        change_history = details.get("change_history", [])
-                        valid_case_events = []
-                        for ch in change_history:
-                            ts_str = ch.get("public_timestamp")
-                            note = (ch.get("note") or "").strip()
-                            if not ts_str or not note:
-                                continue
-                            dt = parse_iso_datetime(ts_str)
-                            if not dt or dt < cutoff_dt:
-                                continue
+                    if resp.status_code != 200:
+                        continue
+                    cdata = resp.json()
+                    details = cdata.get("details", {})
+                    metadata = details.get("metadata", {})
+                    raw_case_type = metadata.get("case_type")
+                    if isinstance(raw_case_type, list) and raw_case_type:
+                        raw_case_type = raw_case_type[0]
+                    case_type_str = str(raw_case_type) if raw_case_type else None
+                    document_type = cdata.get("content_store_document_type") or cdata.get("document_type")
 
-                            cma_metrics["events_total_in_window"] += 1
-                            summary.inside_lookback += 1
+                    mapped_content_type = map_cma_content_type(case_type_str, document_type)
+                    if mapped_content_type is None:
+                        cma_metrics["area_filtered"] += 1
+                        ct_str = (case_type_str or "").lower()
+                        if "consumer" in ct_str:
+                            cma_metrics["consumer_protection_skipped"] += 1
+                        elif "subsidy" in ct_str or "sau" in ct_str or "information-and-advice-to-government" in ct_str:
+                            cma_metrics["subsidy_control_skipped"] += 1
+                        else:
+                            cma_metrics["unsupported_case_type_skipped"] += 1
+                        summary.excluded_editorially += 1
+                        continue
 
-                            ev_cls, matched_rule = classify_cma_event_note(note)
-                            if ev_cls == "SUBSTANTIVE":
-                                cma_metrics["events_substantive"] += 1
-                                valid_case_events.append(note)
+                    cma_metrics["cases_competition_scoped"] += 1
+                    cma_metrics["cases_updated_in_window"] += 1
+
+                    change_history = details.get("change_history", [])
+                    valid_case_events = []
+                    for ch in change_history:
+                        ts_str = ch.get("public_timestamp")
+                        note = (ch.get("note") or "").strip()
+                        if not ts_str or not note:
+                            continue
+                        dt = parse_iso_datetime(ts_str)
+                        if not dt or dt < cutoff_dt:
+                            continue
+
+                        cma_metrics["events_total_in_window"] += 1
+                        summary.inside_lookback += 1
+
+                        ev_cls, matched_rule = classify_cma_event_note(note)
+                        if ev_cls == "SUBSTANTIVE":
+                            cma_metrics["events_substantive"] += 1
+                            valid_case_events.append(note)
+                        else:
+                            cma_metrics["events_administrative"] += 1
+                            cma_metrics["event_filtered"] += 1
+                            if matched_rule.startswith("third_party_response:"):
+                                cma_metrics["responses_submissions_skipped"] += 1
                             else:
-                                cma_metrics["events_administrative"] += 1
-                                if matched_rule.startswith("third_party_response:"):
-                                    cma_metrics["responses_submissions_skipped"] += 1
-                                else:
-                                    cma_metrics["administrative_skipped"] += 1
-                                summary.excluded_editorially += 1
+                                cma_metrics["administrative_skipped"] += 1
+                            summary.excluded_editorially += 1
 
-                        prim_families = {fam for n in valid_case_events if (fam := get_primary_family(n)) is not None}
-                        for n in valid_case_events:
-                            deriv_fam = get_derivative_family(n)
-                            if deriv_fam and deriv_fam in prim_families:
-                                cma_metrics["derivative_summaries_skipped"] += 1
+                    prim_families = {fam for n in valid_case_events if (fam := get_primary_family(n)) is not None}
+                    for n in valid_case_events:
+                        deriv_fam = get_derivative_family(n)
+                        if deriv_fam and deriv_fam in prim_families:
+                            cma_metrics["derivative_summaries_skipped"] += 1
+                            cma_metrics["event_filtered"] += 1
                 except Exception:
                     pass
 
@@ -1626,13 +1662,19 @@ class SourceDiscoveryPreviewService:
                             sufficiency=suff_level,
                             content_chars=content_len,
                             eligible_for_analysis=eligible,
+                            case_type=meta.get("case_type_raw") or meta.get("document_type_raw") or "unknown",
+                            content_type=raw.content_type,
+                            event_note=meta.get("event_note"),
+                            event_nature="latest" if meta.get("is_latest_event") else "historical",
                         )
                     )
 
             raw_generated_count = cma_metrics["events_latest"] + cma_metrics["events_historical"]
-            cma_metrics["historical_events_skipped_no_immutable_content"] = max(
+            hist_skipped = max(
                 0, cma_metrics["events_substantive"] - raw_generated_count
             )
+            cma_metrics["historical_events_skipped_no_immutable_content"] = hist_skipped
+            cma_metrics["event_filtered"] += hist_skipped
 
             summary.cma_metrics = cma_metrics
             return summary
@@ -1680,20 +1722,26 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             cm = summary.cma_metrics
             print("  --- CMA SPECIFIC METRICS ---")
             print(f"  cases_discovered       : {cm.get('cases_discovered')}")
+            print(f"  cases_competition_scope: {cm.get('cases_competition_scoped')}")
+            print(f"  area_filtered          : {cm.get('area_filtered')}")
+            print(f"    consumer_protection_skipped  : {cm.get('consumer_protection_skipped')}")
+            print(f"    subsidy_control_skipped      : {cm.get('subsidy_control_skipped')}")
+            print(f"    unsupported_case_type_skipped: {cm.get('unsupported_case_type_skipped')}")
             print(f"  cases_updated_in_window: {cm.get('cases_updated_in_window')}")
             print(f"  events_total_in_window : {cm.get('events_total_in_window')}")
             print(f"  events_substantive     : {cm.get('events_substantive')}")
-            print(f"  responses_submissions_skipped : {cm.get('responses_submissions_skipped')}")
-            print(f"  derivative_summaries_skipped  : {cm.get('derivative_summaries_skipped')}")
-            print(f"  administrative_skipped        : {cm.get('administrative_skipped')}")
             print(f"  events_administrative  : {cm.get('events_administrative')}")
+            print(f"  event_filtered         : {cm.get('event_filtered')}")
+            print(f"    responses_submissions_skipped: {cm.get('responses_submissions_skipped')}")
+            print(f"    derivative_summaries_skipped : {cm.get('derivative_summaries_skipped')}")
+            print(f"    administrative_skipped       : {cm.get('administrative_skipped')}")
+            print(f"    hist_events_skipped_no_immutable: {cm.get('historical_events_skipped_no_immutable_content')}")
             print(f"  events_latest          : {cm.get('events_latest')}")
             print(f"  events_historical      : {cm.get('events_historical')}")
             print(f"  events_with_exact_att  : {cm.get('events_with_exact_attachment')}")
             print(f"  events_with_strong_att : {cm.get('events_with_strong_attachment')}")
             print(f"  events_ambiguous_att   : {cm.get('events_ambiguous_attachment')}")
             print(f"  events_without_att     : {cm.get('events_without_attachment')}")
-            print(f"  hist_events_skipped_no_immutable: {cm.get('historical_events_skipped_no_immutable_content')}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
