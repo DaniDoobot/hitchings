@@ -152,14 +152,19 @@ class NewSourcesBackfillService:
         dw_settings = self.settings.model_copy(update={"DIRECT_WEB_INGESTION_ENABLED": True})
         self.direct_web_service = direct_web_service or DirectWebIngestionService(settings=dw_settings)
 
-        if ai_provider is not None:
-            self.ai_provider = ai_provider
-        else:
-            provider_type = self.settings.ANALYSIS_PROVIDER.lower()
-            if provider_type == "gemini_api":
-                self.ai_provider = GeminiAPIProvider(settings=self.settings)
-            elif provider_type == "mock":
-                self.ai_provider = MockAIProvider()
+        self._ai_provider = ai_provider
+
+    @property
+    def ai_provider(self) -> BaseAIProvider:
+        """Resolve active AI provider via injected provider or canonical AnalysisService factory."""
+        if self._ai_provider is None:
+            from app.services.analysis_service import AnalysisService
+            self._ai_provider = AnalysisService(settings=self.settings).get_provider()
+        return self._ai_provider
+
+    @ai_provider.setter
+    def ai_provider(self, provider: BaseAIProvider) -> None:
+        self._ai_provider = provider
     async def _count_prospective_new_entries(
         self,
         target_sources: list[Source],
@@ -645,7 +650,19 @@ class NewSourcesBackfillService:
                 report.db_counts_after = query_db_inventory_counts(db)
                 return report
 
-            pipeline = AnalysisPipelineService(provider=self.ai_provider)
+            try:
+                provider = self.ai_provider
+            except Exception as exc:
+                err_p = f"Failed to initialize AI provider: {exc}"
+                logger.error("[Backfill] %s", err_p)
+                report.guard_triggered = err_p
+                report.status = "failed"
+                report.finished_at = utc_now()
+                report.duration_seconds = round((report.finished_at - start_time).total_seconds(), 2)
+                report.db_counts_after = query_db_inventory_counts(db)
+                return report
+
+            pipeline = AnalysisPipelineService(provider=provider)
             actual_calls_count = 0
 
             def budget_stage_hook(stage_name: str, entry: Entry, prompt: Any, analysis: Any):

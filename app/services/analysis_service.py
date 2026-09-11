@@ -79,9 +79,13 @@ compute_content_hash = compute_analysis_input_hash
 class AnalysisService:
     """Manages AI analysis lifecycles, versioned prompt invocations, and granular audit."""
 
-    def __init__(self, provider: Optional[BaseAIProvider] = None) -> None:
+    def __init__(
+        self,
+        provider: Optional[BaseAIProvider] = None,
+        settings: Optional[Settings] = None,
+    ) -> None:
         self._provider = provider
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
 
     def get_provider(self) -> BaseAIProvider:
         """Resolve the active AI provider based on configuration or explicit injection."""

@@ -722,10 +722,15 @@ class SourceDiscoveryPreviewService:
 
                     # Item is NEW: assess sufficiency and analysis eligibility
                     summary.new_candidates += 1
+                    detached_source = Source(
+                        id=source.id,
+                        name=source.name,
+                        type=source.type,
+                    )
                     transient_entry = Entry(
                         id=uuid.uuid4(),
                         source_id=source.id,
-                        source=source,
+                        source=detached_source,
                         external_id=article.external_id,
                         url=article.url,
                         canonical_url=article.canonical_url or article.url,
@@ -851,10 +856,15 @@ class SourceDiscoveryPreviewService:
 
                 # Item is NEW
                 summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
                 transient_entry = Entry(
                     id=uuid.uuid4(),
                     source_id=source.id,
-                    source=source,
+                    source=detached_source,
                     external_id=raw.external_id,
                     url=raw.url,
                     canonical_url=raw.url,
@@ -985,10 +995,15 @@ class SourceDiscoveryPreviewService:
 
                 # Item is NEW
                 summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
                 transient_entry = Entry(
                     id=uuid.uuid4(),
                     source_id=source.id,
-                    source=source,
+                    source=detached_source,
                     external_id=raw.external_id,
                     url=raw.url,
                     canonical_url=raw.url,

@@ -993,3 +993,168 @@ async def test_retry_analyzes_existing_entry_after_previous_analysis_failure(
 
     # 3. Linked to the active tracking matrix
     assert completed_analyses[0].matrix_id == active_matrix.id
+
+
+@pytest.mark.asyncio
+async def test_real_cli_instantiation_without_explicit_ai_provider(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify that NewSourcesBackfillService() instantiated with zero arguments (as in scripts/backfill_new_sources.py)
+    resolves the active provider without AttributeError: ai_provider and runs analysis pipeline cleanly."""
+    router = build_mock_transport_router()
+    sync_client = httpx.Client(transport=httpx.MockTransport(router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(router))
+
+    spy_ai = MockSpyAIProvider()
+    monkeypatch.setattr("app.providers.ai.gemini_api.GeminiAPIProvider", lambda **kwargs: spy_ai)
+    monkeypatch.setenv("ANALYSIS_PROVIDER", "gemini_api")
+
+    # Instantiate exactly as scripts/backfill_new_sources.py does
+    service = NewSourcesBackfillService()
+
+    # Verify provider resolution
+    assert service.ai_provider is not None
+    assert hasattr(service, "ai_provider")
+
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=15,
+        max_analysis_calls=30,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    assert report.status == "completed"
+    assert report.entries_created == 1
+    assert report.analysis_completed == 1
+    assert len(spy_ai.analyze_calls) >= 1
+
+    analyses = db_session.query(EntryAnalysis).filter(EntryAnalysis.status == "completed").all()
+    assert len(analyses) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_after_crash_before_analysis_dispatch(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Recovery from crash before analysis dispatch:
+    Simulate that Entries are already persisted in DB from run 1 (DMA 1 entry),
+    0 EntryAnalysis exist, 0 AnalysisCalls exist, and discovery sees the item as duplicate.
+    Retry must:
+    - detect existing Entry as duplicate (entries_created = 0, duplicates = 1)
+    - detect that it lacks analysis (eligible = 1)
+    - analyze with active matrix (analysis_completed = 1)
+    - NOT duplicate the Entry in DB.
+    """
+    router = build_mock_transport_router()
+    sync_client = httpx.Client(transport=httpx.MockTransport(router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(router))
+    dma_source = backfill_sources["dma"]
+
+    # Initial state: 1 entry persisted directly in DB (simulating prior persistence before crash)
+    entry = Entry(
+        id=uuid.uuid4(),
+        source_id=dma_source.id,
+        external_id="dma_article_1",
+        url="https://digital-markets-act.ec.europa.eu/dma-article-1",
+        canonical_url="https://digital-markets-act.ec.europa.eu/dma-article-1",
+        title="European Commission designates gatekeeper under Digital Markets Act",
+        content="The European Commission has today formally designated gatekeepers under the Digital Markets Act (DMA). " * 10,
+        excerpt="The European Commission has today formally designated gatekeepers under the Digital Markets Act.",
+        author="European Commission",
+        published_at=datetime.now(timezone.utc) - timedelta(days=10),
+        captured_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        language="en",
+        content_type="news_article",
+        content_hash="mock_dma_hash_1",
+        raw_metadata={"presscorner_url": "https://digital-markets-act.ec.europa.eu/dma-article-1"},
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    # Confirm 0 analyses and 0 calls exist initially
+    assert db_session.query(EntryAnalysis).count() == 0
+    assert db_session.query(AnalysisCall).count() == 0
+    assert db_session.query(Entry).filter(Entry.source_id == dma_source.id).count() == 1
+
+    spy_ai = MockSpyAIProvider()
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=True,
+        source_filter="dma",
+        max_new_entries=30,
+        max_analysis_entries=15,
+        max_analysis_calls=30,
+        sync_client=sync_client,
+        async_client=async_client,
+    )
+
+    assert report.status == "completed"
+    assert report.entries_created == 0
+    assert report.duplicates == 1
+    assert report.potential_analysis == 1
+    assert report.analysis_completed == 1
+    assert report.analysis_failed == 0
+
+    # In DB: still exactly 1 Entry, and 1 completed EntryAnalysis
+    entries_after = db_session.query(Entry).filter(Entry.source_id == dma_source.id).all()
+    assert len(entries_after) == 1
+    assert entries_after[0].id == entry.id
+
+    analyses_after = db_session.query(EntryAnalysis).filter(EntryAnalysis.entry_id == entry.id).all()
+    assert len(analyses_after) == 1
+    assert analyses_after[0].status == "completed"
+    assert analyses_after[0].matrix_id == active_matrix.id
+
+
+@pytest.mark.asyncio
+async def test_geradin_persistence_no_sawarning(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v6_prompts: tuple,
+    backfill_sources: dict[str, Source],
+):
+    """Verify that Geradin ingestion and pre-discovery preview emit zero SAWarning on Source.entries."""
+    import warnings
+    from sqlalchemy.exc import SAWarning
+
+    router = build_mock_transport_router()
+    sync_client = httpx.Client(transport=httpx.MockTransport(router))
+    async_client = httpx.AsyncClient(transport=httpx.MockTransport(router))
+    spy_ai = MockSpyAIProvider()
+
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+
+    with warnings.catch_warnings(record=True) as captured_warnings:
+        warnings.simplefilter("always")
+        report = await service.execute_backfill(
+            db=db_session,
+            lookback_days=90,
+            confirm_real_calls=True,
+            source_filter="geradin",
+            sync_client=sync_client,
+            async_client=async_client,
+        )
+
+    assert report.status == "completed"
+    assert report.entries_created == 2
+
+    # Check for any SAWarning related to Source.entries
+    entry_sawarnings = [
+        w for w in captured_warnings
+        if issubclass(w.category, SAWarning) and "Source.entries" in str(w.message)
+    ]
+    assert len(entry_sawarnings) == 0, f"Unexpected SAWarning emitted: {entry_sawarnings}"
