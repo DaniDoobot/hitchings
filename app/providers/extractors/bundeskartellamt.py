@@ -70,11 +70,20 @@ def parse_rfc822_date(date_str: Optional[str]) -> Optional[datetime]:
 
 
 def parse_slug_date(url: str, text: str = "") -> Optional[datetime]:
-    """Extract publication date from GSB URL slug (MM_DD_YYYY or DD_MM_YYYY) or text."""
-    # Matches patterns like /09_10_2026_... or /26_01_30_... or /08_17_26_...
-    m = re.search(r"/(\d{2})_(\d{2})_(\d{2,4})_", url)
-    if m:
-        p1, p2, p3 = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    """Extract publication date from GSB URL slug or text."""
+    # Pattern 1: YYYY_MM_DD (e.g. /2025_03_04_... or /2026_01_15_...)
+    m1 = re.search(r"/(\d{4})_(\d{2})_(\d{2})_", url)
+    if m1:
+        y, m, d = int(m1.group(1)), int(m1.group(2)), int(m1.group(3))
+        try:
+            return datetime(y, m, d, 8, 0, tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    # Pattern 2: DD_MM_YYYY or MM_DD_YYYY or DD_MM_YY (e.g. /09_10_2026_... or /08_17_26_...)
+    m2 = re.search(r"/(\d{2})_(\d{2})_(\d{2,4})_", url)
+    if m2:
+        p1, p2, p3 = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
         year = p3 if p3 > 100 else (2000 + p3)
         if p1 > 12:
             day, month = p1, p2
@@ -93,7 +102,7 @@ def parse_slug_date(url: str, text: str = "") -> Optional[datetime]:
         except ValueError:
             pass
 
-    # Fallback to text date in document
+    # Fallback to text date in document: e.g. "17.08.2026"
     text_m = re.search(r"\b(\d{2})\.(\d{2})\.(\d{4})\b", text)
     if text_m:
         t_day, t_month, t_year = int(text_m.group(1)), int(text_m.group(2)), int(text_m.group(3))
@@ -327,6 +336,7 @@ class BundeskartellamtExtractor:
         candidates: list[dict] = []
         for u_el in url_elements:
             loc = (u_el.findtext("ns:loc", namespaces=ns) or u_el.findtext("loc") or "").strip()
+            lastmod = (u_el.findtext("ns:lastmod", namespaces=ns) or u_el.findtext("lastmod") or "").strip()
             if not loc:
                 continue
 
@@ -335,12 +345,19 @@ class BundeskartellamtExtractor:
             if not ("/DE/Pressemitteilungen/" in loc or "/DE/AktuelleMeldungen/" in loc or "/DE/Fallberichte/" in loc or "/DE/Entscheidungen/" in loc):
                 continue
 
-            # Extract date from URL slug
-            published_at = parse_slug_date(loc)
-
             # Editorial filtering based on URL slug
             if self._is_editorially_excluded(title="", url=loc):
                 continue
+
+            # Extract date from URL slug or fallback to lastmod in sitemap
+            published_at = parse_slug_date(loc)
+            if not published_at and lastmod:
+                try:
+                    published_at = datetime.fromisoformat(lastmod.replace("Z", "+00:00"))
+                    if published_at.tzinfo is None:
+                        published_at = published_at.replace(tzinfo=timezone.utc)
+                except Exception:
+                    pass
 
             # Date boundaries
             if published_at:
@@ -349,9 +366,9 @@ class BundeskartellamtExtractor:
                 if published_at > ref_now + timedelta(days=1):
                     continue
             elif cutoff_dt:
-                # If we cannot extract date from slug, check year in URL (e.g. /2026/)
+                # If date could not be determined at all, only accept if current year in URL
                 current_year = ref_now.year
-                if f"/{current_year}/" not in loc and f"/{current_year - 1}/" not in loc:
+                if f"/{current_year}/" not in loc:
                     continue
 
             candidates.append({
@@ -418,7 +435,11 @@ class BundeskartellamtExtractor:
         if not published_at:
             published_at = parse_slug_date(de_url, soup_de.get_text()) or (now or datetime.now(timezone.utc))
 
-        # 3. Check for deterministic English translation link (BEFORE clean_content mutates DOM)
+        # 3. Extract Case Number (Aktenzeichen) from full raw HTML text BEFORE clean_content mutates DOM
+        raw_soup_text = soup_de.get_text(separator=" ", strip=True)
+        aktenzeichen = self._extract_aktenzeichen(f"{de_title} {raw_soup_text} {de_url}")
+
+        # 4. Check for deterministic English translation link (BEFORE clean_content mutates DOM)
         en_url = self._extract_english_url(soup_de, de_url)
         has_english_version = bool(en_url)
         english_fetch_failed = False
@@ -426,10 +447,10 @@ class BundeskartellamtExtractor:
         en_title = None
         en_content = None
 
-        # 4. Extract attached PDF URL (BEFORE clean_content mutates DOM)
+        # 5. Extract attached PDF URL (BEFORE clean_content mutates DOM)
         pdf_url = self._extract_pdf_url(soup_de, de_url)
 
-        # 5. Clean German body text
+        # 6. Clean German body text
         de_content = self._clean_content(soup_de)
         content = de_content
 
@@ -456,6 +477,9 @@ class BundeskartellamtExtractor:
                     elif en_title:
                         title = en_title
                         language_selected = "en"
+                    if not aktenzeichen:
+                        raw_en_text = soup_en.get_text(separator=" ", strip=True)
+                        aktenzeichen = self._extract_aktenzeichen(f"{title} {raw_en_text} {en_url}")
                 else:
                     logger.warning("English version for %s returned HTTP %d; falling back to DE", de_url, resp_en.status_code)
                     english_fetch_failed = True
@@ -464,10 +488,6 @@ class BundeskartellamtExtractor:
                 logger.warning("Failed fetching English version for %s: %s; falling back to DE", de_url, exc)
                 english_fetch_failed = True
                 has_english_version = False
-
-        # 5. Extract Case Number (Aktenzeichen)
-        # Search in text, title, and URL
-        aktenzeichen = self._extract_aktenzeichen(f"{title} {content} {de_url}")
 
         # 7. Classify document type
         content_type = self._classify_content_type(url=de_url, title=title)
@@ -521,12 +541,14 @@ class BundeskartellamtExtractor:
             parent_container = en_box.find_parent(class_=re.compile(r"c-teaser-newsbox|article|box", re.I))
             if parent_container:
                 a_tag = parent_container.find("a", href=True)
-                if a_tag and "/EN/" in a_tag["href"]:
+                if a_tag and "/EN/" in a_tag["href"] and "home_node.html" not in a_tag["href"].lower():
                     return urljoin(base_url, a_tag["href"])
 
         # 2. General search for links with /EN/ in href and English title or text
         for a in soup.find_all("a", href=True):
             href = a["href"]
+            if not href or "home_node.html" in href.lower():
+                continue
             text = a.get_text(strip=True).lower()
             title_attr = (a.get("title") or "").lower()
             if "/EN/Pressemitteilungen/" in href and ("learn more" in text or "english" in text or "english" in title_attr):

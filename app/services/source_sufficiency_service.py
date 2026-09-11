@@ -296,45 +296,6 @@ class SourceSufficiencyService:
                     ),
                 )
 
-        # 7. Bundeskartellamt (German Federal Cartel Office)
-        if "bundeskartellamt" in source_name or "bkart" in source_name:
-            if content_chars >= 250:
-                return SourceSufficiencyResult(
-                    level=SourceSufficiencyLevel.FULL,
-                    reason="Publicación oficial del Bundeskartellamt con texto íntegro.",
-                    signals=SourceSufficiencySignals(
-                        content_chars=content_chars,
-                        content_source=content_source or "bundeskartellamt_portal",
-                        full_text_available=True,
-                        pdf_available=pdf_avail,
-                        substantive_content=True,
-                    ),
-                )
-            elif content_chars >= 150:
-                return SourceSufficiencyResult(
-                    level=SourceSufficiencyLevel.PARTIAL,
-                    reason="Extracto oficial o sumario de publicación del Bundeskartellamt.",
-                    signals=SourceSufficiencySignals(
-                        content_chars=content_chars,
-                        content_source=content_source or "bundeskartellamt_portal",
-                        full_text_available=False,
-                        pdf_available=pdf_avail,
-                        substantive_content=True,
-                    ),
-                )
-            else:
-                return SourceSufficiencyResult(
-                    level=SourceSufficiencyLevel.INSUFFICIENT,
-                    reason="Publicación del Bundeskartellamt sin contenido textual suficiente.",
-                    signals=SourceSufficiencySignals(
-                        content_chars=content_chars,
-                        content_source=content_source or "bundeskartellamt_portal",
-                        full_text_available=False,
-                        pdf_available=pdf_avail,
-                        substantive_content=False,
-                    ),
-                )
-
         # Fallback for generic sources
         if content_chars >= 1500:
             return SourceSufficiencyResult(

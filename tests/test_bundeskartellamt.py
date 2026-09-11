@@ -296,7 +296,7 @@ async def test_sitemap_historical_discovery():
 
 
 def test_dedup_non_destructive_same_aktenzeichen(db_session: Session):
-    """Verify that press release and decision sharing same Aktenzeichen do NOT collide."""
+    """Verify that press release B7-54/25 and decision B7-54/25 sharing the same Aktenzeichen do NOT collide."""
     source = Source(
         id=uuid.uuid4(),
         name=BUNDESKARTELLAMT_SOURCE_NAME,
@@ -311,24 +311,24 @@ def test_dedup_non_destructive_same_aktenzeichen(db_session: Session):
     pr_entry = Entry(
         id=uuid.uuid4(),
         source_id=source.id,
-        title="Pressemitteilung zum Verfahren (B12-21/23)",
-        url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/Tech.html",
-        canonical_url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/Tech.html",
-        published_at=datetime(2026, 1, 12, tzinfo=timezone.utc),
+        title="Apple ändert Regeln für personalisierte Werbung in Apps (B7-54/25)",
+        url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_17_2026_Apple_ATTF.html",
+        canonical_url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_17_2026_Apple_ATTF.html",
+        published_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
         captured_at=datetime.now(timezone.utc),
         content_type="press_release",
-        content_hash="hash_pr_b12",
-        raw_metadata={"case_reference": "B12-21/23"},
+        content_hash="hash_pr_b7_54_25",
+        raw_metadata={"case_reference": "B7-54/25"},
     )
     db_session.add(pr_entry)
     db_session.commit()
 
-    # Inspector check for identical URL (must detect duplicate)
+    # 1. Inspector check for identical URL (must detect duplicate via canonical_url)
     raw_identical = RawEntryData(
-        title="Pressemitteilung zum Verfahren (B12-21/23)",
-        url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/Tech.html",
-        external_id="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/Tech.html",
-        raw_metadata={"case_reference": "B12-21/23", "german_url": "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/Tech.html"},
+        title="Apple ändert Regeln für personalisierte Werbung in Apps (B7-54/25)",
+        url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_17_2026_Apple_ATTF.html",
+        external_id="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_17_2026_Apple_ATTF.html",
+        raw_metadata={"case_reference": "B7-54/25", "german_url": "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_17_2026_Apple_ATTF.html"},
     )
     identical_check = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
         db=db_session,
@@ -338,12 +338,12 @@ def test_dedup_non_destructive_same_aktenzeichen(db_session: Session):
     assert identical_check.is_duplicate is True
     assert identical_check.duplicate_reason == "canonical_url"
 
-    # Inspector check for decision document with same Aktenzeichen but distinct URL and title
+    # 2. Inspector check for decision document with same Aktenzeichen but distinct document URL & title
     raw_decision = RawEntryData(
-        title="Fallbericht Plattformmärkte (B12-21/23)",
-        url="https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B12-21-23.html",
-        external_id="https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B12-21-23.html",
-        raw_metadata={"case_reference": "B12-21/23", "german_url": "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B12-21-23.html"},
+        title="Beschluss im Apple-ATTF-Verfahren veröffentlicht (B7-54/25)",
+        url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_01_2026_Entscheidung_ATTF.html",
+        external_id="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_01_2026_Entscheidung_ATTF.html",
+        raw_metadata={"case_reference": "B7-54/25", "german_url": "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_01_2026_Entscheidung_ATTF.html"},
     )
     decision_check = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
         db=db_session,
@@ -354,7 +354,10 @@ def test_dedup_non_destructive_same_aktenzeichen(db_session: Session):
 
 
 def test_bundeskartellamt_sufficiency():
-    """Verify that Bundeskartellamt entries satisfy source sufficiency rules."""
+    """Verify that Bundeskartellamt entries satisfy standard generic source sufficiency rules.
+    - Substantive realistic text (~7k chars) => FULL
+    - Short/broken teaser text (250 chars) => NO FULL (INSUFFICIENT)
+    """
     source = Source(
         id=uuid.uuid4(),
         name=BUNDESKARTELLAMT_SOURCE_NAME,
@@ -362,26 +365,115 @@ def test_bundeskartellamt_sufficiency():
         provider="native",
     )
 
-    valid_entry = Entry(
-        title="Bundeskartellamt leitet Missbrauchsverfahren gegen Technologieunternehmen ein",
+    # Substantive realistic publication (7,560 chars) => must be FULL
+    substantive_content = "Das Bundeskartellamt hat ein Missbrauchsverfahren eingeleitet. " * 120
+    assert len(substantive_content) >= 7000
+
+    substantive_entry = Entry(
+        title="Bundeskartellamt leitet Missbrauchsverfahren ein",
         url="https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_01_2026_Tech.html",
-        content="Das Bundeskartellamt hat heute ein Missbrauchsverfahren eingeleitet. Untersucht werden Praktiken auf digitalen Plattformen nach Paragraf 19a GWB. Die Behörde prüft Wettbewerbsverzerrungen und Marktmacht eingehend. Umfassende Prüfschritte wurden unternommen.",
-        excerpt="Das Bundeskartellamt hat heute ein Missbrauchsverfahren eingeleitet.",
+        content=substantive_content,
+        excerpt="Das Bundeskartellamt hat ein Verfahren eingeleitet.",
         language="de",
         source=source,
     )
-    result = SourceSufficiencyService.assess(valid_entry)
-    assert result.level == SourceSufficiencyLevel.FULL
+    result_substantive = SourceSufficiencyService.assess(substantive_entry)
+    assert result_substantive.level == SourceSufficiencyLevel.FULL
+    assert result_substantive.signals.full_text_available is True
 
-    sparse_entry = Entry(
-        title="Kurze Meldung",
-        url="https://www.bundeskartellamt.de/test.html",
-        content="Zu kurz.",
+    # Broken extraction / teaser (250 chars) => must NOT be FULL (must be INSUFFICIENT)
+    teaser_content = "A" * 250
+    assert len(teaser_content) == 250
+    teaser_entry = Entry(
+        title="Kurze Meldung oder Teaser",
+        url="https://www.bundeskartellamt.de/teaser.html",
+        content=teaser_content,
         excerpt="Kurz.",
         source=source,
     )
-    sparse_result = SourceSufficiencyService.assess(sparse_entry)
-    assert sparse_result.level == SourceSufficiencyLevel.INSUFFICIENT
+    result_teaser = SourceSufficiencyService.assess(teaser_entry)
+    assert result_teaser.level != SourceSufficiencyLevel.FULL
+    assert result_teaser.level == SourceSufficiencyLevel.INSUFFICIENT
+
+
+@pytest.mark.asyncio
+async def test_preview_bundeskartellamt_read_only(db_session: Session):
+    """Verify that SourceDiscoveryPreviewService previews Bundeskartellamt in strictly read-only mode."""
+    from scripts.preview_source_discovery import SourceDiscoveryPreviewService
+
+    source = Source(
+        id=uuid.uuid4(),
+        name=BUNDESKARTELLAMT_SOURCE_NAME,
+        url="https://www.bundeskartellamt.de/",
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        category="institutional",
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "rssnewsfeed.xml" in url:
+            return httpx.Response(200, text=SAMPLE_RSS_FEED)
+        return httpx.Response(200, text=SAMPLE_GERMAN_DETAIL_WITH_EN_LINK)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        service = SourceDiscoveryPreviewService(db=db_session, now=datetime(2026, 1, 20, tzinfo=timezone.utc))
+        report = await service.run_preview_async(
+            lookback_days=30,
+            source_filter="bundeskartellamt",
+            async_client=client,
+            target_sources=[source],
+        )
+
+    assert report is not None
+    assert len(report.sources_summaries) == 1
+    src_report = report.sources_summaries[0]
+    assert src_report.source_name == BUNDESKARTELLAMT_SOURCE_NAME
+    assert src_report.discovered_total >= 2
+    assert src_report.new_candidates >= 2
+    # Verify zero mutations occurred
+    entries_in_db = db_session.execute(select(Entry).where(Entry.source_id == source.id)).scalars().all()
+    assert len(entries_in_db) == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_prospective_count_bundeskartellamt(db_session: Session):
+    """Verify that NewSourcesBackfillService counts prospective entries for Bundeskartellamt."""
+    from app.services.new_sources_backfill_service import NewSourcesBackfillService
+
+    source = Source(
+        id=uuid.uuid4(),
+        name=BUNDESKARTELLAMT_SOURCE_NAME,
+        url="https://www.bundeskartellamt.de/",
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        category="institutional",
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "rssnewsfeed.xml" in url:
+            return httpx.Response(200, text=SAMPLE_RSS_FEED)
+        return httpx.Response(200, text=SAMPLE_GERMAN_DETAIL_WITH_EN_LINK)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        service = NewSourcesBackfillService()
+        total_new, per_source = await service._count_prospective_new_entries(
+            target_sources=[source],
+            db=db_session,
+            lookback_days=300,
+            async_client=client,
+        )
+
+    assert total_new >= 2
 
 
 @pytest.mark.asyncio
@@ -467,4 +559,9 @@ def test_seed_bundeskartellamt_idempotency():
             ).scalars().all()
             assert len(entry_count) == 0
         finally:
+            from sqlalchemy import delete
+            from app.models.tracking import TrackedEntity
+            db.execute(delete(Source).where(Source.name == BUNDESKARTELLAMT_SOURCE_NAME))
+            db.execute(delete(TrackedEntity).where(TrackedEntity.display_name == "Bundeskartellamt"))
+            db.commit()
             db.close()
