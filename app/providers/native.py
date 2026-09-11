@@ -100,6 +100,11 @@ class NativeProvider(BaseSourceProvider):
             from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
             return await _run_with_extractor(BundeskartellamtExtractor())
 
+        # 6. Competition and Markets Authority (CMA UK) adapter
+        if "cma-cases" in url_lower or "competition-and-markets-authority" in url_lower or "competition and markets authority" in (source.name or "").lower() or (source.name or "").strip().lower() == "cma":
+            from app.providers.extractors.cma import CMAExtractor
+            return await _run_with_extractor(CMAExtractor())
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -161,6 +166,14 @@ class NativeProvider(BaseSourceProvider):
         if "bundeskartellamt.de" in source.url.lower() or "bundeskartellamt" in (source.name or "").lower():
             from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
             extractor = BundeskartellamtExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: CMA
+        if "cma-cases" in source.url.lower() or "competition-and-markets-authority" in source.url.lower() or "competition and markets authority" in (source.name or "").lower() or (source.name or "").strip().lower() == "cma":
+            from app.providers.extractors.cma import CMAExtractor
+            extractor = CMAExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)

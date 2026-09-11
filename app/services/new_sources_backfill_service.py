@@ -56,6 +56,7 @@ from app.services.source_sufficiency_service import (
 )
 from scripts.preview_source_discovery import (
     BUNDESKARTELLAMT_SOURCE_NAME,
+    CMA_SOURCE_NAME,
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
@@ -229,6 +230,12 @@ class NewSourcesBackfillService:
                             )
                         elif "bundeskartellamt" in source.name.lower() or "bkart" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
+                        elif "competition and markets authority" in source.name.lower() or "cma" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_cma_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
@@ -797,7 +804,13 @@ class NewSourcesBackfillService:
         self, db: Session, source_filter: Optional[str] = None
     ) -> list[Source]:
         """Resolve candidate new Sources from database, supporting exact name and shortcut filters."""
-        all_new_names = [GERADIN_SOURCE_NAME, DMA_SOURCE_NAME, OECD_SOURCE_NAME, BUNDESKARTELLAMT_SOURCE_NAME]
+        all_new_names = [
+            GERADIN_SOURCE_NAME,
+            DMA_SOURCE_NAME,
+            OECD_SOURCE_NAME,
+            BUNDESKARTELLAMT_SOURCE_NAME,
+            CMA_SOURCE_NAME,
+        ]
         resolved: list[Source] = []
 
         for name in all_new_names:
@@ -814,6 +827,9 @@ class NewSourcesBackfillService:
                         continue
                 elif norm_filter in {"bundeskartellamt", "bkart"}:
                     if name != BUNDESKARTELLAMT_SOURCE_NAME:
+                        continue
+                elif norm_filter in {"cma", "competition and markets authority"}:
+                    if name != CMA_SOURCE_NAME:
                         continue
                 else:
                     if norm_filter not in name.lower():

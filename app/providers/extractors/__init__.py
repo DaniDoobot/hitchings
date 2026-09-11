@@ -4,10 +4,13 @@ from app.providers.extractors.european_commission import EuropeanCommissionExtra
 from app.providers.extractors.competition_appeal_tribunal import CompetitionAppealTribunalExtractor
 from app.providers.extractors.curia import CuriaCaseLawExtractor
 
+from app.providers.extractors.cma import CMAExtractor
+
 __all__ = [
     "CNMCNewsExtractor",
     "EuropeanCommissionExtractor",
     "CompetitionAppealTribunalExtractor",
     "CuriaCaseLawExtractor",
+    "CMAExtractor",
 ]
 

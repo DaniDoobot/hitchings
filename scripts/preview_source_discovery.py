@@ -49,6 +49,7 @@ from app.providers.base import RawEntryData
 from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAdapter
 from app.providers.direct_web.models import DirectWebArticle, DiscoveredItem
 from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
+from app.providers.extractors.cma import CMAExtractor
 from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
 from app.providers.extractors.oecd_competition import (
     OECDCompetitionExtractor,
@@ -67,12 +68,14 @@ GERADIN_SOURCE_NAME = "Geradin Partners - EU Competition & Litigation"
 DMA_SOURCE_NAME = "European Commission - Digital Markets Act"
 OECD_SOURCE_NAME = "OECD - Competition Law and Policy"
 BUNDESKARTELLAMT_SOURCE_NAME = "Bundeskartellamt"
+CMA_SOURCE_NAME = "Competition and Markets Authority (UK)"
 
 TARGET_SOURCE_NAMES = [
     GERADIN_SOURCE_NAME,
     DMA_SOURCE_NAME,
     OECD_SOURCE_NAME,
     BUNDESKARTELLAMT_SOURCE_NAME,
+    CMA_SOURCE_NAME,
 ]
 
 
@@ -350,6 +353,63 @@ class ReadOnlyDeduplicationInspector:
         return ReadOnlyDeduplicationResult(is_duplicate=False)
 
     @staticmethod
+    def check_cma_item(
+        db: Session,
+        source_id: uuid.UUID,
+        raw: RawEntryData,
+    ) -> ReadOnlyDeduplicationResult:
+        """Evaluate CMA milestone candidate against database in read-only mode."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 1. External ID check
+        if raw.external_id:
+            existing_ext = db.execute(
+                select(Entry).where(
+                    Entry.source_id == source_id,
+                    Entry.external_id == raw.external_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing_ext:
+                return ReadOnlyDeduplicationResult(
+                    is_duplicate=True,
+                    duplicate_reason="external_id",
+                    matched_entry_id=str(existing_ext.id),
+                    matched_title=existing_ext.title,
+                )
+
+        # 2. URL check
+        existing_url = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                or_(Entry.url == raw.url, Entry.canonical_url == raw.url),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_url:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="url",
+                matched_entry_id=str(existing_url.id),
+                matched_title=existing_url.title,
+            )
+
+        # 3. Content hash check
+        existing_hash = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                Entry.content_hash == c_hash,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_hash:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="content_hash",
+                matched_entry_id=str(existing_hash.id),
+                matched_title=existing_hash.title,
+            )
+
+        return ReadOnlyDeduplicationResult(is_duplicate=False)
+
+    @staticmethod
     def check_geradin_item(
         db: Session,
         source_id: uuid.UUID,
@@ -465,6 +525,7 @@ class SourcePreviewSummary(BaseModel):
     existing_with_completed_analysis: int = 0
     existing_pending_analysis: int = 0
     existing_failed_only: int = 0
+    cma_metrics: Optional[dict[str, Any]] = None
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -590,6 +651,13 @@ class SourceDiscoveryPreviewService:
                     lookback_days=lookback_days,
                     async_client=async_client,
                 )
+            elif "competition and markets authority" in source.name.lower() or "cma" in source.name.lower():
+                summary = await self._preview_cma_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
+                )
             else:
                 logger.warning("Unrecognized target source: %s", source.name)
                 continue
@@ -672,6 +740,8 @@ class SourceDiscoveryPreviewService:
                         continue
                     elif normalized_filter in ("bundeskartellamt", "bkart") and "bundeskartellamt" not in name.lower():
                         continue
+                    elif normalized_filter in ("cma", "competition-and-markets-authority", "cma_case") and "competition and markets authority" not in name.lower():
+                        continue
 
             db_source = self.db.execute(
                 select(Source).where(Source.name == name).limit(1)
@@ -718,6 +788,23 @@ class SourceDiscoveryPreviewService:
                     "initial_fetch_limit": 30,
                     "rss_url": "https://www.bundeskartellamt.de/DE/Service/RSS/_documents/rssnewsfeed.xml",
                     "sitemap_url": "https://www.bundeskartellamt.de/Sitemap_XML.xml",
+                },
+                active=True,
+            )
+        elif name == CMA_SOURCE_NAME:
+            return Source(
+                id=uuid.uuid4(),
+                name=CMA_SOURCE_NAME,
+                type=SourceType.INSTITUTIONAL,
+                provider="native",
+                url="https://www.gov.uk/cma-cases",
+                config={
+                    "lookback_days": 8,
+                    "freshness_warning_hours": 168,
+                    "organisation": "competition-and-markets-authority",
+                    "document_types": ["cma_case", "digital_markets_measure"],
+                    "search_api_url": "https://www.gov.uk/api/search.json",
+                    "content_api_base": "https://www.gov.uk/api/content",
                 },
                 active=True,
             )
@@ -1342,6 +1429,198 @@ class SourceDiscoveryPreviewService:
 
         return summary
 
+    # --------------------------------------------------------------------------
+    # 5. CMA PREVIEW
+    # --------------------------------------------------------------------------
+    async def _preview_cma_async(
+        self,
+        source: Source,
+        cutoff_date: Any,
+        lookback_days: int,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> SourcePreviewSummary:
+        """Execute real discovery and read-only preview for CMA with milestone architecture."""
+        from app.providers.extractors.cma import parse_iso_datetime
+        from app.services.cma_event_service import classify_cma_event_note
+
+        extractor = CMAExtractor()
+        summary = SourcePreviewSummary(source_name=source.name)
+
+        client = async_client
+        should_close = False
+        if client is None:
+            headers = {"User-Agent": "HITCHINGS/0.1 (+https://github.com/hitchings; news-observatory)"}
+            client = httpx.AsyncClient(timeout=25.0, headers=headers, follow_redirects=True)
+            should_close = True
+
+        cutoff_dt = datetime.combine(cutoff_date, datetime.min.time(), tzinfo=timezone.utc)
+
+        cma_metrics = {
+            "cases_discovered": 0,
+            "cases_updated_in_window": 0,
+            "events_total_in_window": 0,
+            "events_substantive": 0,
+            "events_administrative": 0,
+            "events_latest": 0,
+            "events_historical": 0,
+            "events_with_exact_attachment": 0,
+            "events_with_strong_attachment": 0,
+            "events_ambiguous_attachment": 0,
+            "events_without_attachment": 0,
+            "historical_events_skipped_no_immutable_content": 0,
+        }
+
+        try:
+            # 1. Discover active case dossiers via Search API
+            discovered_cases = await extractor.discover_cases(client, cutoff_dt)
+            cma_metrics["cases_discovered"] = len(discovered_cases)
+            cma_metrics["cases_updated_in_window"] = len(discovered_cases)
+            summary.discovered_total = len(discovered_cases)
+
+            # 2. Inspect events and extract entries across dossiers
+            for case_item in discovered_cases:
+                link = case_item.get("link")
+                if not link:
+                    continue
+
+                # Audit all events in change_history
+                clean_path = link if link.startswith("/") else f"/{link}"
+                content_url = f"https://www.gov.uk/api/content{clean_path}"
+                try:
+                    resp = await client.get(content_url, timeout=25.0)
+                    if resp.status_code == 200:
+                        cdata = resp.json()
+                        details = cdata.get("details", {})
+                        change_history = details.get("change_history", [])
+                        for ch in change_history:
+                            ts_str = ch.get("public_timestamp")
+                            note = (ch.get("note") or "").strip()
+                            if not ts_str or not note:
+                                continue
+                            dt = parse_iso_datetime(ts_str)
+                            if not dt or dt < cutoff_dt:
+                                continue
+
+                            cma_metrics["events_total_in_window"] += 1
+                            summary.inside_lookback += 1
+
+                            ev_cls, _ = classify_cma_event_note(note)
+                            if ev_cls == "SUBSTANTIVE":
+                                cma_metrics["events_substantive"] += 1
+                            else:
+                                cma_metrics["events_administrative"] += 1
+                                summary.excluded_editorially += 1
+                except Exception:
+                    pass
+
+                # Extract actual milestone entries
+                raw_entries = await extractor.extract_case_milestones(
+                    client=client,
+                    source=source,
+                    base_path=link,
+                    cutoff_dt=cutoff_dt,
+                )
+
+                for raw in raw_entries:
+                    meta = raw.raw_metadata or {}
+                    if meta.get("is_latest_event"):
+                        cma_metrics["events_latest"] += 1
+                    else:
+                        cma_metrics["events_historical"] += 1
+
+                    match_lvl = meta.get("attachment_match_level")
+                    if match_lvl == "EXACT":
+                        cma_metrics["events_with_exact_attachment"] += 1
+                    elif match_lvl == "STRONG":
+                        cma_metrics["events_with_strong_attachment"] += 1
+                    elif match_lvl == "AMBIGUOUS":
+                        cma_metrics["events_ambiguous_attachment"] += 1
+                    else:
+                        cma_metrics["events_without_attachment"] += 1
+
+                    # Check deduplication
+                    dedupe = ReadOnlyDeduplicationInspector.check_cma_item(
+                        db=self.db,
+                        source_id=source.id,
+                        raw=raw,
+                    )
+                    if dedupe.is_duplicate:
+                        summary.duplicates += 1
+                        continue
+
+                    # Item is NEW
+                    summary.new_candidates += 1
+                    detached_source = Source(
+                        id=source.id,
+                        name=source.name,
+                        type=source.type,
+                    )
+                    transient_entry = Entry(
+                        id=uuid.uuid4(),
+                        source_id=source.id,
+                        source=detached_source,
+                        external_id=raw.external_id,
+                        url=raw.url,
+                        canonical_url=raw.url,
+                        title=raw.title,
+                        content=raw.content,
+                        excerpt=raw.excerpt,
+                        author=raw.author,
+                        published_at=raw.published_at,
+                        captured_at=self.now,
+                        language=raw.language or "en",
+                        content_type=raw.content_type or "merger",
+                        raw_metadata=raw.raw_metadata or {},
+                    )
+
+                    suff_res = SourceSufficiencyService.assess(transient_entry)
+                    suff_level = suff_res.level.value
+
+                    if suff_level == SourceSufficiencyLevel.FULL.value:
+                        summary.full_count += 1
+                    elif suff_level == SourceSufficiencyLevel.PARTIAL.value:
+                        summary.partial_count += 1
+                    else:
+                        summary.insufficient_count += 1
+
+                    planner = IncrementalAnalysisPlanner(self.db)
+                    cand_eval = planner.evaluate_entry(transient_entry)
+                    eligible = (cand_eval.reason == "eligible")
+                    if eligible:
+                        summary.eligible_for_analysis += 1
+
+                    content_len = len(raw.content or "")
+                    summary.new_candidate_chars += content_len
+                    if eligible:
+                        summary.eligible_input_chars += content_len
+                    summary.estimated_input_chars += content_len
+
+                    pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
+                    summary.new_items.append(
+                        PreviewCandidateItem(
+                            date=pub_str,
+                            source_name=source.name,
+                            title=raw.title,
+                            url=raw.url,
+                            is_duplicate=False,
+                            sufficiency=suff_level,
+                            content_chars=content_len,
+                            eligible_for_analysis=eligible,
+                        )
+                    )
+
+            raw_generated_count = cma_metrics["events_latest"] + cma_metrics["events_historical"]
+            cma_metrics["historical_events_skipped_no_immutable_content"] = max(
+                0, cma_metrics["events_substantive"] - raw_generated_count
+            )
+
+            summary.cma_metrics = cma_metrics
+            return summary
+
+        finally:
+            if should_close:
+                await client.aclose()
+
 
 # ==============================================================================
 # REPORT FORMATTING
@@ -1377,6 +1656,21 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  existing_with_completed: {summary.existing_with_completed_analysis}")
             print(f"  existing_pending       : {summary.existing_pending_analysis}")
             print(f"  existing_failed_only   : {summary.existing_failed_only}")
+        if summary.cma_metrics:
+            cm = summary.cma_metrics
+            print("  --- CMA SPECIFIC METRICS ---")
+            print(f"  cases_discovered       : {cm.get('cases_discovered')}")
+            print(f"  cases_updated_in_window: {cm.get('cases_updated_in_window')}")
+            print(f"  events_total_in_window : {cm.get('events_total_in_window')}")
+            print(f"  events_substantive     : {cm.get('events_substantive')}")
+            print(f"  events_administrative  : {cm.get('events_administrative')}")
+            print(f"  events_latest          : {cm.get('events_latest')}")
+            print(f"  events_historical      : {cm.get('events_historical')}")
+            print(f"  events_with_exact_att  : {cm.get('events_with_exact_attachment')}")
+            print(f"  events_with_strong_att : {cm.get('events_with_strong_attachment')}")
+            print(f"  events_ambiguous_att   : {cm.get('events_ambiguous_attachment')}")
+            print(f"  events_without_att     : {cm.get('events_without_attachment')}")
+            print(f"  hist_events_skipped_no_immutable: {cm.get('historical_events_skipped_no_immutable_content')}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -1417,6 +1711,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
                 source_abbrev = "Bundeskartellamt"
             elif "oecd" in item.source_name.lower():
                 source_abbrev = "OECD"
+            elif "competition and markets authority" in item.source_name.lower() or "cma" in item.source_name.lower():
+                source_abbrev = "CMA (UK)"
             else:
                 source_abbrev = item.source_name[:22]
             elig_str = "SÍ" if item.eligible_for_analysis else "NO"
@@ -1444,7 +1740,7 @@ def main() -> int:
         "--source",
         type=str,
         default=None,
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart"],
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma"],
         help="Limit preview to a specific source (default: all target sources)",
     )
 
