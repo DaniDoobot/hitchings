@@ -26,6 +26,13 @@ from app.services.source_sufficiency_service import (
     SourceSufficiencyService,
     SourceSufficiencyLevel,
 )
+from app.services.bundeskartellamt_enrichment_service import (
+    BundeskartellamtPDFEnrichmentService,
+    MAX_PDF_BYTES,
+    MAX_PDF_PAGES,
+    MAX_EXTRACTED_CHARS,
+)
+from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
 from scripts.preview_source_discovery import ReadOnlyDeduplicationInspector
 from scripts.seed_source_bundeskartellamt import seed_bundeskartellamt_source
 from tests.conftest import TestingSessionLocal
@@ -780,3 +787,480 @@ async def test_historical_discovery_sitemap_only_older_than_rss():
     assert len(candidates) == 3
     # Check deduplicated and chronological sort (August > July > May)
     assert candidates[0]["published_at"] > candidates[1]["published_at"] > candidates[2]["published_at"]
+
+
+# ==============================================================================
+# BLOQUE 14B.4: TESTS OBLIGATORIOS A - K PARA ENRICHMENT PDF FALLBERICHTE
+# ==============================================================================
+
+def make_test_pdf_bytes(text: str, num_pages: int = 1, blank: bool = False) -> bytes:
+    """Generate in-memory valid PDF bytes with clean digital text layers."""
+    import io
+    objs = []
+    objs.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj")
+    kids = " ".join(f"{3 + i*2} 0 R" for i in range(num_pages))
+    objs.append(f"2 0 obj << /Type /Pages /Kids [{kids}] /Count {num_pages} >> endobj".encode())
+
+    font_obj_idx = 3 + num_pages * 2
+    for i in range(num_pages):
+        page_idx = 3 + i * 2
+        content_idx = page_idx + 1
+        page_obj = f"{page_idx} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {content_idx} 0 R /Resources << /Font << /F1 {font_obj_idx} 0 R >> >> >> endobj".encode()
+        if blank:
+            stream_content = b""
+        else:
+            stream_content = f"BT /F1 12 Tf 50 700 Td ({text} Page {i+1}) Tj ET".encode()
+        content_obj = f"{content_idx} 0 obj << /Length {len(stream_content)} >> stream\n".encode() + stream_content + b"\nendstream endobj"
+        objs.extend([page_obj, content_obj])
+
+    objs.append(f"{font_obj_idx} 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj".encode())
+
+    out = io.BytesIO()
+    out.write(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objs:
+        offsets.append(out.tell())
+        out.write(obj + b"\n")
+
+    xref_pos = out.tell()
+    out.write(f"xref\n0 {len(objs)+1}\n0000000000 65535 f \n".encode())
+    for off in offsets[1:]:
+        out.write(f"{off:010d} 00000 n \n".encode())
+    out.write(f"trailer << /Size {len(objs)+1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF".encode())
+    return out.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_case_report_partial_with_short_textual_pdf_enriches_to_full():
+    """A) case_report PARTIAL + PDF textual corto => enrichment => FULL."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.pdf"
+
+    # HTML ~500 chars -> PARTIAL
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: Bußgelder wegen Absprachen (B12-21/23)</h1>
+      <p>{"Das Bundeskartellamt hat Geldbußen verhängt wegen verbotener Absprachen im Messgerätehandel. " * 5}</p>
+      <a href="{pdf_url}">Amtlicher Fallbericht (PDF)</a>
+    </main></body></html>"""
+
+    # PDF text: repeated to ensure combined text > 1500 chars
+    pdf_text = "Vollstaendiger amtlicher Fallbericht mit ausfuehrlicher rechtlicher Wuerdigung gemaess Paragraph 1 GWB und Artikel 101 AEUV. " * 10
+    pdf_bytes = make_test_pdf_bytes(pdf_text, num_pages=2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "B12-21-23.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B12-21-23.pdf" in url:
+            return httpx.Response(200, content=pdf_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: Bußgelder B12-21/23", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.content_type == "case_report"
+    assert raw.raw_metadata["pdf_enriched"] is True
+    assert raw.raw_metadata["pdf_pages"] == 2
+    assert raw.raw_metadata["pdf_bytes"] == len(pdf_bytes)
+    assert raw.raw_metadata["pdf_extracted_chars"] > 0
+    assert len(raw.content) >= 1500
+
+    # Source sufficiency must naturally become FULL
+    dummy_source = Source(name="Bundeskartellamt")
+    transient = Entry(content=raw.content, source=dummy_source, raw_metadata=raw.raw_metadata)
+    suff = SourceSufficiencyService.assess(transient)
+    assert suff.level == SourceSufficiencyLevel.FULL
+
+
+@pytest.mark.asyncio
+async def test_case_report_partial_pdf_404_fallbacks_to_html_partial():
+    """B) case_report PARTIAL + PDF 404 => fallback HTML => PARTIAL."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B1-11-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B1-11-26.pdf"
+
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: B1-11/26</h1>
+      <p>{"Teaser text for case report without valid remote PDF attachment. " * 6}</p>
+      <a href="{pdf_url}">Download PDF</a>
+    </main></body></html>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "B1-11-26.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B1-11-26.pdf" in url:
+            return httpx.Response(404)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: B1-11/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.raw_metadata["pdf_enriched"] is False
+    assert "Amtlicher Fallbericht (Volltext PDF)" not in raw.content
+
+    dummy_source = Source(name="Bundeskartellamt")
+    transient = Entry(content=raw.content, source=dummy_source, raw_metadata=raw.raw_metadata)
+    suff = SourceSufficiencyService.assess(transient)
+    assert suff.level == SourceSufficiencyLevel.PARTIAL
+
+
+@pytest.mark.asyncio
+async def test_case_report_partial_pdf_without_text_fallbacks_to_html_partial():
+    """C) case_report PARTIAL + PDF sin texto => fallback HTML => PARTIAL."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B2-22-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B2-22-26.pdf"
+
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: B2-22/26</h1>
+      <p>{"Scanned document announcement without textual layer in PDF. " * 6}</p>
+      <a href="{pdf_url}">Download PDF</a>
+    </main></body></html>"""
+
+    # Blank PDF (0 text layer)
+    pdf_bytes = make_test_pdf_bytes("", num_pages=2, blank=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "B2-22-26.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B2-22-26.pdf" in url:
+            return httpx.Response(200, content=pdf_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: B2-22/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+    dummy_source = Source(name="Bundeskartellamt")
+    transient = Entry(content=raw.content, source=dummy_source, raw_metadata=raw.raw_metadata)
+    suff = SourceSufficiencyService.assess(transient)
+    assert suff.level == SourceSufficiencyLevel.PARTIAL
+
+
+@pytest.mark.asyncio
+async def test_case_report_partial_pdf_exceeding_max_bytes_skips_enrichment():
+    """D) case_report PARTIAL + PDF > MAX_BYTES => no enrichment."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B3-33-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B3-33-26.pdf"
+
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: B3-33/26</h1>
+      <p>{"Overly heavy file payload case report notice text. " * 7}</p>
+      <a href="{pdf_url}">Download PDF</a>
+    </main></body></html>"""
+
+    # Generate oversized byte payload > MAX_PDF_BYTES (5 MB)
+    large_bytes = b"%PDF-1.4\n" + (b"0" * (MAX_PDF_BYTES + 1024))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "B3-33-26.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B3-33-26.pdf" in url:
+            return httpx.Response(200, content=large_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: B3-33/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+
+@pytest.mark.asyncio
+async def test_case_report_partial_pdf_exceeding_max_pages_skips_enrichment():
+    """E) case_report PARTIAL + páginas > MAX_PAGES => no enrichment."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B4-44-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B4-44-26.pdf"
+
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: B4-44/26</h1>
+      <p>{"Long judgment report exceeding page limits notice. " * 7}</p>
+      <a href="{pdf_url}">Download PDF</a>
+    </main></body></html>"""
+
+    # 25 pages > MAX_PDF_PAGES (20)
+    oversized_pages_bytes = make_test_pdf_bytes("Long Decision Page Content", num_pages=25)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "B4-44-26.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B4-44-26.pdf" in url:
+            return httpx.Response(200, content=oversized_pages_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: B4-44/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+
+@pytest.mark.asyncio
+async def test_press_release_partial_with_pdf_does_not_download_pdf():
+    """F) press_release PARTIAL + PDF => NO descarga PDF."""
+    pr_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_25_2026_ShortPR.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_25_2026_Report.pdf"
+
+    pr_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Pressemitteilung: Neuer Zwischenbericht</h1>
+      <p>{"Kurze Pressemitteilung mit verlinktem Anhang fuer Journalisten. " * 6}</p>
+      <a href="{pdf_url}">PDF Download</a>
+    </main></body></html>"""
+
+    pdf_download_attempted = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal pdf_download_attempted
+        url = str(request.url)
+        if "ShortPR.html" in url:
+            return httpx.Response(200, text=pr_html)
+        if "Report.pdf" in url:
+            pdf_download_attempted = True
+            return httpx.Response(200, content=b"%PDF-1.4...")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": pr_url, "title": "Pressemitteilung: Neuer Zwischenbericht", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.content_type == "press_release"
+    assert pdf_download_attempted is False
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+
+@pytest.mark.asyncio
+async def test_decision_partial_with_pdf_does_not_download_pdf():
+    """G) decision PARTIAL + PDF => NO descarga PDF."""
+    decision_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Entscheidungen/Beschluss_B5-55-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Entscheidungen/Beschluss_B5-55-26.pdf"
+
+    decision_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Beschluss in Sachen B5-55/26</h1>
+      <p>{"Kurzer Hinweistext zu einem Beschluss der Beschlussabteilung. " * 6}</p>
+      <a href="{pdf_url}">Beschluss (PDF)</a>
+    </main></body></html>"""
+
+    pdf_download_attempted = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal pdf_download_attempted
+        url = str(request.url)
+        if "Beschluss_B5-55-26.html" in url:
+            return httpx.Response(200, text=decision_html)
+        if "Beschluss_B5-55-26.pdf" in url:
+            pdf_download_attempted = True
+            return httpx.Response(200, content=b"%PDF-1.4...")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": decision_url, "title": "Beschluss in Sachen B5-55/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.content_type == "decision"
+    assert pdf_download_attempted is False
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+
+@pytest.mark.asyncio
+async def test_case_report_already_full_does_not_download_pdf():
+    """H) case_report FULL + PDF => NO descarga PDF."""
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B6-66-26.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/2026/B6-66-26.pdf"
+
+    # HTML already >= 1500 chars (FULL)
+    long_text = "Ausfuehrliche Begruendung des Fallberichtes unmittelbar im HTML-Text verfuegbar. " * 30
+    doc_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: B6-66/26</h1>
+      <p>{long_text}</p>
+      <a href="{pdf_url}">Download PDF</a>
+    </main></body></html>"""
+
+    pdf_download_attempted = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal pdf_download_attempted
+        url = str(request.url)
+        if "B6-66-26.html" in url:
+            return httpx.Response(200, text=doc_html)
+        if "B6-66-26.pdf" in url:
+            pdf_download_attempted = True
+            return httpx.Response(200, content=b"%PDF-1.4...")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": doc_url, "title": "Fallbericht: B6-66/26", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.content_type == "case_report"
+    assert pdf_download_attempted is False
+    assert raw.raw_metadata["pdf_enriched"] is False
+
+
+def test_general_source_sufficiency_thresholds_unchanged():
+    """I) thresholds generales no cambian: <300 INSUFFICIENT, 300..1499 PARTIAL, >=1500 FULL."""
+    source = Source(name="Generic Legal Source")
+
+    ent_insufficient = Entry(source=source, content="A" * 299)
+    assert SourceSufficiencyService.assess(ent_insufficient).level == SourceSufficiencyLevel.INSUFFICIENT
+
+    ent_partial_min = Entry(source=source, content="A" * 300)
+    assert SourceSufficiencyService.assess(ent_partial_min).level == SourceSufficiencyLevel.PARTIAL
+
+    ent_partial_max = Entry(source=source, content="A" * 1499)
+    assert SourceSufficiencyService.assess(ent_partial_max).level == SourceSufficiencyLevel.PARTIAL
+
+    ent_full = Entry(source=source, content="A" * 1500)
+    assert SourceSufficiencyService.assess(ent_full).level == SourceSufficiencyLevel.FULL
+
+
+def test_oecd_geradin_dma_sufficiency_rules_unchanged():
+    """J) OECD/Geradin/DMA/CAT no cambian."""
+    # OECD: >=500 FULL, >=200 PARTIAL, <200 INSUFFICIENT
+    s_oecd = Source(name="OECD - Competition Law and Policy")
+    assert SourceSufficiencyService.assess(Entry(source=s_oecd, content="A" * 150)).level == SourceSufficiencyLevel.INSUFFICIENT
+    assert SourceSufficiencyService.assess(Entry(source=s_oecd, content="A" * 250)).level == SourceSufficiencyLevel.PARTIAL
+    assert SourceSufficiencyService.assess(Entry(source=s_oecd, content="A" * 550)).level == SourceSufficiencyLevel.FULL
+
+    # CAT PDF text layer -> FULL
+    s_cat = Source(name="Competition Appeal Tribunal - Judgments")
+    cat_entry = Entry(source=s_cat, content="Judgment", raw_metadata={"content_source": "cat_judgment_pdf_text"})
+    assert SourceSufficiencyService.assess(cat_entry).level == SourceSufficiencyLevel.FULL
+
+    # CURIA text > 0 -> FULL
+    s_curia = Source(name="CURIA - Court of Justice of the European Union")
+    assert SourceSufficiencyService.assess(Entry(source=s_curia, content="Arrêt de la Cour")).level == SourceSufficiencyLevel.FULL
+
+
+@pytest.mark.asyncio
+async def test_b12_21_23_fixture_enrichment_to_full_and_planner_eligible(db_session: Session):
+    """K) B12-21/23 fixture: HTML ~1028 + PDF text ~4374 => FULL => planner.evaluate_entry reason="eligible"."""
+    source = Source(
+        id=uuid.uuid4(),
+        name=BUNDESKARTELLAMT_SOURCE_NAME,
+        url="https://www.bundeskartellamt.de/",
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        category="institutional",
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    notice_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_10_2026_Fallbericht_Messtechnik.html"
+    doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.pdf?__blob=publicationFile&v=3"
+
+    notice_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: Bußgelder wegen Absprachen (B12-21/23)</h1>
+      <p>Kurze Meldung ueber Bußgelder im Grosshandel mit Pruef- und Messgeraeten.</p>
+      <div class="c-teaser-download">
+        <a class="c-link" href="{doc_url}">Zum Fallbericht</a>
+      </div>
+    </main></body></html>"""
+
+    # Substantive HTML ~1028 chars
+    substantive_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Bußgelder wegen wettbewerbsbeschränkender Absprachen (B12-21/23)</h1>
+      <p>Datum: 23.06.2026 | Aktenzeichen: B12-21/23 | Beschlussabteilung: B12</p>
+      <p>Normen: § 1 GWB, Art. 101 Abs. 1 AEUV | Produktmärkte: Prüf- und Messgeräte</p>
+      <p>{"Das Bundeskartellamt hat am 23. Juni 2026 Bußgelder gegen mehrere Grosshaendler von elektronischen Messgeraeten verhaengt. Grund waren unzulaessige Preisabsprachen und Kundenzuteilungen ueber mehrere Jahre hinweg. " * 4}</p>
+      <div class="c-teaser-download">
+        <a href="{pdf_url}">Amtlicher Fallbericht (PDF)</a>
+      </div>
+    </main></body></html>"""
+
+    # Real Fallbericht PDF text (~4374 chars)
+    pdf_text_content = (
+        "Fallbericht 10. September 2026 Ordnungswidrigkeitenverfahren wegen des Verdachts wettbewerbsbeschraenkender Absprachen "
+        "im Bereich des Grosshandels mit elektronischen Messgeraeten. Branche: Pruef- und Messgeraete. "
+        "Aktenzeichen: B12-21/23. Datum der Entscheidung: 23. Juni 2026. "
+        "Sachverhalt: Die betroffenen Unternehmen stimmten ueber mehrere Jahre hinweg systematisch die Angebotspreise "
+        "fuer Ausschreibungen und Direktangebote bei gewerblichen Abnehmern ab. Dies fuehrte zu kuenstlich ueberhoehten Margen "
+        "und schaltete den Preiswettbewerb im massgeblichen Markt nahezu vollstaendig aus. "
+        "Rechtliche Wuerdigung: Die festgestellten Verhaltensweisen stellen eine bezweckte Wettbewerbsbeschraenkung nach Paragraph 1 GWB "
+        "sowie Artikel 101 Absatz 1 AEUV dar. Ein Rechtfertigungsgrund gemaess Paragraph 2 GWB lag nicht vor. "
+        "Verfahrensabschluss: Das Verfahren wurde einvernehmlich durch Settlement abgeschlossen. "
+    ) * 4
+    pdf_bytes = make_test_pdf_bytes(pdf_text_content, num_pages=2)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "Fallbericht_Messtechnik.html" in url:
+            return httpx.Response(200, text=notice_html)
+        if "B12-21-23.html" in url:
+            return httpx.Response(200, text=substantive_html)
+        if "B12-21-23.pdf" in url:
+            return httpx.Response(200, content=pdf_bytes)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": notice_url, "title": "Fallbericht Messtechnik B12-21/23", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    assert raw.url == doc_url
+    assert raw.content_type == "case_report"
+    assert raw.raw_metadata["pdf_enriched"] is True
+    assert raw.raw_metadata["pdf_pages"] == 2
+    assert len(raw.content) > 3000
+
+    # Persist entry in DB
+    entry = Entry(
+        id=uuid.uuid4(),
+        source_id=source.id,
+        source=source,
+        title=raw.title,
+        url=raw.url,
+        canonical_url=raw.url,
+        content=raw.content,
+        published_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        captured_at=datetime.now(timezone.utc),
+        language=raw.language,
+        content_type=raw.content_type,
+        raw_metadata=raw.raw_metadata,
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    # Verify SourceSufficiencyService evaluates it as FULL
+    suff = SourceSufficiencyService.assess(entry)
+    assert suff.level == SourceSufficiencyLevel.FULL
+
+    # Verify IncrementalAnalysisPlanner evaluates it as ELIGIBLE
+    planner = IncrementalAnalysisPlanner(db_session)
+    candidate_eval = planner.evaluate_entry(entry)
+    assert candidate_eval.sufficiency == "full"
+    assert candidate_eval.reason == "eligible"
+    assert candidate_eval.estimated_stage_plan == "triage_then_deep_if_relevant"
+

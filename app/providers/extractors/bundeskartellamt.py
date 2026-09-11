@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 
 from app.models.source import Source
 from app.providers.base import RawEntryData, ProviderError
+from app.services.bundeskartellamt_enrichment_service import BundeskartellamtPDFEnrichmentService
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +528,45 @@ class BundeskartellamtExtractor:
         # 8. Classify document type
         content_type = self._classify_content_type(url=canonical_url, title=title)
 
-        # 9. Compute excerpt
+        # 9. PDF Enrichment limited strictly to PARTIAL case reports (Fallberichte)
+        pdf_enriched = False
+        pdf_pages = 0
+        pdf_bytes = 0
+        pdf_extracted_chars = 0
+
+        enricher = BundeskartellamtPDFEnrichmentService()
+        if enricher.is_eligible_for_enrichment(
+            source_name="Bundeskartellamt",
+            content_type=content_type,
+            content=content,
+            pdf_url=pdf_url,
+        ):
+            enrich_res = await enricher.enrich_item_async(
+                client=client,
+                pdf_url=pdf_url,
+                base_content=content,
+            )
+            if enrich_res.success:
+                content = enrich_res.enriched_content
+                pdf_enriched = True
+                pdf_pages = enrich_res.pdf_pages
+                pdf_bytes = enrich_res.pdf_bytes
+                pdf_extracted_chars = enrich_res.pdf_extracted_chars
+                logger.info(
+                    "Enriched Bundeskartellamt case_report %s with %d PDF chars (%d pages, %d bytes)",
+                    canonical_url,
+                    pdf_extracted_chars,
+                    pdf_pages,
+                    pdf_bytes,
+                )
+            else:
+                logger.warning(
+                    "Bundeskartellamt case_report %s PDF enrichment skipped/failed: %s",
+                    canonical_url,
+                    enrich_res.error_reason,
+                )
+
+        # 10. Compute excerpt
         excerpt = candidate.get("description") or (content[:350] + "..." if len(content) > 350 else content)
 
         raw_metadata = {
@@ -541,7 +580,12 @@ class BundeskartellamtExtractor:
             "has_english_version": has_english_version,
             "language_selected": language_selected,
             "has_pdf": bool(pdf_url),
+            "pdf_enriched": pdf_enriched,
         }
+        if pdf_enriched:
+            raw_metadata["pdf_pages"] = pdf_pages
+            raw_metadata["pdf_bytes"] = pdf_bytes
+            raw_metadata["pdf_extracted_chars"] = pdf_extracted_chars
         if document_url:
             raw_metadata["document_url"] = document_url
         if english_fetch_failed:
@@ -576,6 +620,10 @@ class BundeskartellamtExtractor:
         u_lower = url.lower()
         t_lower = title.lower()
 
+        # If already pointing directly to an official Entscheidung document, it is not a notice
+        if "/shareddocs/entscheidung/" in u_lower:
+            return False
+
         # 1. Any AktuelleMeldungen announcing a document
         if "/aktuellemeldungen/" in u_lower:
             if any(k in t_lower or k in u_lower for k in [
@@ -596,7 +644,7 @@ class BundeskartellamtExtractor:
         for teaser in soup.find_all(class_=re.compile(r"c-teaser-download|c-teaser-newsbox", re.I)):
             for a in teaser.find_all("a", href=True):
                 h = a["href"]
-                if "/SharedDocs/Entscheidung/" in h:
+                if "/SharedDocs/Entscheidung/" in h and not h.lower().endswith(".pdf") and ".pdf?" not in h.lower():
                     parsed = urlparse(urljoin(base_url, h))
                     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
@@ -604,7 +652,7 @@ class BundeskartellamtExtractor:
         main = soup.find("main") or soup
         for a in main.find_all("a", href=True):
             h = a["href"]
-            if "/SharedDocs/Entscheidung/" in h:
+            if "/SharedDocs/Entscheidung/" in h and not h.lower().endswith(".pdf") and ".pdf?" not in h.lower():
                 parsed = urlparse(urljoin(base_url, h))
                 return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
