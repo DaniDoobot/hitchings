@@ -1,4 +1,5 @@
 """Service orchestrating AI analysis, matrix snapshotting, prompt execution, and audit persistence."""
+from __future__ import annotations
 
 import hashlib
 import json
@@ -10,7 +11,7 @@ from typing import Optional, Any
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session, joinedload
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.models.analysis import (
     AnalysisPromptVersion,
     EntryAnalysis,
