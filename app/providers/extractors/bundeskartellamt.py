@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Optional, Sequence
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -489,10 +489,45 @@ class BundeskartellamtExtractor:
                 english_fetch_failed = True
                 has_english_version = False
 
-        # 7. Classify document type
-        content_type = self._classify_content_type(url=de_url, title=title)
+        # 7. Check if this is a publication notice announcing an official substantive document
+        discovery_url = de_url
+        announcement_url = de_url
+        document_url: Optional[str] = None
+        canonical_url = de_url
 
-        # 8. Compute excerpt
+        if self.is_publication_notice(de_url, de_title):
+            substantive_doc_url = self._extract_substantive_document_url(soup_de, de_url)
+            if substantive_doc_url:
+                try:
+                    resp_doc = await client.get(substantive_doc_url, headers=headers)
+                    if resp_doc.status_code == 200:
+                        soup_doc = BeautifulSoup(resp_doc.text, "html.parser")
+                        document_url = substantive_doc_url
+                        canonical_url = substantive_doc_url
+
+                        # Check PDF on substantive document page
+                        doc_pdf = self._extract_pdf_url(soup_doc, substantive_doc_url)
+                        if doc_pdf:
+                            pdf_url = doc_pdf
+
+                        # Check Aktenzeichen on substantive document page
+                        if not aktenzeichen:
+                            aktenzeichen = self._extract_aktenzeichen(f"{soup_doc.get_text(separator=' ', strip=True)} {substantive_doc_url}")
+
+                        # Check clean content of substantive document
+                        doc_content = self._clean_content(soup_doc)
+                        if doc_content and len(doc_content) > 50:
+                            content = f"{doc_content}\n\nZusammenfassung des Bundeskartellamtes:\n{content}"
+                        logger.debug("Successfully resolved substantive document %s from announcement %s", substantive_doc_url, de_url)
+                    else:
+                        logger.warning("Substantive document %s returned HTTP %d; keeping notice content", substantive_doc_url, resp_doc.status_code)
+                except Exception as exc:
+                    logger.warning("Failed fetching substantive document %s: %s; keeping notice content", substantive_doc_url, exc)
+
+        # 8. Classify document type
+        content_type = self._classify_content_type(url=canonical_url, title=title)
+
+        # 9. Compute excerpt
         excerpt = candidate.get("description") or (content[:350] + "..." if len(content) > 350 else content)
 
         raw_metadata = {
@@ -501,10 +536,14 @@ class BundeskartellamtExtractor:
             "jurisdiction": "Germany",
             "german_url": de_url,
             "de_url": de_url,
+            "discovery_url": discovery_url,
+            "announcement_url": announcement_url,
             "has_english_version": has_english_version,
             "language_selected": language_selected,
             "has_pdf": bool(pdf_url),
         }
+        if document_url:
+            raw_metadata["document_url"] = document_url
         if english_fetch_failed:
             raw_metadata["english_fetch_failed"] = True
         if en_url:
@@ -520,17 +559,56 @@ class BundeskartellamtExtractor:
             raw_metadata["pdf_attachments"] = []
 
         return RawEntryData(
-            url=de_url,
+            url=canonical_url,
             title=title,
             content=content,
             excerpt=excerpt,
             author="Bundeskartellamt",
             published_at=published_at,
-            external_id=de_url,
+            external_id=canonical_url,
             language=language_selected,
             content_type=content_type,
             raw_metadata=raw_metadata,
         )
+
+    def is_publication_notice(self, url: str, title: str) -> bool:
+        """Identify if an item is a publication notice for an underlying decision, report, or guideline."""
+        u_lower = url.lower()
+        t_lower = title.lower()
+
+        # 1. Any AktuelleMeldungen announcing a document
+        if "/aktuellemeldungen/" in u_lower:
+            if any(k in t_lower or k in u_lower for k in [
+                "fallbericht", "beschluss", "entscheidung", "merkblatt",
+                "veröffentlicht", "veroffentlicht", "aktualisiert"
+            ]):
+                return True
+
+        # 2. Specific announcement phrasing in title
+        if any(k in t_lower for k in ["fallbericht:", "beschluss veröffentlicht", "entscheidung veröffentlicht"]):
+            return True
+
+        return False
+
+    def _extract_substantive_document_url(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
+        """Extract explicit link to substantive document (SharedDocs/Entscheidung/...) from publication notice."""
+        # 1. Search in download teaser boxes first
+        for teaser in soup.find_all(class_=re.compile(r"c-teaser-download|c-teaser-newsbox", re.I)):
+            for a in teaser.find_all("a", href=True):
+                h = a["href"]
+                if "/SharedDocs/Entscheidung/" in h:
+                    parsed = urlparse(urljoin(base_url, h))
+                    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+        # 2. Search in main container
+        main = soup.find("main") or soup
+        for a in main.find_all("a", href=True):
+            h = a["href"]
+            if "/SharedDocs/Entscheidung/" in h:
+                parsed = urlparse(urljoin(base_url, h))
+                return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+        return None
 
     def _extract_english_url(self, soup: BeautifulSoup, base_url: str) -> Optional[str]:
         """Extract explicit English version link from German detail page."""

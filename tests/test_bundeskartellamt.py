@@ -565,3 +565,218 @@ def test_seed_bundeskartellamt_idempotency():
             db.execute(delete(TrackedEntity).where(TrackedEntity.display_name == "Bundeskartellamt"))
             db.commit()
             db.close()
+
+
+@pytest.mark.asyncio
+async def test_publication_notice_resolution_to_substantive_doc():
+    """Verify that a Fallbericht publication notice resolves to the substantive decision document and PDF."""
+    notice_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_10_2026_Fallbericht_Messtechnik.html"
+    substantive_doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.html"
+    pdf_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.pdf?__blob=publicationFile&v=3"
+
+    notice_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: Bußgelder wegen wettbewerbsbeschränkender Absprachen (B12-21/23)</h1>
+      <p>Das Bundeskartellamt hat am 23. Juni 2026 Bußgelder gegen drei Unternehmen verhängt.</p>
+      <div class="c-teaser-download">
+        <h3 class="c-teaser-download__headline">B12-21/23</h3>
+        <p class="c-topline"><span class="c-topline__item">Fallbericht</span></p>
+        <p class="c-teaser-download__link-wrapper">
+          <a class="c-link" href="{substantive_doc_url}?nn=55030">Mehr erfahren</a>
+        </p>
+      </div>
+    </main></body></html>"""
+
+    substantive_html = f"""<!DOCTYPE html><html><body><main>
+      <div class="c-article">
+        <h1>B12-21/23</h1>
+        <div class="c-article__intro">
+          <p>Fallbericht vom 10.09.2026: Ordnungswidrigkeitenverfahren wegen des Verdachts wettbewerbsbeschränkender Absprachen.</p>
+          <ul class="c-doc-data">
+            <li>Produktmärkte: Prüf- und Messgeräte</li>
+            <li>Entscheidungsart: Sonstiges</li>
+            <li>Entscheidungsdatum: 23.06.2026</li>
+          </ul>
+        </div>
+        <p><a class="c-link is-download-link" href="{pdf_url}">Download (PDF, 123KB)</a></p>
+      </div>
+    </main></body></html>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "Fallbericht_Messtechnik.html" in url:
+            return httpx.Response(200, text=notice_html)
+        if "B12-21-23.html" in url:
+            return httpx.Response(200, text=substantive_html)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": notice_url, "title": "Fallbericht Messtechnik", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    # Canonical / external_id must point to the official substantive document
+    assert raw.url == substantive_doc_url
+    assert raw.external_id == substantive_doc_url
+
+    # Traceability metadata
+    meta = raw.raw_metadata
+    assert meta["discovery_url"] == notice_url
+    assert meta["announcement_url"] == notice_url
+    assert meta["document_url"] == substantive_doc_url
+    assert meta["case_reference"] == "B12-21/23"
+
+    # PDF metadata preserved without downloading
+    assert meta["has_pdf"] is True
+    assert meta["pdf_url"] == pdf_url
+    assert len(meta["pdf_attachments"]) == 1
+
+    # Content contains substantive document details + notice summary
+    assert "Produktmärkte: Prüf- und Messgeräte" in raw.content
+    assert "Zusammenfassung des Bundeskartellamtes:" in raw.content
+    assert "Das Bundeskartellamt hat am 23. Juni 2026 Bußgelder" in raw.content
+
+
+@pytest.mark.asyncio
+async def test_publication_notice_fallback_on_missing_or_error_link():
+    """Verify that if substantive document link fails, notice content and URL are safely retained."""
+    notice_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_10_2026_Fallbericht_Broken.html"
+    broken_doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Broken.html"
+
+    notice_html = f"""<!DOCTYPE html><html><body><main>
+      <h1>Fallbericht: Bußgelder verhängt</h1>
+      <p>Aviso de publicación con enlace roto.</p>
+      <div class="c-teaser-download">
+        <a class="c-link" href="{broken_doc_url}">Mehr erfahren</a>
+      </div>
+    </main></body></html>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "Fallbericht_Broken.html" in url:
+            return httpx.Response(200, text=notice_html)
+        return httpx.Response(500, text="Internal Server Error")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        cand = {"url": notice_url, "title": "Fallbericht Broken", "published_at": None}
+        raw = await extractor._enrich_item(client=client, candidate=cand)
+
+    assert raw is not None
+    # Falls back safely to announcement URL
+    assert raw.url == notice_url
+    assert raw.external_id == notice_url
+    assert "document_url" not in raw.raw_metadata
+    assert "Aviso de publicación con enlace roto." in raw.content
+
+
+def test_notice_and_substantive_doc_canonical_dedup(db_session: Session):
+    """Verify that an announcement notice canonicalized to a decision document does NOT duplicate when the decision is encountered directly."""
+    source = Source(
+        id=uuid.uuid4(),
+        name=BUNDESKARTELLAMT_SOURCE_NAME,
+        url="https://www.bundeskartellamt.de/",
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        category="institutional",
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    substantive_doc_url = "https://www.bundeskartellamt.de/SharedDocs/Entscheidung/DE/Fallberichte/Kartellverbot/2026/B12-21-23.html"
+    notice_url = "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/09_10_2026_Fallbericht_Messtechnik.html"
+
+    # 1. First: Ingest the resolved announcement entry (whose canonical is substantive_doc_url)
+    entry = Entry(
+        id=uuid.uuid4(),
+        source_id=source.id,
+        title="Fallbericht: Bußgelder wegen wettbewerbsbeschränkender Absprachen (B12-21/23)",
+        url=substantive_doc_url,
+        canonical_url=substantive_doc_url,
+        published_at=datetime(2026, 9, 10, tzinfo=timezone.utc),
+        captured_at=datetime.now(timezone.utc),
+        content_type="case_report",
+        content_hash="hash_b12_21_23",
+        raw_metadata={"discovery_url": notice_url, "document_url": substantive_doc_url, "case_reference": "B12-21/23"},
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    # 2. Later: Direct encounter of substantive_doc_url (e.g. from sitemap or re-run)
+    raw_direct = RawEntryData(
+        title="B12-21/23",
+        url=substantive_doc_url,
+        external_id=substantive_doc_url,
+        raw_metadata={"case_reference": "B12-21/23"},
+    )
+    check = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
+        db=db_session,
+        source_id=source.id,
+        raw=raw_direct,
+    )
+    assert check.is_duplicate is True
+    assert check.duplicate_reason == "canonical_url"
+
+
+@pytest.mark.asyncio
+async def test_historical_discovery_sitemap_only_older_than_rss():
+    """Verify that extended lookback (180 days) discovers sitemap items older than the oldest item in RSS."""
+    rss_feed = """<?xml version="1.0" encoding="utf-8"?>
+    <rss version="2.0">
+      <channel>
+        <title>Bundeskartellamt</title>
+        <item>
+          <title>Meldung August 2026</title>
+          <link>https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_15_2026_Recent.html</link>
+          <pubDate>Sat, 15 Aug 2026 10:00:00 +0200</pubDate>
+        </item>
+        <item>
+          <title>Meldung Juli 2026</title>
+          <link>https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/07_01_2026_OldestInRSS.html</link>
+          <pubDate>Wed, 01 Jul 2026 10:00:00 +0200</pubDate>
+        </item>
+      </channel>
+    </rss>"""
+
+    sitemap_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url>
+        <loc>https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/08_15_2026_Recent.html</loc>
+        <lastmod>2026-08-15</lastmod>
+      </url>
+      <url>
+        <loc>https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/Pressemitteilungen/2026/07_01_2026_OldestInRSS.html</loc>
+        <lastmod>2026-07-01</lastmod>
+      </url>
+      <url>
+        <loc>https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/13_05_2026_Fallbericht_Strabag.html</loc>
+        <lastmod>2026-05-13</lastmod>
+      </url>
+    </urlset>"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "rssnewsfeed.xml" in url:
+            return httpx.Response(200, text=rss_feed)
+        if "Sitemap_XML.xml" in url:
+            return httpx.Response(200, text=sitemap_xml)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = BundeskartellamtExtractor()
+        ref_now = datetime(2026, 9, 11, 12, 0, tzinfo=timezone.utc)
+        candidates = await extractor.discover_candidates(
+            client=client,
+            lookback_days=180,
+            now=ref_now,
+        )
+
+    urls = [c["url"] for c in candidates]
+    # Older item from May 2026 (outside the RSS feed) must be discovered
+    assert "https://www.bundeskartellamt.de/SharedDocs/Meldung/DE/AktuelleMeldungen/2026/13_05_2026_Fallbericht_Strabag.html" in urls
+    assert len(candidates) == 3
+    # Check deduplicated and chronological sort (August > July > May)
+    assert candidates[0]["published_at"] > candidates[1]["published_at"] > candidates[2]["published_at"]
