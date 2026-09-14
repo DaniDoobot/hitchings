@@ -50,6 +50,12 @@ from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAd
 from app.providers.direct_web.models import DirectWebArticle, DiscoveredItem
 from app.providers.extractors.bundeskartellamt import BundeskartellamtExtractor
 from app.providers.extractors.cma import CMAExtractor
+from app.providers.extractors.autorite_concurrence import (
+    AutoriteConcurrenceExtractor,
+    ADLCDiscoveryMetrics,
+    ADLC_SOURCE_NAME,
+    ADLC_BASE_URL,
+)
 from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
 from app.providers.extractors.oecd_competition import (
     OECDCompetitionExtractor,
@@ -82,6 +88,7 @@ TARGET_SOURCE_NAMES = [
     OECD_SOURCE_NAME,
     BUNDESKARTELLAMT_SOURCE_NAME,
     CMA_SOURCE_NAME,
+    ADLC_SOURCE_NAME,
 ]
 
 
@@ -416,6 +423,63 @@ class ReadOnlyDeduplicationInspector:
         return ReadOnlyDeduplicationResult(is_duplicate=False)
 
     @staticmethod
+    def check_adlc_item(
+        db: Session,
+        source_id: uuid.UUID,
+        raw: RawEntryData,
+    ) -> ReadOnlyDeduplicationResult:
+        """Evaluate Autorité de la concurrence candidate against database in read-only mode."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 1. External ID check
+        if raw.external_id:
+            existing_ext = db.execute(
+                select(Entry).where(
+                    Entry.source_id == source_id,
+                    Entry.external_id == raw.external_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing_ext:
+                return ReadOnlyDeduplicationResult(
+                    is_duplicate=True,
+                    duplicate_reason="external_id",
+                    matched_entry_id=str(existing_ext.id),
+                    matched_title=existing_ext.title,
+                )
+
+        # 2. URL check
+        existing_url = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                or_(Entry.url == raw.url, Entry.canonical_url == raw.url),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_url:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="url",
+                matched_entry_id=str(existing_url.id),
+                matched_title=existing_url.title,
+            )
+
+        # 3. Content hash check
+        existing_hash = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                Entry.content_hash == c_hash,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_hash:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="content_hash",
+                matched_entry_id=str(existing_hash.id),
+                matched_title=existing_hash.title,
+            )
+
+        return ReadOnlyDeduplicationResult(is_duplicate=False)
+
+    @staticmethod
     def check_geradin_item(
         db: Session,
         source_id: uuid.UUID,
@@ -536,6 +600,7 @@ class SourcePreviewSummary(BaseModel):
     existing_pending_analysis: int = 0
     existing_failed_only: int = 0
     cma_metrics: Optional[dict[str, Any]] = None
+    adlc_metrics: Optional[dict[str, Any]] = None
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -668,6 +733,17 @@ class SourceDiscoveryPreviewService:
                     lookback_days=lookback_days,
                     async_client=async_client,
                 )
+            elif (
+                "autorite" in source.name.lower()
+                or "autorité" in source.name.lower()
+                or "adlc" in source.name.lower()
+            ):
+                summary = await self._preview_adlc_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
+                )
             else:
                 logger.warning("Unrecognized target source: %s", source.name)
                 continue
@@ -752,6 +828,8 @@ class SourceDiscoveryPreviewService:
                         continue
                     elif normalized_filter in ("cma", "competition-and-markets-authority", "cma_case") and "competition and markets authority" not in name.lower():
                         continue
+                    elif normalized_filter in ("adlc", "autorite_concurrence", "autorite", "france") and "autorit" not in name.lower():
+                        continue
 
             db_source = self.db.execute(
                 select(Source).where(Source.name == name).limit(1)
@@ -815,6 +893,26 @@ class SourceDiscoveryPreviewService:
                     "document_types": ["cma_case", "digital_markets_measure"],
                     "search_api_url": "https://www.gov.uk/api/search.json",
                     "content_api_base": "https://www.gov.uk/api/content",
+                },
+                active=True,
+            )
+        elif name == ADLC_SOURCE_NAME:
+            return Source(
+                id=uuid.uuid4(),
+                name=ADLC_SOURCE_NAME,
+                type=SourceType.INSTITUTIONAL,
+                provider="native",
+                url=ADLC_BASE_URL,
+                config={
+                    "lookback_days": 8,
+                    "freshness_warning_hours": 168,
+                    "base_url": ADLC_BASE_URL,
+                    "max_pages_per_section": 10,
+                    "sections": ["decisions", "concentrations", "avis", "communiques"],
+                    "fetch_pdf_for_complex_mergers": True,
+                    "max_pdf_bytes": 20 * 1024 * 1024,
+                    "max_pdf_pages_extract": 30,
+                    "max_pdf_chars_extract": 60000,
                 },
                 active=True,
             )
@@ -1683,6 +1781,127 @@ class SourceDiscoveryPreviewService:
             if should_close:
                 await client.aclose()
 
+    # --------------------------------------------------------------------------
+    # 6. AUTORITÉ DE LA CONCURRENCE (FRANCE) PREVIEW
+    # --------------------------------------------------------------------------
+    async def _preview_adlc_async(
+        self,
+        source: Source,
+        cutoff_date: Any,
+        lookback_days: int,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> SourcePreviewSummary:
+        """Execute real discovery and read-only preview for Autorité de la concurrence."""
+        extractor = AutoriteConcurrenceExtractor()
+        summary = SourcePreviewSummary(source_name=source.name)
+
+        client = async_client
+        should_close = False
+        if client is None:
+            headers = {"User-Agent": "HITCHINGS/0.1 (+https://github.com/hitchings; news-observatory)"}
+            client = httpx.AsyncClient(timeout=20.0, headers=headers, follow_redirects=True)
+            should_close = True
+
+        try:
+            raw_entries = await extractor.extract(client=client, source=source, lookback_days=lookback_days)
+            metrics = extractor.last_metrics
+            summary.discovered_total = metrics.acts_discovered_total + metrics.communiques_discovered
+            summary.adlc_metrics = metrics.to_dict()
+
+            for raw in raw_entries:
+                pub_dt = raw.published_at
+                if pub_dt:
+                    pub_date = pub_dt.date()
+                    if pub_date > self.current_date:
+                        summary.excluded_future += 1
+                        continue
+                    if pub_date < cutoff_date:
+                        continue
+
+                summary.inside_lookback += 1
+
+                # Deduplicate against database in read-only mode
+                dedupe = ReadOnlyDeduplicationInspector.check_adlc_item(
+                    db=self.db,
+                    source_id=source.id,
+                    raw=raw,
+                )
+                if dedupe.is_duplicate:
+                    summary.duplicates += 1
+                    continue
+
+                # Item is NEW
+                summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
+                transient_entry = Entry(
+                    id=uuid.uuid4(),
+                    source_id=source.id,
+                    source=detached_source,
+                    external_id=raw.external_id,
+                    url=raw.url,
+                    canonical_url=raw.url,
+                    title=raw.title,
+                    content=raw.content,
+                    excerpt=raw.excerpt,
+                    author=raw.author,
+                    published_at=raw.published_at,
+                    captured_at=self.now,
+                    language=raw.language or "fr",
+                    content_type=raw.content_type or "institutional_decision",
+                    raw_metadata=raw.raw_metadata or {},
+                )
+
+                suff_res = SourceSufficiencyService.assess(transient_entry)
+                suff_level = suff_res.level.value
+
+                if suff_level == SourceSufficiencyLevel.FULL.value:
+                    summary.full_count += 1
+                elif suff_level == SourceSufficiencyLevel.PARTIAL.value:
+                    summary.partial_count += 1
+                else:
+                    summary.insufficient_count += 1
+
+                planner = IncrementalAnalysisPlanner(self.db)
+                cand_eval = planner.evaluate_entry(transient_entry)
+                eligible = (cand_eval.reason == "eligible")
+                if eligible:
+                    summary.eligible_for_analysis += 1
+
+                content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
+                summary.estimated_input_chars += content_len
+
+                pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
+                meta = raw.raw_metadata or {}
+                summary.new_items.append(
+                    PreviewCandidateItem(
+                        date=pub_str,
+                        source_name=source.name,
+                        title=raw.title,
+                        url=raw.url,
+                        is_duplicate=False,
+                        sufficiency=suff_level,
+                        content_chars=content_len,
+                        eligible_for_analysis=eligible,
+                        case_type=meta.get("act_type") or "unknown",
+                        content_type=raw.content_type,
+                        event_note=meta.get("official_id"),
+                        event_nature=meta.get("decision_family") or "adlc",
+                    )
+                )
+
+            return summary
+
+        finally:
+            if should_close:
+                await client.aclose()
+
 
 # ==============================================================================
 # REPORT FORMATTING
@@ -1742,6 +1961,24 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  events_with_strong_att : {cm.get('events_with_strong_attachment')}")
             print(f"  events_ambiguous_att   : {cm.get('events_ambiguous_attachment')}")
             print(f"  events_without_att     : {cm.get('events_without_attachment')}")
+        if summary.adlc_metrics:
+            am = summary.adlc_metrics
+            print("  --- ADLC SPECIFIC METRICS ---")
+            print(f"  acts_discovered_total  : {am.get('acts_discovered_total')}")
+            acts_by_type = am.get('acts_by_type', {})
+            print(f"    decisions (D)        : {acts_by_type.get('decision', 0)}")
+            print(f"    interim_measures (MC): {acts_by_type.get('interim_measure', 0)}")
+            print(f"    mergers (DCC)        : {acts_by_type.get('merger_decision', 0)}")
+            print(f"    opinions (A)         : {acts_by_type.get('opinion', 0)}")
+            print(f"  communiques_discovered : {am.get('communiques_discovered')}")
+            print(f"  derivative_comm_skipped: {am.get('derivative_communiques_skipped')}")
+            print(f"  autonomous_comm_inc    : {am.get('autonomous_communiques_included')}")
+            print(f"  institution_comm_excl  : {am.get('institutional_communiques_excluded')}")
+            print(f"  unsupported_act_skipped: {am.get('unsupported_act_type_skipped')}")
+            print(f"  pdfs_downloaded        : {am.get('pdfs_downloaded_and_extracted')}")
+            print(f"  pdfs_skipped_mergers   : {am.get('pdfs_skipped_simplified_mergers')}")
+            print(f"  delayed_pdfs_skipped   : {am.get('delayed_pdfs_skipped_existing_entries')}")
+            print(f"  pages_crawled          : {am.get('pages_crawled')}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -1784,6 +2021,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
                 source_abbrev = "OECD"
             elif "competition and markets authority" in item.source_name.lower() or "cma" in item.source_name.lower():
                 source_abbrev = "CMA (UK)"
+            elif "autorite" in item.source_name.lower() or "autorité" in item.source_name.lower() or "adlc" in item.source_name.lower():
+                source_abbrev = "ADLC (France)"
             else:
                 source_abbrev = item.source_name[:22]
             elig_str = "SÍ" if item.eligible_for_analysis else "NO"
@@ -1811,7 +2050,7 @@ def main() -> int:
         "--source",
         type=str,
         default=None,
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma"],
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc", "autorite_concurrence"],
         help="Limit preview to a specific source (default: all target sources)",
     )
 

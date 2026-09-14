@@ -57,6 +57,7 @@ from app.services.source_sufficiency_service import (
 from scripts.preview_source_discovery import (
     BUNDESKARTELLAMT_SOURCE_NAME,
     CMA_SOURCE_NAME,
+    ADLC_SOURCE_NAME,
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
@@ -236,6 +237,12 @@ class NewSourcesBackfillService:
                             )
                         elif "competition and markets authority" in source.name.lower() or "cma" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_cma_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
+                        elif "autorite" in source.name.lower() or "adlc" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_adlc_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
@@ -810,6 +817,7 @@ class NewSourcesBackfillService:
             OECD_SOURCE_NAME,
             BUNDESKARTELLAMT_SOURCE_NAME,
             CMA_SOURCE_NAME,
+            ADLC_SOURCE_NAME,
         ]
         resolved: list[Source] = []
 
@@ -830,6 +838,9 @@ class NewSourcesBackfillService:
                         continue
                 elif norm_filter in {"cma", "competition and markets authority"}:
                     if name != CMA_SOURCE_NAME:
+                        continue
+                elif norm_filter in {"adlc", "autorite_concurrence", "autorite", "france"}:
+                    if name != ADLC_SOURCE_NAME:
                         continue
                 else:
                     if norm_filter not in name.lower():

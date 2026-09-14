@@ -105,6 +105,17 @@ class NativeProvider(BaseSourceProvider):
             from app.providers.extractors.cma import CMAExtractor
             return await _run_with_extractor(CMAExtractor())
 
+        # 7. Autorité de la concurrence (France) adapter
+        s_name = (source.name or "").strip().lower()
+        if (
+            "autoritedelaconcurrence.fr" in url_lower
+            or "autorite de la concurrence" in s_name
+            or "autorité de la concurrence" in s_name
+            or s_name in ("adlc", "autorite_concurrence", "autorite-concurrence")
+        ):
+            from app.providers.extractors.autorite_concurrence import AutoriteConcurrenceExtractor
+            return await _run_with_extractor(AutoriteConcurrenceExtractor())
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:

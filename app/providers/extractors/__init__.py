@@ -5,6 +5,13 @@ from app.providers.extractors.competition_appeal_tribunal import CompetitionAppe
 from app.providers.extractors.curia import CuriaCaseLawExtractor
 
 from app.providers.extractors.cma import CMAExtractor
+from app.providers.extractors.autorite_concurrence import (
+    AutoriteConcurrenceExtractor,
+    ADLCDiscoveryMetrics,
+    ADLC_SOURCE_NAME,
+    ADLC_BASE_URL,
+    classify_official_act_id,
+)
 
 __all__ = [
     "CNMCNewsExtractor",
@@ -12,5 +19,10 @@ __all__ = [
     "CompetitionAppealTribunalExtractor",
     "CuriaCaseLawExtractor",
     "CMAExtractor",
+    "AutoriteConcurrenceExtractor",
+    "ADLCDiscoveryMetrics",
+    "ADLC_SOURCE_NAME",
+    "ADLC_BASE_URL",
+    "classify_official_act_id",
 ]
 
