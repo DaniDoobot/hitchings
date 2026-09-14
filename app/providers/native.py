@@ -131,6 +131,17 @@ class NativeProvider(BaseSourceProvider):
             from app.providers.extractors.autorite_concurrence import AutoriteConcurrenceExtractor
             return await _run_with_extractor(AutoriteConcurrenceExtractor())
 
+        # 8. Federal Trade Commission (FTC Bureau of Competition) adapter
+        if (
+            "ftc.gov" in url_lower
+            or "federal trade commission" in s_name
+            or "bureau of competition" in s_name
+            or s_name in ("ftc", "ftc competition", "ftc_competition")
+        ):
+            from app.providers.extractors.ftc import FTCCompetitionExtractor
+            return await _run_with_extractor(FTCCompetitionExtractor())
+
+
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
         elif source.type == SourceType.WEBSITE:
@@ -204,7 +215,16 @@ class NativeProvider(BaseSourceProvider):
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)
 
+        # Specific website adapter dispatch: FTC
+        if "ftc.gov" in source.url.lower() or "federal trade commission" in (source.name or "").lower() or (source.name or "").strip().lower() == "ftc":
+            from app.providers.extractors.ftc import FTCCompetitionExtractor
+            extractor = FTCCompetitionExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
         raise ProviderError(f"No website extractor implemented yet for URL: {source.url}")
+
 
     async def _fetch_rss(self, source: Source) -> list[RawEntryData]:
         """Asynchronously fetch and parse an RSS feed."""

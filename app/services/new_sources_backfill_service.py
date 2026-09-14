@@ -58,12 +58,14 @@ from scripts.preview_source_discovery import (
     BUNDESKARTELLAMT_SOURCE_NAME,
     CMA_SOURCE_NAME,
     ADLC_SOURCE_NAME,
+    FTC_SOURCE_NAME,
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
     ReadOnlyDeduplicationInspector,
     SourceDiscoveryPreviewService,
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +253,14 @@ class NewSourcesBackfillService:
                                 source_id=source.id,
                                 raw=raw,
                             )
+                        elif source.name == FTC_SOURCE_NAME or "ftc" in source.name.lower() or "federal trade commission" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_ftc_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
                         else:
+
                             from app.services.ingestion_service import compute_ingestion_dedupe_hash
                             c_hash = compute_ingestion_dedupe_hash(raw.title, raw.url, raw.excerpt)
                             existing = db.execute(
@@ -822,6 +831,7 @@ class NewSourcesBackfillService:
             BUNDESKARTELLAMT_SOURCE_NAME,
             CMA_SOURCE_NAME,
             ADLC_SOURCE_NAME,
+            FTC_SOURCE_NAME,
         ]
         resolved: list[Source] = []
 
@@ -846,9 +856,13 @@ class NewSourcesBackfillService:
                 elif norm_filter in {"adlc", "autorite_concurrence", "autorite", "france"}:
                     if name != ADLC_SOURCE_NAME:
                         continue
+                elif norm_filter in {"ftc", "federal trade commission", "ftc competition", "bureau of competition"}:
+                    if name != FTC_SOURCE_NAME:
+                        continue
                 else:
                     if norm_filter not in name.lower():
                         continue
+
 
             source = (
                 db.execute(select(Source).where(Source.name == name).limit(1))

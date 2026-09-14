@@ -56,6 +56,12 @@ from app.providers.extractors.autorite_concurrence import (
     ADLC_SOURCE_NAME,
     ADLC_BASE_URL,
 )
+from app.providers.extractors.ftc import (
+    FTCCompetitionExtractor,
+    FTCDiscoveryMetrics,
+    FTC_SOURCE_NAME,
+    FTC_BASE_URL,
+)
 from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
 from app.providers.extractors.oecd_competition import (
     OECDCompetitionExtractor,
@@ -89,7 +95,9 @@ TARGET_SOURCE_NAMES = [
     BUNDESKARTELLAMT_SOURCE_NAME,
     CMA_SOURCE_NAME,
     ADLC_SOURCE_NAME,
+    FTC_SOURCE_NAME,
 ]
+
 
 
 # ==============================================================================
@@ -480,7 +488,65 @@ class ReadOnlyDeduplicationInspector:
         return ReadOnlyDeduplicationResult(is_duplicate=False)
 
     @staticmethod
+    def check_ftc_item(
+        db: Session,
+        source_id: uuid.UUID,
+        raw: RawEntryData,
+    ) -> ReadOnlyDeduplicationResult:
+        """Evaluate FTC competition candidate against database in read-only mode."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 1. External ID check
+        if raw.external_id:
+            existing_ext = db.execute(
+                select(Entry).where(
+                    Entry.source_id == source_id,
+                    Entry.external_id == raw.external_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing_ext:
+                return ReadOnlyDeduplicationResult(
+                    is_duplicate=True,
+                    duplicate_reason="external_id",
+                    matched_entry_id=str(existing_ext.id),
+                    matched_title=existing_ext.title,
+                )
+
+        # 2. URL check
+        existing_url = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                or_(Entry.url == raw.url, Entry.canonical_url == raw.url),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_url:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="url",
+                matched_entry_id=str(existing_url.id),
+                matched_title=existing_url.title,
+            )
+
+        # 3. Content hash check
+        existing_hash = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                Entry.content_hash == c_hash,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_hash:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="content_hash",
+                matched_entry_id=str(existing_hash.id),
+                matched_title=existing_hash.title,
+            )
+
+        return ReadOnlyDeduplicationResult(is_duplicate=False)
+
+    @staticmethod
     def check_geradin_item(
+
         db: Session,
         source_id: uuid.UUID,
         url: str,
@@ -601,7 +667,9 @@ class SourcePreviewSummary(BaseModel):
     existing_failed_only: int = 0
     cma_metrics: Optional[dict[str, Any]] = None
     adlc_metrics: Optional[dict[str, Any]] = None
+    ftc_metrics: Optional[dict[str, Any]] = None
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
+
 
 
 class GlobalPreviewReport(BaseModel):
@@ -744,9 +812,21 @@ class SourceDiscoveryPreviewService:
                     lookback_days=lookback_days,
                     async_client=async_client,
                 )
+            elif (
+                source.name == FTC_SOURCE_NAME
+                or "ftc" in source.name.lower()
+                or "federal trade commission" in source.name.lower()
+            ):
+                summary = await self._preview_ftc_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
+                )
             else:
                 logger.warning("Unrecognized target source: %s", source.name)
                 continue
+
 
             ext_tot, ext_comp, ext_pend, ext_failed = self._compute_existing_metrics(source)
             summary.existing_entries = ext_tot
@@ -830,6 +910,8 @@ class SourceDiscoveryPreviewService:
                         continue
                     elif normalized_filter in ("adlc", "autorite_concurrence", "autorite", "france") and "autorit" not in name.lower():
                         continue
+                    elif normalized_filter in ("ftc", "federal_trade_commission", "federal trade commission", "ftc_competition", "bureau_of_competition") and "ftc" not in name.lower() and "federal trade commission" not in name.lower():
+                        continue
 
             db_source = self.db.execute(
                 select(Source).where(Source.name == name).limit(1)
@@ -859,10 +941,10 @@ class SourceDiscoveryPreviewService:
             return Source(
                 id=uuid.uuid4(),
                 name=DMA_SOURCE_NAME,
-                type=SourceType.WEBSITE,
+                type=SourceType.INSTITUTIONAL,
                 provider="native",
-                url="https://digital-markets-act.ec.europa.eu/news_en",
-                config={"initial_fetch_limit": 50, "portal_url": "https://digital-markets-act.ec.europa.eu/"},
+                url="https://digital-markets-act.ec.europa.eu/cases_en",
+                config={"adapter": "european_commission_dma", "feed_url": "https://digital-markets-act.ec.europa.eu/cases_en"},
                 active=True,
             )
         elif name == BUNDESKARTELLAMT_SOURCE_NAME:
@@ -871,11 +953,14 @@ class SourceDiscoveryPreviewService:
                 name=BUNDESKARTELLAMT_SOURCE_NAME,
                 type=SourceType.INSTITUTIONAL,
                 provider="native",
-                url="https://www.bundeskartellamt.de/",
+                url="https://www.bundeskartellamt.de/EN/Home/home_node.html",
                 config={
-                    "initial_fetch_limit": 30,
-                    "rss_url": "https://www.bundeskartellamt.de/DE/Service/RSS/_documents/rssnewsfeed.xml",
-                    "sitemap_url": "https://www.bundeskartellamt.de/Sitemap_XML.xml",
+                    "lookback_days": 8,
+                    "freshness_warning_hours": 168,
+                    "fetch_limit": 50,
+                    "enrich_press_releases": True,
+                    "pdf_max_bytes": 10 * 1024 * 1024,
+                    "pdf_page_limit": 10,
                 },
                 active=True,
             )
@@ -914,6 +999,17 @@ class SourceDiscoveryPreviewService:
                     "max_pdf_pages_extract": 30,
                     "max_pdf_chars_extract": 60000,
                 },
+                active=True,
+            )
+        elif name == FTC_SOURCE_NAME:
+            from app.providers.extractors.ftc import DEFAULT_FTC_CONFIG
+            return Source(
+                id=uuid.uuid4(),
+                name=FTC_SOURCE_NAME,
+                type=SourceType.INSTITUTIONAL,
+                provider="native",
+                url=FTC_BASE_URL,
+                config=dict(DEFAULT_FTC_CONFIG),
                 active=True,
             )
         else:
@@ -1903,6 +1999,129 @@ class SourceDiscoveryPreviewService:
             if should_close:
                 await client.aclose()
 
+    # --------------------------------------------------------------------------
+    # 7. FEDERAL TRADE COMMISSION (FTC) PREVIEW
+    # --------------------------------------------------------------------------
+    async def _preview_ftc_async(
+        self,
+        source: Source,
+        cutoff_date: Any,
+        lookback_days: int,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> SourcePreviewSummary:
+        """Execute real discovery and read-only preview for Federal Trade Commission."""
+        extractor = FTCCompetitionExtractor()
+        summary = SourcePreviewSummary(source_name=source.name)
+
+        client = async_client
+        should_close = False
+        if client is None:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; HITCHINGS/0.1; +https://github.com/hitchings)"}
+            client = httpx.AsyncClient(timeout=25.0, headers=headers, follow_redirects=True)
+            should_close = True
+
+        try:
+            raw_entries = await extractor.extract(client=client, source=source, lookback_days=lookback_days)
+            metrics = extractor.last_metrics
+            summary.discovered_total = metrics.ftc_feed_items_total + metrics.ftc_legal_library_items
+            summary.ftc_metrics = metrics.to_dict()
+
+            for raw in raw_entries:
+                pub_dt = raw.published_at
+                if not pub_dt:
+                    continue
+                pub_date = pub_dt.date()
+                if pub_date > self.current_date:
+                    summary.excluded_future += 1
+                    continue
+                if pub_date < cutoff_date:
+                    continue
+
+                summary.inside_lookback += 1
+
+                # Deduplicate against database in read-only mode
+                dedupe = ReadOnlyDeduplicationInspector.check_ftc_item(
+                    db=self.db,
+                    source_id=source.id,
+                    raw=raw,
+                )
+                if dedupe.is_duplicate:
+                    summary.duplicates += 1
+                    continue
+
+                # Item is NEW
+                summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
+                transient_entry = Entry(
+                    id=uuid.uuid4(),
+                    source_id=source.id,
+                    source=detached_source,
+                    external_id=raw.external_id,
+                    url=raw.url,
+                    canonical_url=raw.url,
+                    title=raw.title,
+                    content=raw.content,
+                    excerpt=raw.excerpt,
+                    author=raw.author,
+                    published_at=raw.published_at,
+                    captured_at=self.now,
+                    language=raw.language or "en",
+                    content_type=raw.content_type or "antitrust_enforcement",
+                    raw_metadata=raw.raw_metadata or {},
+                )
+
+                suff_res = SourceSufficiencyService.assess(transient_entry)
+                suff_level = suff_res.level.value
+
+                if suff_level == SourceSufficiencyLevel.FULL.value:
+                    summary.full_count += 1
+                elif suff_level == SourceSufficiencyLevel.PARTIAL.value:
+                    summary.partial_count += 1
+                else:
+                    summary.insufficient_count += 1
+
+                planner = IncrementalAnalysisPlanner(self.db)
+                cand_eval = planner.evaluate_entry(transient_entry)
+                eligible = (cand_eval.reason == "eligible")
+                if eligible:
+                    summary.eligible_for_analysis += 1
+
+                content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
+                summary.estimated_input_chars += content_len
+
+                pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
+                meta = raw.raw_metadata or {}
+                summary.new_items.append(
+                    PreviewCandidateItem(
+                        date=pub_str,
+                        source_name=source.name,
+                        title=raw.title,
+                        url=raw.url,
+                        is_duplicate=False,
+                        sufficiency=suff_level,
+                        content_chars=content_len,
+                        eligible_for_analysis=eligible,
+                        case_type=meta.get("action_type") or "unknown",
+                        content_type=raw.content_type,
+                        event_note=meta.get("node_id") or meta.get("guid"),
+                        event_nature="ftc_competition",
+                    )
+                )
+
+            return summary
+
+        finally:
+            if should_close:
+                await client.aclose()
+
+
 
 # ==============================================================================
 # REPORT FORMATTING
@@ -1981,6 +2200,20 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  pdfs_skipped_mergers   : {am.get('pdfs_skipped_simplified_mergers')}")
             print(f"  delayed_pdfs_skipped   : {am.get('delayed_pdfs_skipped_existing_entries')}")
             print(f"  pages_crawled          : {am.get('pages_crawled')}")
+        if summary.ftc_metrics:
+            fm = summary.ftc_metrics
+            print("  --- FTC SPECIFIC METRICS ---")
+            print(f"  ftc_feed_items_total        : {fm.get('ftc_feed_items_total', 0)}")
+            print(f"  ftc_inside_lookback         : {fm.get('ftc_inside_lookback', 0)}")
+            print(f"  ftc_competition_items       : {fm.get('ftc_competition_items', 0)}")
+            print(f"  ftc_consumer_items_skipped  : {fm.get('ftc_consumer_items_skipped', 0)}")
+            print(f"  ftc_detail_pages_fetched    : {fm.get('ftc_detail_pages_fetched', 0)}")
+            print(f"  ftc_pdf_links_found         : {fm.get('ftc_pdf_links_found', 0)}")
+            print(f"  ftc_pdfs_downloaded         : {fm.get('ftc_pdfs_downloaded', 0)}")
+            print(f"  ftc_pdfs_skipped            : {fm.get('ftc_pdfs_skipped', 0)}")
+            print(f"  ftc_legal_library_items     : {fm.get('ftc_legal_library_items', 0)}")
+            print(f"  ftc_duplicate_channels      : {fm.get('ftc_duplicate_channels', 0)}")
+            print(f"  ftc_undated_skipped         : {fm.get('ftc_undated_skipped', 0)}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -2025,6 +2258,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
                 source_abbrev = "CMA (UK)"
             elif "autorite" in item.source_name.lower() or "autorité" in item.source_name.lower() or "adlc" in item.source_name.lower():
                 source_abbrev = "ADLC (France)"
+            elif "ftc" in item.source_name.lower() or "federal trade commission" in item.source_name.lower():
+                source_abbrev = "FTC (US)"
             else:
                 source_abbrev = item.source_name[:22]
             elig_str = "SÍ" if item.eligible_for_analysis else "NO"
@@ -2052,13 +2287,30 @@ def main() -> int:
         "--source",
         type=str,
         default=None,
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc", "autorite_concurrence"],
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc", "autorite_concurrence", "ftc", "federal_trade_commission"],
         help="Limit preview to a specific source (default: all target sources)",
     )
 
     args = parser.parse_args()
 
-    db = SessionLocal()
+
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.info(
+            "Primary database connection unavailable (%s). "
+            "Falling back to isolated in-memory database for discovery preview.",
+            exc,
+        )
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from app.db.base import Base
+        mem_engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(mem_engine)
+        IsolatedSession = sessionmaker(bind=mem_engine)
+        db = IsolatedSession()
+
     try:
         with read_only_session_scope(db) as ro_db:
             # Pre-execution DB counts baseline (inside REPEATABLE READ snapshot)

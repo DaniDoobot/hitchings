@@ -296,8 +296,48 @@ class SourceSufficiencyService:
                     ),
                 )
 
+        # 7. FTC (Federal Trade Commission - Bureau of Competition)
+        if "federal trade commission" in source_name or "ftc" in source_name:
+            if content_chars >= 1500:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.FULL,
+                    reason="Comunicado oficial o resolución íntegra del Bureau of Competition de la FTC.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "ftc_press_release_html",
+                        full_text_available=True,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            elif content_chars >= 300:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.PARTIAL,
+                    reason="Sumario o extracto oficial parcial de actuación de la FTC.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "ftc_press_release_html",
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            else:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.INSUFFICIENT,
+                    reason="Contenido de la FTC insuficiente para análisis (< 300 caracteres).",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source,
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=False,
+                    ),
+                )
+
         # Fallback for generic sources
         if content_chars >= 1500:
+
             return SourceSufficiencyResult(
                 level=SourceSufficiencyLevel.FULL,
                 reason="Contenido textual suficiente.",

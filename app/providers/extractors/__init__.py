@@ -12,6 +12,12 @@ from app.providers.extractors.autorite_concurrence import (
     ADLC_BASE_URL,
     classify_official_act_id,
 )
+from app.providers.extractors.ftc import (
+    FTCCompetitionExtractor,
+    FTCDiscoveryMetrics,
+    FTC_SOURCE_NAME,
+    FTC_BASE_URL,
+)
 
 __all__ = [
     "CNMCNewsExtractor",
@@ -24,5 +30,10 @@ __all__ = [
     "ADLC_SOURCE_NAME",
     "ADLC_BASE_URL",
     "classify_official_act_id",
+    "FTCCompetitionExtractor",
+    "FTCDiscoveryMetrics",
+    "FTC_SOURCE_NAME",
+    "FTC_BASE_URL",
 ]
+
 
