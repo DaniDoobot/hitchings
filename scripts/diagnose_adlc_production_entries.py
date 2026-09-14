@@ -79,7 +79,8 @@ def inspect():
             # Sufficiency — computed from entry content (no DB write)
             try:
                 suff = SourceSufficiencyService.assess(e)
-                print(f"Sufficiency:  {suff.level.value} (chars={suff.char_count})")
+                print(f"Sufficiency:  {suff.level.value} (chars={suff.signals.content_chars}, full_text={suff.signals.full_text_available})")
+                print(f"Suff Reason:  {suff.reason}")
             except Exception as exc:
                 print(f"Sufficiency:  ERROR: {exc}")
 
@@ -138,11 +139,13 @@ def inspect():
                             f"{prompt.code} v{prompt.version} "
                             f"(stage={prompt.stage}, schema={prompt.response_schema_version})"
                         )
+                        p_cfg = prompt.config or {}
                     else:
                         p_info = "Unknown"
+                        p_cfg = {}
 
                     call_meta = c.call_metadata or {}
-                    grounding_mode = call_meta.get("grounding_mode", "n/a")
+                    grounding_mode = p_cfg.get("grounding_mode") or call_meta.get("grounding_mode", "n/a")
                     input_tokens = call_meta.get("input_tokens", call_meta.get("prompt_tokens", "n/a"))
                     output_tokens = call_meta.get("output_tokens", call_meta.get("completion_tokens", "n/a"))
 

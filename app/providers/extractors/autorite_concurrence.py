@@ -897,7 +897,20 @@ class AutoriteConcurrenceExtractor:
         phase = None
         phase_el = soup.select_one(".field--name-field-phase-decision")
         if phase_el:
-            phase = phase_el.get_text(strip=True)
+            item_el = phase_el.select_one(".field__item, .field-item")
+            raw_phase = item_el.get_text(strip=True) if item_el else None
+            if not raw_phase:
+                lbl = phase_el.select_one(".field__label")
+                if lbl:
+                    lbl.decompose()
+                raw_phase = phase_el.get_text(strip=True)
+            clean_phase = re.sub(r"^d[eé]cision\s+de\s+phase\s*:?\s*", "", raw_phase, flags=re.IGNORECASE).strip()
+            if "phase 2" in clean_phase.lower():
+                phase = "Phase 2"
+            elif "phase 1" in clean_phase.lower():
+                phase = "Phase 1"
+            else:
+                phase = clean_phase or None
         elif "phase 2" in html.lower():
             phase = "Phase 2"
         elif "phase 1" in html.lower():
@@ -908,12 +921,26 @@ class AutoriteConcurrenceExtractor:
         outcome = None
         disp_el = soup.select_one(".field--name-field-provisions")
         if disp_el:
-            outcome = disp_el.get_text(strip=True)
+            item_el = disp_el.select_one(".field__item, .field-item")
+            if item_el:
+                outcome = item_el.get_text(strip=True)
+            else:
+                lbl = disp_el.select_one(".field__label")
+                if lbl:
+                    lbl.decompose()
+                outcome = disp_el.get_text(strip=True)
 
         parties = None
         parties_el = soup.select_one(".field--name-field-parties")
         if parties_el:
-            parties = parties_el.get_text(strip=True)
+            item_el = parties_el.select_one(".field__item, .field-item")
+            if item_el:
+                parties = item_el.get_text(strip=True)
+            else:
+                lbl = parties_el.select_one(".field__label")
+                if lbl:
+                    lbl.decompose()
+                parties = parties_el.get_text(strip=True)
 
         # 8. Extract HTML Body Content
         body_el = soup.select_one(".field--name-field-body, .node__content, .content, .field--name-body")
