@@ -553,7 +553,7 @@ class AutoriteConcurrenceExtractor:
         self,
         client: httpx.AsyncClient,
         source: Source,
-        lookback_days: int = 8,
+        lookback_days: Optional[int] = None,
         enrich_pdf: Optional[bool] = None,
         max_pages_per_listing: int = 15,
     ) -> list[RawEntryData]:
@@ -562,10 +562,15 @@ class AutoriteConcurrenceExtractor:
         Zero database writes. Returns list of normalized RawEntryData.
         """
         do_enrich = self.enrich_pdf if enrich_pdf is None else enrich_pdf
-        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        effective_lookback = lookback_days
+        if effective_lookback is None and source.config and isinstance(source.config, dict):
+            effective_lookback = source.config.get("lookback_days")
+        if effective_lookback is None:
+            effective_lookback = 8
+        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_lookback)
         logger.info(
             "Starting Autorité de la concurrence extraction (lookback_days=%d, cutoff=%s, enrich_pdf=%s)",
-            lookback_days,
+            effective_lookback,
             cutoff.isoformat(),
             do_enrich,
         )

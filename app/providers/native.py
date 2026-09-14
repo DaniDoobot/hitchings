@@ -59,21 +59,36 @@ class NativeProvider(BaseSourceProvider):
         self._client = client
 
     async def fetch_entries(
-        self, source: Source, client: Optional[httpx.AsyncClient] = None
+        self,
+        source: Source,
+        client: Optional[httpx.AsyncClient] = None,
+        lookback_days: Optional[int] = None,
     ) -> list[RawEntryData]:
         """Fetch raw entries from the given source."""
         if not self.can_handle(source):
             raise ValueError(f"NativeProvider cannot handle source {source.name} (type={source.type})")
 
+        import inspect
         active_client = client or self._client
         url_lower = (source.url or "").lower()
 
+        effective_lookback = lookback_days
+        if effective_lookback is None and source.config and isinstance(source.config, dict):
+            effective_lookback = source.config.get("lookback_days")
+
         async def _run_with_extractor(extractor_instance):
+            sig = inspect.signature(extractor_instance.extract)
+            ext_kwargs = {}
+            has_lookback = "lookback_days" in sig.parameters
+            has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if (has_lookback or has_varkw) and effective_lookback is not None:
+                ext_kwargs["lookback_days"] = effective_lookback
+
             if active_client is not None:
-                return await extractor_instance.extract(active_client, source)
+                return await extractor_instance.extract(active_client, source, **ext_kwargs)
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as new_cli:
-                return await extractor_instance.extract(new_cli, source)
+                return await extractor_instance.extract(new_cli, source, **ext_kwargs)
 
         # 1. European Commission / Digital Markets Act (DMA) adapter
         if "digital-markets-act.ec.europa.eu" in url_lower:

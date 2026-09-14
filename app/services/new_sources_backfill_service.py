@@ -184,6 +184,9 @@ class NewSourcesBackfillService:
 
         for source in target_sources:
             new_for_source = 0
+            # Ensure source.config has lookback_days for this prospective run
+            source.config = {**(source.config or {}), "lookback_days": lookback_days}
+
             if DirectWebAdapterRegistry.has_adapter_for_source(source):
                 adapter = DirectWebAdapterRegistry.get_adapter_for_source(source)
                 try:
@@ -209,10 +212,13 @@ class NewSourcesBackfillService:
                 try:
                     import inspect
                     sig = inspect.signature(provider.fetch_entries)
+                    fetch_kwargs = {}
                     if "client" in sig.parameters:
-                        raw_entries = await provider.fetch_entries(source, client=async_client)
-                    else:
-                        raw_entries = await provider.fetch_entries(source)
+                        fetch_kwargs["client"] = async_client
+                    has_lb = "lookback_days" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+                    if has_lb and lookback_days is not None:
+                        fetch_kwargs["lookback_days"] = lookback_days
+                    raw_entries = await provider.fetch_entries(source, **fetch_kwargs)
 
                     for raw in raw_entries:
                         if raw.published_at and raw.published_at < cutoff_dt:
@@ -506,6 +512,7 @@ class NewSourcesBackfillService:
                         confirm_real_calls=True,
                         client=sync_client,
                         max_new_entries=remaining_new_budget,
+                        lookback_days=lookback_days,
                     )
                     source_res.discovered = dw_report.total_discovered
                     source_res.duplicates = dw_report.total_duplicates
@@ -515,13 +522,14 @@ class NewSourcesBackfillService:
                         for r in dw_report.results_by_source:
                             source_res.errors.extend(r.errors)
 
-                # 6.2 Process native extractors (DMA and OECD) via IngestionService
+                # 6.2 Process native extractors (DMA, OECD, ADLC, etc.) via IngestionService
                 elif source.provider == "native":
                     ingest_res = await self.ingestion_service.ingest_source(
                         source_id=source.id,
                         db=db,
                         client=async_client,
                         max_new_entries=remaining_new_budget,
+                        lookback_days=lookback_days,
                     )
                     source_res.discovered = getattr(
                         ingest_res, "fetched", getattr(ingest_res, "items_extracted", 0)
@@ -564,11 +572,12 @@ class NewSourcesBackfillService:
                         else:
                             source_res.insufficient_count += 1
                 else:
-                    # If 0 created (e.g. second idempotent run), copy discovery breakdown from preview
+                    # If 0 created (e.g. second idempotent run), copy discovery breakdown from preview if not populated
                     p_summary = preview_summaries_by_name.get(source.name)
                     if p_summary:
-                        source_res.discovered = p_summary.discovered_total
-                        source_res.duplicates = p_summary.duplicates
+                        if source_res.discovered == 0 and p_summary.discovered_total > 0:
+                            source_res.discovered = p_summary.discovered_total
+                            source_res.duplicates = p_summary.duplicates
                         source_res.full_count = p_summary.full_count
                         source_res.partial_count = p_summary.partial_count
                         source_res.insufficient_count = p_summary.insufficient_count

@@ -125,6 +125,7 @@ class IngestionService:
         db: Session,
         client: Optional[httpx.AsyncClient] = None,
         max_new_entries: Optional[int] = None,
+        lookback_days: Optional[int] = None,
     ) -> IngestionResult:
         """Execute ingestion for a single source, deduplicating and persisting entries."""
         source = db.get(Source, source_id)
@@ -158,12 +159,24 @@ class IngestionService:
 
         # 2. Execute provider extraction with failure capture
         try:
+            effective_lookback = lookback_days
+            if effective_lookback is None and source.config and isinstance(source.config, dict):
+                effective_lookback = source.config.get("lookback_days")
+
+            if effective_lookback is not None:
+                source.config = {**(source.config or {}), "lookback_days": effective_lookback}
+
             import inspect
             sig = inspect.signature(provider.fetch_entries)
-            if "client" in sig.parameters:
-                raw_entries: list[RawEntryData] = await provider.fetch_entries(source, client=client)
-            else:
-                raw_entries = await provider.fetch_entries(source)
+            fetch_kwargs = {}
+            if "client" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                fetch_kwargs["client"] = client
+            has_lookback = "lookback_days" in sig.parameters
+            has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if (has_lookback or has_varkw) and effective_lookback is not None:
+                fetch_kwargs["lookback_days"] = effective_lookback
+
+            raw_entries = await provider.fetch_entries(source, **fetch_kwargs)
 
             # Circuit-breaker: Fail-closed if prospective new entries exceed max_new_entries
             if max_new_entries is not None:

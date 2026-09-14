@@ -98,6 +98,7 @@ class DirectWebIngestionService:
         confirm_real_calls: bool = False,
         client: Optional[httpx.Client] = None,
         max_new_entries: Optional[int] = None,
+        lookback_days: Optional[int] = None,
     ) -> DirectWebIngestionReport:
         """Execute ingestion for direct web sources with fail-closed safety and failure isolation."""
         settings = self.settings
@@ -157,6 +158,7 @@ class DirectWebIngestionService:
                 existing_gn_entries=existing_gn_entries,
                 client=client,
                 max_new_entries=remaining_budget,
+                lookback_days=lookback_days,
             )
             report.results_by_source.append(source_result)
             report.sources_processed += 1
@@ -181,8 +183,15 @@ class DirectWebIngestionService:
         existing_gn_entries: list[Entry],
         client: Optional[httpx.Client] = None,
         max_new_entries: Optional[int] = None,
+        lookback_days: Optional[int] = None,
     ) -> DirectSourceRunResult:
         """Process a single direct source with complete failure isolation and IngestionRun tracking."""
+        effective_lookback = lookback_days
+        if effective_lookback is None and source.config and isinstance(source.config, dict):
+            effective_lookback = source.config.get("lookback_days")
+        if effective_lookback is not None:
+            source.config = {**(source.config or {}), "lookback_days": effective_lookback}
+
         source_id = source.id
         source_name = source.name
 

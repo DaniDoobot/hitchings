@@ -42,21 +42,26 @@ class EuropeanCommissionDMAExtractor:
     def __init__(self, concurrency: int = DEFAULT_CONCURRENCY) -> None:
         self.concurrency = concurrency
 
-    async def extract(self, client: httpx.AsyncClient, source: Source) -> list[RawEntryData]:
+    async def extract(
+        self,
+        client: httpx.AsyncClient,
+        source: Source,
+        lookback_days: Optional[int] = None,
+    ) -> list[RawEntryData]:
         """Fetch listing pages from DMA portal and enrich with detail page contents."""
         base_url = source.url or DMA_NEWS_DEFAULT_URL
         config = source.config or {}
         limit = config.get("initial_fetch_limit", 20)
-        lookback_days = config.get("lookback_days")
+        effective_lookback = lookback_days if lookback_days is not None else config.get("lookback_days")
 
-        logger.info("Extracting European Commission DMA news from '%s' (limit=%d)...", base_url, limit)
+        logger.info("Extracting European Commission DMA news from '%s' (limit=%d, lookback=%s)...", base_url, limit, effective_lookback)
 
         # 1. Fetch listing cards across pages until limit is satisfied
         discovered_cards = await self._fetch_listing_cards(
             client=client,
             base_url=base_url,
             limit=limit,
-            lookback_days=lookback_days,
+            lookback_days=effective_lookback,
         )
         logger.info("Discovered %d candidate DMA items from listing", len(discovered_cards))
 
