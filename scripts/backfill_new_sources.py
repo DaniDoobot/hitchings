@@ -1,20 +1,24 @@
-"""CLI Runner for Controlled New Sources Backfill (Bloque 12G).
+"""CLI Runner for Controlled New Sources Backfill (Bloque 12G/16B).
 
-Coordinates discovery, idempotent persistence, and selective v6 AI analysis
-for the three new sources:
+Coordinates discovery, idempotent persistence, and selective AI analysis
+for institutional and blog sources:
 1. Geradin Partners - EU Competition & Litigation
 2. European Commission - Digital Markets Act
 3. OECD - Competition Law and Policy
+4. Bundeskartellamt (Germany)
+5. Competition and Markets Authority (CMA, UK)
+6. Autorité de la concurrence (France)
 
 Usage:
     # 1. Dry run (default: 0 HTTP, 0 DB writes, 0 Gemini calls):
     python -m scripts.backfill_new_sources --lookback-days 90
 
-    # 2. Targeted dry run for a single source:
-    python -m scripts.backfill_new_sources --source geradin --lookback-days 90
+    # 2. Targeted dry run for ADLC (France):
+    python -m scripts.backfill_new_sources --source adlc --lookback-days 90
 
     # 3. Real controlled execution:
     python -m scripts.backfill_new_sources \
+      --source adlc \
       --lookback-days 90 \
       --confirm-real-calls \
       --max-new-entries 30 \
@@ -98,9 +102,10 @@ def print_backfill_report(report: NewSourcesBackfillReport) -> None:
     print("=" * 95 + "\n")
 
 
-async def main_async() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build argument parser for controlled new sources backfill CLI."""
     parser = argparse.ArgumentParser(
-        description="Controlled backfill runner for new sources (Geradin, DMA, OECD) - Bloque 12G",
+        description="Controlled backfill runner for new sources (Geradin, DMA, OECD, Bundeskartellamt, CMA, ADLC) - Bloque 12G/16B",
     )
     parser.add_argument(
         "--lookback-days",
@@ -115,9 +120,9 @@ async def main_async() -> int:
     )
     parser.add_argument(
         "--source",
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma"],
+        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc"],
         default=None,
-        help="Optional single source filter: 'geradin', 'dma', 'oecd', 'bundeskartellamt', or 'cma' (default: all).",
+        help="Optional single source filter: 'geradin', 'dma', 'oecd', 'bundeskartellamt', 'cma', or 'adlc' (default: all).",
     )
     parser.add_argument(
         "--max-new-entries",
@@ -137,7 +142,11 @@ async def main_async() -> int:
         default=30,
         help="Safety cost circuit breaker: aborts if actual LLM provider calls exceed this limit (default: 30).",
     )
+    return parser
 
+
+async def main_async() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     db = SessionLocal()

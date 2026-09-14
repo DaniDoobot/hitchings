@@ -33,10 +33,14 @@ from app.services.new_sources_backfill_service import (
     query_db_inventory_counts,
 )
 from scripts.preview_source_discovery import (
+    ADLC_SOURCE_NAME,
+    BUNDESKARTELLAMT_SOURCE_NAME,
+    CMA_SOURCE_NAME,
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
 )
+from scripts.backfill_new_sources import build_parser
 
 
 from app.providers.ai.mock import MockAIProvider
@@ -1270,3 +1274,130 @@ async def test_backfill_and_weekly_refresh_mutual_exclusion(
     lock_check = RefreshAdvisoryLock(db_session)
     assert lock_check.acquire() is True
     lock_check.release()
+
+
+# ==============================================================================
+# Bloque 16B.2: ADLC CLI Support and Source Resolution Tests
+# ==============================================================================
+
+def test_backfill_cli_argparse_sources():
+    """Verify CLI argument parser accepts --source with all valid source identifiers."""
+    parser = build_parser()
+
+    # Supported choices
+    for choice in ["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc"]:
+        args = parser.parse_args(["--source", choice])
+        assert args.source == choice
+
+    # Default is None
+    args_default = parser.parse_args([])
+    assert args_default.source is None
+
+    # Invalid choice raises SystemExit
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--source", "non_existent_source"])
+
+
+def test_backfill_source_resolution_all_supported_filters(db_session: Session):
+    """Verify NewSourcesBackfillService._resolve_sources correctly resolves sources for ADLC and other aliases."""
+    service = NewSourcesBackfillService()
+
+    # Seed all sources if they do not exist
+    def get_or_create(name: str) -> Source:
+        s = db_session.execute(select(Source).where(Source.name == name)).scalar_one_or_none()
+        if not s:
+            s = Source(
+                name=name,
+                type=SourceType.INSTITUTIONAL if name != GERADIN_SOURCE_NAME else SourceType.BLOG,
+                provider="native",
+                url=f"https://example.com/{name.lower().replace(' ', '_')}",
+                config={},
+                active=True,
+            )
+            db_session.add(s)
+            db_session.flush()
+        return s
+
+    adlc = get_or_create(ADLC_SOURCE_NAME)
+    bkart = get_or_create(BUNDESKARTELLAMT_SOURCE_NAME)
+    cma = get_or_create(CMA_SOURCE_NAME)
+    geradin = get_or_create(GERADIN_SOURCE_NAME)
+    dma = get_or_create(DMA_SOURCE_NAME)
+    oecd = get_or_create(OECD_SOURCE_NAME)
+    db_session.commit()
+
+    # Test individual filter shortcuts
+    assert service._resolve_sources(db=db_session, source_filter="adlc") == [adlc]
+    assert service._resolve_sources(db=db_session, source_filter="autorite_concurrence") == [adlc]
+    assert service._resolve_sources(db=db_session, source_filter="autorite") == [adlc]
+    assert service._resolve_sources(db=db_session, source_filter="france") == [adlc]
+
+    assert service._resolve_sources(db=db_session, source_filter="bundeskartellamt") == [bkart]
+    assert service._resolve_sources(db=db_session, source_filter="bkart") == [bkart]
+
+    assert service._resolve_sources(db=db_session, source_filter="cma") == [cma]
+    assert service._resolve_sources(db=db_session, source_filter="competition and markets authority") == [cma]
+
+    assert service._resolve_sources(db=db_session, source_filter="geradin") == [geradin]
+    assert service._resolve_sources(db=db_session, source_filter="dma") == [dma]
+    assert service._resolve_sources(db=db_session, source_filter="oecd") == [oecd]
+
+    # None filter returns all 6
+    all_resolved = service._resolve_sources(db=db_session, source_filter=None)
+    resolved_names = {s.name for s in all_resolved}
+    assert {
+        ADLC_SOURCE_NAME,
+        BUNDESKARTELLAMT_SOURCE_NAME,
+        CMA_SOURCE_NAME,
+        GERADIN_SOURCE_NAME,
+        DMA_SOURCE_NAME,
+        OECD_SOURCE_NAME,
+    }.issubset(resolved_names)
+
+
+@pytest.mark.asyncio
+async def test_backfill_adlc_dry_run(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+):
+    """Dry run for ADLC source: 0 HTTP calls, 0 DB writes, 0 Gemini calls, status=dry_run."""
+    # Ensure ADLC source exists
+    s = db_session.execute(select(Source).where(Source.name == ADLC_SOURCE_NAME)).scalar_one_or_none()
+    if not s:
+        s = Source(
+            name=ADLC_SOURCE_NAME,
+            type=SourceType.INSTITUTIONAL,
+            provider="native",
+            url="https://www.autoritedelaconcurrence.fr",
+            config={},
+            active=True,
+        )
+        db_session.add(s)
+        db_session.commit()
+
+    spy_ai = MockSpyAIProvider()
+    service = NewSourcesBackfillService(ai_provider=spy_ai)
+
+    entries_before = db_session.query(Entry).filter(Entry.source_id == s.id).count()
+
+    report = await service.execute_backfill(
+        db=db_session,
+        lookback_days=90,
+        confirm_real_calls=False,
+        source_filter="adlc",
+    )
+
+    assert report.status == "dry_run"
+    assert report.is_dry_run is True
+    assert report.entries_created == 0
+    assert report.duplicates == 0
+    assert report.actual_analysis_calls == 0
+    assert len(spy_ai.analyze_calls) == 0
+
+    assert len(report.per_source) == 1
+    assert report.per_source[0].source_name == ADLC_SOURCE_NAME
+    assert report.per_source[0].status == "skipped"
+
+    entries_after = db_session.query(Entry).filter(Entry.source_id == s.id).count()
+    assert entries_after == entries_before
+
