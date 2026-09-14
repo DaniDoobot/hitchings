@@ -34,8 +34,11 @@ from app.schemas.analysis import (
 from app.services.analysis_pipeline_service import AnalysisPipelineService
 from app.services.grounding_validator import (
     AnalysisGroundingError,
+    candidate_source_normalizations,
     clean_quote_wrapper,
+    normalize_grounding_text_preserve_line_hyphens,
     normalize_text_for_matching,
+    repair_enumerated_single_letter_split,
     validate_deep_evidence,
     validate_grounding_quote,
     validate_triage_evidence,
@@ -946,4 +949,144 @@ def test_grounding_hallucinated_quote_fails():
     with pytest.raises(AnalysisGroundingError) as exc_info:
         validate_grounding_quote(ev, entry)
     assert "verbatim quote not found" in str(exc_info.value)
+
+
+# ==============================================================================
+# Bloque 15C.1: Hardened Grounding for CMA PDF Artifacts & Preserved Invariants
+# ==============================================================================
+
+def test_grounding_cma_ebay_numeric_range_preserve_line_hyphen():
+    """eBay real fixture: [5-\\n10]% line-break is matched via preserve-line-hyphen variant.
+
+    Negative control: joined [510]% does NOT match [5-10]%, proving ranges are not fabricated.
+    """
+    raw_source = (
+        "The share of supply estimates set out in Table 1 show that "
+        "Vinted's share of supply significantly increased from [5-\n"
+        "10]% in 2021 to [50-60]% in 2025, with growth in each year over this period."
+    )
+    quote = "Vinted’s share of supply significantly increased from [5-10]% in 2021 to [50-60]% in 2025"
+    entry = Entry(title="eBay / Depop", content=raw_source)
+    ev = GroundingEvidence(source_field="content", quote=quote)
+
+    # Real fixture passes via preserve-line-hyphen candidate
+    assert validate_grounding_quote(ev, entry) is True
+
+    # Mandatory negative control: if raw source genuinely has [510]%, quote with [5-10]% must FAIL
+    neg_source = raw_source.replace("[5-\n10]%", "[510]%")
+    neg_entry = Entry(title="eBay / Depop", content=neg_source)
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev, neg_entry)
+    assert "verbatim quote not found" in str(exc_info.value)
+
+
+def test_grounding_cma_abf_compound_word_preserve_line_hyphen():
+    """ABF real fixture: wholly-\\nowned line-break matches wholly-owned via preserve-line-hyphen.
+
+    Negative control: joined 'whollyowned' does NOT match 'wholly-owned', preventing invented hyphens.
+    """
+    raw_source = (
+        "1. The Competition and Markets Authority (CMA) has found that the anticipated "
+        "acquisition (the Merger) by Associated British Foods plc (ABF) (via its wholly-\n"
+        "owned indirect subsidiary, ABF Grain Products Limited) of Hovis Group Limited (Hovis)..."
+    )
+    quote = "via its wholly-owned indirect subsidiary, ABF Grain Products Limited"
+    entry = Entry(title="ABF / Hovis", content=raw_source)
+    ev = GroundingEvidence(source_field="content", quote=quote)
+
+    # Real fixture passes via preserve-line-hyphen candidate
+    assert validate_grounding_quote(ev, entry) is True
+
+    # Mandatory negative control: joined 'whollyowned' in source must NOT match 'wholly-owned' quote
+    neg_source = raw_source.replace("wholly-\nowned", "whollyowned")
+    neg_entry = Entry(title="ABF / Hovis", content=neg_source)
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev, neg_entry)
+    assert "verbatim quote not found" in str(exc_info.value)
+
+
+def test_grounding_cma_danone_single_letter_split_numbered_paragraph():
+    """Danone real fixture: '14. B arriers' PDF artifact matches 'Barriers' via enumerated repair."""
+    raw_source = (
+        "In addition, Arla and Müller supply both RTD meal replacement products and protein drinks.36 "
+        "14. B arriers to entry into the RTD meal replacement market are relatively low, given "
+        "the ability to outsource production to third-party manufacturers or utilise existing "
+        "manufacturing capabilities for other drinks products."
+    )
+    quote = (
+        "Barriers to entry into the RTD meal replacement market are relatively low, given "
+        "the ability to outsource production to third-party manufacturers or utilise existing "
+        "manufacturing capabilities for other drinks products."
+    )
+    entry = Entry(title="Danone / Huel", content=raw_source)
+    ev = GroundingEvidence(source_field="content", quote=quote)
+
+    assert validate_grounding_quote(ev, entry) is True
+
+
+def test_grounding_cma_suzano_single_letter_split_list_marker():
+    """Suzano real fixture: '(c) T here' PDF artifact matches 'there' via enumerated repair + case-insensitive."""
+    raw_source = (
+        "(b) Consumer tissue producers face limited barriers to switching to alternative suppliers... "
+        "(c) T here is likely to be sufficient available capacity to enable customers to "
+        "switch to alternative BEKP suppliers in response to a foreclosure strategy. "
+        "14. T he CMA also found that Suzano would not have the incentive to engage in this strategy."
+    )
+    quote = "there is likely to be sufficient available capacity to enable customers to switch to alternative BEKP suppliers in response to a foreclosure strategy."
+    entry = Entry(title="Suzano / Kimberly-Clark", content=raw_source)
+    ev = GroundingEvidence(source_field="content", quote=quote)
+
+    assert validate_grounding_quote(ev, entry) is True
+
+
+def test_grounding_single_letter_security_controls():
+    """Security controls for single-letter repair:
+
+    1. '14. A company' is NEVER converted to '14. Acompany' (A and I strictly excluded).
+    2. Non-enumerated 'B arriers' is NOT repaired and must fail matching 'Barriers'.
+    """
+    # 1. 'A company' must remain unchanged
+    source_a = "14. A company must comply with applicable competition law regulations."
+    repaired_a = repair_enumerated_single_letter_split(normalize_text_for_matching(source_a))
+    assert "A company" in repaired_a
+    assert "Acompany" not in repaired_a
+
+    # Quote attempting to match 'Acompany' must fail
+    entry_a = Entry(title="Test", content=source_a)
+    ev_a = GroundingEvidence(source_field="content", quote="Acompany must comply")
+    with pytest.raises(AnalysisGroundingError):
+        validate_grounding_quote(ev_a, entry_a)
+
+    # 2. Non-enumerated 'B arriers' (e.g. inside prose without number or list marker)
+    source_non_enum = "The letter B arriers appeared in corrupted OCR output text."
+    entry_non_enum = Entry(title="Test", content=source_non_enum)
+    ev_non_enum = GroundingEvidence(source_field="content", quote="Barriers appeared in corrupted OCR")
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev_non_enum, entry_non_enum)
+    assert "verbatim quote not found" in str(exc_info.value)
+
+
+def test_candidate_source_normalizations_properties():
+    """candidate_source_normalizations produces deduplicated, deterministic list of <= 4 variants."""
+    cands = candidate_source_normalizations("14. B arriers to wholly-\nowned [5-\n10]%")
+    assert 1 <= len(cands) <= 4
+    # All candidates are unique
+    assert len(cands) == len(set(cands))
+    # Handles empty/None cleanly
+    assert candidate_source_normalizations(None) == [""]
+    assert candidate_source_normalizations("") == [""]
+
+
+def test_grounding_bundeskartellamt_b12_21_23_regression_invariant():
+    """Verify Bloque 14B.5 Bundeskartellamt regression: primary line-wrap dehyphenation remains intact."""
+    source_content = (
+        "können diesen bei Vorliegen der gesetzli-\n"
+        "chen Voraussetzungen vor den Zivilgerichten geltend machen."
+    )
+    quote = "können diesen bei Vorliegen der gesetzlichen Voraussetzungen"
+    entry = Entry(title="B12-21/23", content=source_content)
+    ev = GroundingEvidence(source_field="content", quote=quote)
+
+    assert validate_grounding_quote(ev, entry) is True
+
 

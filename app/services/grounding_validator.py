@@ -72,6 +72,100 @@ def normalize_grounding_text(text: Optional[str]) -> str:
     return norm
 
 
+def normalize_grounding_text_preserve_line_hyphens(text: Optional[str]) -> str:
+    """Normalize text preserving line-break hyphens.
+
+    Applies identical normalizations to normalize_grounding_text EXCEPT line-wrap
+    dehyphenation (rule 2). Allows matching lexical compound words (e.g. 'wholly-owned')
+    and numeric ranges (e.g. '[5-10]%') that happened to break across lines in PDFs.
+    """
+    if not text:
+        return ""
+
+    # 1. Unicode NFKC
+    norm = unicodedata.normalize("NFKC", text)
+
+    # 2. SKIPPED: do NOT collapse line-break hyphens (re.sub(r"(\w+)-\s*[\r\n]+\s*(\w+)", r"\1\2", norm))
+
+    # 3. Normalize smart punctuation and special characters
+    norm = norm.replace("\u00a0", " ")  # non-breaking space
+    norm = norm.replace("“", '"').replace("”", '"').replace("«", '"').replace("»", '"')
+    norm = norm.replace("‘", "'").replace("’", "'").replace("`", "'")
+    norm = norm.replace("–", "-").replace("—", "-")
+
+    # 4. Collapse multiple whitespace chars (spaces, tabs, newlines) into a single space
+    norm = re.sub(r"\s+", " ", norm).strip()
+
+    # 5. Remove inadvertent whitespace before closing punctuation and after opening punctuation
+    norm = re.sub(r"\s+([,.:;!?\)\]])", r"\1", norm)
+    norm = re.sub(r"([\(\[])\s+", r"\1", norm)
+
+    # 6. Normalize hyphenation spacing around word/digit boundaries if spaces were present
+    norm = re.sub(r"(\w)\s*-\s*(\w)", r"\1-\2", norm)
+    return norm
+
+
+def repair_enumerated_single_letter_split(text: str) -> str:
+    """Repair isolated single-letter PDF extraction splits following enumeration markers.
+
+    In CMA decision PDFs, numbered paragraphs or parenthesized list markers frequently
+    have a decorative drop-cap or styled initial separated by whitespace from the rest
+    of the word (e.g. '14. B arriers' -> '14. Barriers', '(c) T here' -> '(c) There').
+
+    Security guards:
+    - Anchored strictly to numbered paragraph ('14. ') or list marker ('(c) ').
+    - Strictly excludes valid English single-letter words 'A' and 'I' ([B-HJ-Z] only).
+    - Requires at least 2 lowercase trailing characters ([a-z]{2,}).
+    - Never applied globally outside these explicit markers.
+    """
+    if not text:
+        return ""
+    # Numbered paragraph: e.g. "14. B arriers" -> "14. Barriers"
+    repaired = re.sub(r"(\b\d+\.\s+)([B-HJ-Z])\s+([a-z]{2,}\b)", r"\1\2\3", text)
+    # List marker: e.g. "(c) T here" -> "(c) There"
+    repaired = re.sub(r"(\([A-Za-z0-9]+\)\s+)([B-HJ-Z])\s+([a-z]{2,}\b)", r"\1\2\3", repaired)
+    return repaired
+
+
+def candidate_source_normalizations(source_text: Optional[str]) -> list[str]:
+    """Generate deterministic, deduplicated candidate normalizations for source text.
+
+    Yields up to 4 deterministic variants:
+    1. Primary normalization (standard pipeline with line-wrap dehyphenation).
+    2. Primary + enumerated initial single-letter repair.
+    3. Line-break hyphen preserved normalization (lexical compounds & numeric ranges).
+    4. Line-break hyphen preserved + enumerated initial single-letter repair.
+    """
+    if not source_text:
+        return [""]
+
+    cands: list[str] = []
+    seen: set[str] = set()
+
+    def _add(cand: str) -> None:
+        if cand and cand not in seen:
+            seen.add(cand)
+            cands.append(cand)
+
+    # 1. Primary standard normalization
+    norm_primary = normalize_grounding_text(source_text)
+    _add(norm_primary)
+
+    # 2. Primary with enumerated initial repair
+    norm_primary_repaired = repair_enumerated_single_letter_split(norm_primary)
+    _add(norm_primary_repaired)
+
+    # 3. Preserve-line-hyphen normalization
+    norm_preserve = normalize_grounding_text_preserve_line_hyphens(source_text)
+    _add(norm_preserve)
+
+    # 4. Preserve-line-hyphen with enumerated initial repair
+    norm_preserve_repaired = repair_enumerated_single_letter_split(norm_preserve)
+    _add(norm_preserve_repaired)
+
+    return cands
+
+
 # Canonical alias for normalize_grounding_text
 normalize_text_for_matching = normalize_grounding_text
 
@@ -185,20 +279,23 @@ def validate_grounding_quote(
     quote_for_matching = strip_trailing_ellipsis(raw_quote, min_chars=MIN_ELLIPSIS_QUOTE_CHARS)
 
     norm_quote = normalize_text_for_matching(quote_for_matching)
-    norm_source = normalize_text_for_matching(source_text)
 
     if not norm_quote:
         raise AnalysisGroundingError(
             f"Grounding verification failed: normalized quote is empty."
         )
 
-    # Verbatim substring search
-    if norm_quote in norm_source:
-        return True
+    # Deterministic multi-candidate source matching
+    candidates = candidate_source_normalizations(source_text)
+    quote_lower = norm_quote.lower()
 
-    # Secondary check: case-insensitive match
-    if norm_quote.lower() in norm_source.lower():
-        return True
+    for cand in candidates:
+        # Verbatim substring search
+        if norm_quote in cand:
+            return True
+        # Secondary check: case-insensitive match
+        if quote_lower in cand.lower():
+            return True
 
     # Truncate for clean error reporting
     preview = raw_quote if len(raw_quote) <= 120 else raw_quote[:120] + "..."
