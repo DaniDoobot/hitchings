@@ -217,39 +217,39 @@ class NewSourcesBackfillService:
                     for raw in raw_entries:
                         if raw.published_at and raw.published_at < cutoff_dt:
                             continue
-                        if "digital markets act" in source.name.lower() or "dma" in source.name.lower():
+                        if source.name == DMA_SOURCE_NAME or "digital markets act" in source.name.lower() or "dma" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_dma_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
                             )
-                        elif "oecd" in source.name.lower():
+                        elif source.name == OECD_SOURCE_NAME or "oecd" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_oecd_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
                             )
-                        elif "bundeskartellamt" in source.name.lower() or "bkart" in source.name.lower():
+                        elif source.name == BUNDESKARTELLAMT_SOURCE_NAME or "bundeskartellamt" in source.name.lower() or "bkart" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_bundeskartellamt_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
                             )
-                        elif "competition and markets authority" in source.name.lower() or "cma" in source.name.lower():
+                        elif source.name == CMA_SOURCE_NAME or "competition and markets authority" in source.name.lower() or "cma" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_cma_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
                             )
-                        elif "autorite" in source.name.lower() or "adlc" in source.name.lower():
+                        elif source.name == ADLC_SOURCE_NAME or "autorite" in source.name.lower() or "autorité" in source.name.lower() or "adlc" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_adlc_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
                             )
                         else:
-                            from app.services.analysis_service import compute_content_hash
-                            c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+                            from app.services.ingestion_service import compute_ingestion_dedupe_hash
+                            c_hash = compute_ingestion_dedupe_hash(raw.title, raw.url, raw.excerpt)
                             existing = db.execute(
                                 select(Entry.id).where(
                                     Entry.source_id == source.id,

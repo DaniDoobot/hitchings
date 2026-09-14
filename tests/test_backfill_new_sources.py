@@ -1401,3 +1401,211 @@ async def test_backfill_adlc_dry_run(
     entries_after = db_session.query(Entry).filter(Entry.source_id == s.id).count()
     assert entries_after == entries_before
 
+
+# ==============================================================================
+# Bloque 16B.3: Hardening del Prospective Check y Hash Tests
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_prospective_check_adlc_no_typeerror(db_session: Session):
+    """A) Prospective check for ADLC completes without raising TypeError and counts correctly."""
+    from app.providers.base import RawEntryData
+    service = NewSourcesBackfillService()
+
+    adlc_source = db_session.execute(
+        select(Source).where(Source.name == ADLC_SOURCE_NAME)
+    ).scalar_one_or_none()
+    if not adlc_source:
+        adlc_source = Source(
+            name=ADLC_SOURCE_NAME,
+            type=SourceType.INSTITUTIONAL,
+            provider="native",
+            url="https://www.autoritedelaconcurrence.fr",
+            config={},
+            active=True,
+        )
+        db_session.add(adlc_source)
+        db_session.commit()
+
+    mock_raw_1 = RawEntryData(
+        external_id="26-DCC-180",
+        title="Décision 26-DCC-180 du 09 septembre 2026",
+        url="https://www.autoritedelaconcurrence.fr/fr/decision/26-dcc-180",
+        content="Prise de contrôle Carrefour City...",
+        published_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    mock_raw_2 = RawEntryData(
+        external_id="26-DCC-181",
+        title="Décision 26-DCC-181 du 09 septembre 2026",
+        url="https://www.autoritedelaconcurrence.fr/fr/decision/26-dcc-181",
+        content="Prise de contrôle Jonpilo...",
+        published_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+
+    mock_provider = AsyncMock()
+    mock_provider.fetch_entries.return_value = [mock_raw_1, mock_raw_2]
+
+    with patch.object(service.ingestion_service, "get_provider", return_value=mock_provider):
+        total_new, per_source = await service._count_prospective_new_entries(
+            target_sources=[adlc_source],
+            db=db_session,
+            lookback_days=8,
+        )
+
+    assert total_new == 2
+    assert per_source[ADLC_SOURCE_NAME] == 2
+
+
+def test_compute_analysis_input_hash_signature_and_fallback(db_session: Session):
+    """B) compute_analysis_input_hash accepts only 1 argument; generic fallback uses compute_ingestion_dedupe_hash."""
+    from app.services.analysis_service import compute_analysis_input_hash
+    from app.services.ingestion_service import compute_ingestion_dedupe_hash
+
+    test_source = Source(name="Test Source B", type=SourceType.BLOG, provider="native", url="https://example.com/b")
+    test_entry = Entry(
+        title="Test Title",
+        content="Test Content",
+        url="https://example.com/test",
+        source=test_source,
+    )
+
+    # 1. compute_analysis_input_hash accepts 1 positional argument (Entry)
+    h = compute_analysis_input_hash(test_entry)
+    assert isinstance(h, str)
+    assert len(h) == 64
+
+    # 2. compute_analysis_input_hash with 3 arguments raises TypeError
+    with pytest.raises(TypeError, match="takes 1 positional argument but 3 were given"):
+        compute_analysis_input_hash("Title", "https://example.com", "Excerpt")  # type: ignore
+
+    # 3. compute_ingestion_dedupe_hash accepts 3 arguments (title, url, excerpt)
+    h_dedup = compute_ingestion_dedupe_hash("Title", "https://example.com", "Excerpt")
+    assert isinstance(h_dedup, str)
+    assert len(h_dedup) == 64
+
+
+def test_existing_completed_analysis_not_pending(db_session: Session, active_matrix: TrackingMatrix):
+    """C) Existing completed analysis with matching content hash is not marked pending or eligible."""
+    from app.services.analysis_service import compute_analysis_input_hash
+    from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
+
+    source = Source(name="Test Source C", type=SourceType.INSTITUTIONAL, provider="native", url="https://example.com/c")
+    db_session.add(source)
+    db_session.flush()
+
+    entry = Entry(
+        source_id=source.id,
+        title="Existing Entry",
+        content="Substantive content for existing entry",
+        url="https://example.com/existing-entry",
+        published_at=datetime.now(timezone.utc) - timedelta(days=5),
+        captured_at=datetime.now(timezone.utc) - timedelta(days=5),
+    )
+    db_session.add(entry)
+    db_session.flush()
+
+    content_hash = compute_analysis_input_hash(entry)
+    analysis = EntryAnalysis(
+        entry_id=entry.id,
+        matrix_id=active_matrix.id,
+        pipeline_version="v6",
+        status="completed",
+        relevance_status="not_relevant",
+        entry_content_hash=content_hash,
+        matrix_snapshot={"matrix_id": str(active_matrix.id)},
+        matrix_snapshot_hash="dummy_hash",
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    planner = IncrementalAnalysisPlanner(db_session)
+    evaluation = planner.evaluate_entry(entry)
+
+    assert evaluation.reason in {"already_analyzed", "already_current"}
+    assert evaluation.estimated_stage_plan == "skip_already_current"
+
+
+def test_new_entry_considered_potential_analysis(db_session: Session, active_matrix: TrackingMatrix):
+    """D) New entry without completed analysis is evaluated as eligible for analysis."""
+    from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
+
+    source = Source(name="Test Source D", type=SourceType.INSTITUTIONAL, provider="native", url="https://example.com/d")
+    db_session.add(source)
+    db_session.flush()
+
+    entry = Entry(
+        source_id=source.id,
+        source=source,
+        title="New Substantive Decision",
+        content="Substantive decision text exceeding 1500 chars. " * 50,
+        url="https://example.com/new-substantive",
+        published_at=datetime.now(timezone.utc) - timedelta(days=3),
+        captured_at=datetime.now(timezone.utc) - timedelta(days=3),
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    planner = IncrementalAnalysisPlanner(db_session)
+    evaluation = planner.evaluate_entry(entry)
+
+    assert evaluation.reason == "eligible"
+    assert evaluation.sufficiency == "full"
+
+
+@pytest.mark.asyncio
+async def test_prospective_check_cma_and_bundeskartellamt_no_regression(db_session: Session):
+    """F & G) Prospective check routes CMA and Bundeskartellamt to their respective deduplicators without regression."""
+    from app.providers.base import RawEntryData
+    service = NewSourcesBackfillService()
+
+    def get_or_create(name: str) -> Source:
+        s = db_session.execute(select(Source).where(Source.name == name)).scalar_one_or_none()
+        if not s:
+            s = Source(name=name, type=SourceType.INSTITUTIONAL, provider="native", url=f"https://example.com/{name[:4]}", config={}, active=True)
+            db_session.add(s)
+            db_session.flush()
+        return s
+
+    cma = get_or_create(CMA_SOURCE_NAME)
+    bkart = get_or_create(BUNDESKARTELLAMT_SOURCE_NAME)
+    db_session.commit()
+
+    # CMA mock raw
+    cma_raw = RawEntryData(
+        external_id="cma-case-123",
+        title="CMA Investigation into Cloud Services",
+        url="https://www.gov.uk/cma-cases/cloud-services",
+        published_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    mock_cma_provider = AsyncMock()
+    mock_cma_provider.fetch_entries.return_value = [cma_raw]
+
+    with patch.object(service.ingestion_service, "get_provider", return_value=mock_cma_provider):
+        total_cma, per_cma = await service._count_prospective_new_entries(
+            target_sources=[cma],
+            db=db_session,
+            lookback_days=30,
+        )
+    assert total_cma == 1
+    assert per_cma[CMA_SOURCE_NAME] == 1
+
+    # Bundeskartellamt mock raw
+    bkart_raw = RawEntryData(
+        external_id="bkart-b12-21-23",
+        title="Fallbericht Messtechnik B12-21/23",
+        url="https://www.bundeskartellamt.de/decision/b12-21-23",
+        published_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    mock_bkart_provider = AsyncMock()
+    mock_bkart_provider.fetch_entries.return_value = [bkart_raw]
+
+    with patch.object(service.ingestion_service, "get_provider", return_value=mock_bkart_provider):
+        total_bkart, per_bkart = await service._count_prospective_new_entries(
+            target_sources=[bkart],
+            db=db_session,
+            lookback_days=30,
+        )
+    assert total_bkart == 1
+    assert per_bkart[BUNDESKARTELLAMT_SOURCE_NAME] == 1
+
+
