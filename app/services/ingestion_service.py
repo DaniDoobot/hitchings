@@ -163,9 +163,6 @@ class IngestionService:
             if effective_lookback is None and source.config and isinstance(source.config, dict):
                 effective_lookback = source.config.get("lookback_days")
 
-            if effective_lookback is not None:
-                source.config = {**(source.config or {}), "lookback_days": effective_lookback}
-
             import inspect
             sig = inspect.signature(provider.fetch_entries)
             fetch_kwargs = {}

@@ -1017,6 +1017,8 @@ async def test_real_cli_instantiation_without_explicit_ai_provider(
     spy_ai = MockSpyAIProvider()
     monkeypatch.setattr("app.providers.ai.gemini_api.GeminiAPIProvider", lambda **kwargs: spy_ai)
     monkeypatch.setenv("ANALYSIS_PROVIDER", "gemini_api")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
 
     # Instantiate exactly as scripts/backfill_new_sources.py does
     service = NewSourcesBackfillService()

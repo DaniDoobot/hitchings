@@ -376,3 +376,193 @@ async def test_offline_reproduction_12_day_old_item_persisted_with_13_day_lookba
         assert created_entry is not None
         assert created_entry.source_id == source.id
         assert "26-DCC-179" in created_entry.title
+
+
+# ==============================================================================
+# 4. Source.config Immutability (Bloque 16B.5.1: Execution-Scoped Lookback)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_mutate_or_persist_source_config_when_empty(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v7_prompts: tuple,
+):
+    """Bloque 16B.5.1: Verify backfill with lookback_days=90 does NOT persist lookback_days into Source.config in DB."""
+    source = Source(
+        id=uuid.uuid4(),
+        name=ADLC_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        url=ADLC_BASE_URL,
+        config={},
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    with patch.object(AutoriteConcurrenceExtractor, "extract", new=AsyncMock(return_value=[])):
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        service = NewSourcesBackfillService(ai_provider=MockAIProvider())
+        report = await service.execute_backfill(
+            db=db_session,
+            lookback_days=90,
+            confirm_real_calls=True,
+            source_filter="adlc",
+            max_new_entries=10,
+            async_client=mock_client,
+        )
+
+        assert report.status == "completed"
+
+    # Refresh source directly from the database
+    db_session.refresh(source)
+    assert source.config is not None
+    assert "lookback_days" not in source.config, (
+        f"Source.config in DB was poisoned with lookback_days! Found: {source.config}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backfill_preserves_existing_custom_keys_in_source_config(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v7_prompts: tuple,
+):
+    """Bloque 16B.5.1: Verify backfill with lookback_days=90 does not alter existing keys nor add lookback_days."""
+    original_config = {"custom_field": "val123", "extra_notes": "adlc notes"}
+    source = Source(
+        id=uuid.uuid4(),
+        name=ADLC_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        url=ADLC_BASE_URL,
+        config=dict(original_config),
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    with patch.object(AutoriteConcurrenceExtractor, "extract", new=AsyncMock(return_value=[])):
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        service = NewSourcesBackfillService(ai_provider=MockAIProvider())
+        report = await service.execute_backfill(
+            db=db_session,
+            lookback_days=90,
+            confirm_real_calls=True,
+            source_filter="adlc",
+            max_new_entries=10,
+            async_client=mock_client,
+        )
+
+        assert report.status == "completed"
+
+    db_session.refresh(source)
+    assert source.config == original_config
+    assert "lookback_days" not in source.config
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_overwrite_persistent_lookback_days_in_source_config(
+    db_session: Session,
+    active_matrix: TrackingMatrix,
+    v7_prompts: tuple,
+):
+    """Bloque 16B.5.1: Verify backfill with lookback_days=90 does not overwrite persistent lookback_days=15."""
+    source = Source(
+        id=uuid.uuid4(),
+        name=ADLC_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        url=ADLC_BASE_URL,
+        config={"lookback_days": 15},
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    with patch.object(AutoriteConcurrenceExtractor, "extract", new=AsyncMock(return_value=[])):
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        service = NewSourcesBackfillService(ai_provider=MockAIProvider())
+        report = await service.execute_backfill(
+            db=db_session,
+            lookback_days=90,
+            confirm_real_calls=True,
+            source_filter="adlc",
+            max_new_entries=10,
+            async_client=mock_client,
+        )
+
+        assert report.status == "completed"
+
+    db_session.refresh(source)
+    assert source.config == {"lookback_days": 15}, (
+        f"Source.config persistent lookback_days was overwritten! Found: {source.config}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_web_ingestion_does_not_mutate_source_config(db_session: Session):
+    """Bloque 16B.5.1: DirectWebIngestionService must NOT mutate or persist lookback_days into source.config."""
+    from app.services.direct_web_ingestion_service import DirectWebIngestionService
+    from app.providers.direct_web.adapters.geradin_partners import GeradinPartnersAdapter
+
+    source = Source(
+        id=uuid.uuid4(),
+        name="Geradin Partners - EU Competition & Litigation",
+        type=SourceType.BLOG,
+        provider="direct_web",
+        url="https://www.geradinpartners.com",
+        config={"listing_url": "https://www.geradinpartners.com/blog/"},
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    dw_service = DirectWebIngestionService()
+    adapter = GeradinPartnersAdapter()
+
+    with patch.object(adapter, "discover", return_value=[]), \
+         patch("app.providers.direct_web.registry.DirectWebAdapterRegistry.get_adapter_for_source", return_value=adapter):
+        dw_service.execute_ingestion(
+            db=db_session,
+            sources=[source],
+            confirm_real_calls=True,
+            lookback_days=90,
+        )
+
+    db_session.refresh(source)
+    assert source.config == {"listing_url": "https://www.geradinpartners.com/blog/"}
+    assert "lookback_days" not in source.config
+
+
+@pytest.mark.asyncio
+async def test_ingestion_service_does_not_mutate_source_config(db_session: Session):
+    """Bloque 16B.5.1: IngestionService must NOT mutate or persist lookback_days into source.config."""
+    source = Source(
+        id=uuid.uuid4(),
+        name=ADLC_SOURCE_NAME,
+        type=SourceType.INSTITUTIONAL,
+        provider="native",
+        url=ADLC_BASE_URL,
+        config={},
+        active=True,
+    )
+    db_session.add(source)
+    db_session.commit()
+
+    service = IngestionService()
+    provider = service.get_provider("native")
+
+    with patch.object(provider, "fetch_entries", new=AsyncMock(return_value=[])):
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        await service.ingest_source(
+            source_id=source.id,
+            db=db_session,
+            client=mock_client,
+            lookback_days=90,
+        )
+
+    db_session.refresh(source)
+    assert source.config == {}
+    assert "lookback_days" not in source.config

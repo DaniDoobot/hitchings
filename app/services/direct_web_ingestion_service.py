@@ -189,8 +189,6 @@ class DirectWebIngestionService:
         effective_lookback = lookback_days
         if effective_lookback is None and source.config and isinstance(source.config, dict):
             effective_lookback = source.config.get("lookback_days")
-        if effective_lookback is not None:
-            source.config = {**(source.config or {}), "lookback_days": effective_lookback}
 
         source_id = source.id
         source_name = source.name
@@ -255,9 +253,8 @@ class DirectWebIngestionService:
                         if not norm_item_url or norm_item_url in seen_check_urls or norm_item_url in existing_urls:
                             continue
                         seen_check_urls.add(norm_item_url)
-                        lookback_days = (source.config or {}).get("lookback_days")
-                        if lookback_days and item.published_at:
-                            cutoff_dt = utc_now() - timedelta(days=lookback_days)
+                        if effective_lookback and item.published_at:
+                            cutoff_dt = utc_now() - timedelta(days=effective_lookback)
                             if item.published_at < cutoff_dt:
                                 continue
                         prospective_new += 1
@@ -281,10 +278,9 @@ class DirectWebIngestionService:
                         result.duplicates_count += 1
                         continue
 
-                    # Filter by lookback_days if configured on source
-                    lookback_days = (source.config or {}).get("lookback_days")
-                    if lookback_days and item.published_at:
-                        cutoff_dt = utc_now() - timedelta(days=lookback_days)
+                    # Filter by effective_lookback if configured on source or passed for run
+                    if effective_lookback and item.published_at:
+                        cutoff_dt = utc_now() - timedelta(days=effective_lookback)
                         if item.published_at < cutoff_dt:
                             continue
 

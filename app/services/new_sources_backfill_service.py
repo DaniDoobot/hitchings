@@ -184,8 +184,6 @@ class NewSourcesBackfillService:
 
         for source in target_sources:
             new_for_source = 0
-            # Ensure source.config has lookback_days for this prospective run
-            source.config = {**(source.config or {}), "lookback_days": lookback_days}
 
             if DirectWebAdapterRegistry.has_adapter_for_source(source):
                 adapter = DirectWebAdapterRegistry.get_adapter_for_source(source)
@@ -501,9 +499,6 @@ class NewSourcesBackfillService:
             )
             source_start = utc_now()
             try:
-                # Update config with current lookback_days for this run
-                source.config = {**(source.config or {}), "lookback_days": lookback_days}
-
                 # 6.1 Process Geradin Partners via DirectWebIngestionService
                 if DirectWebAdapterRegistry.has_adapter_for_source(source):
                     dw_report = self.direct_web_service.execute_ingestion(
