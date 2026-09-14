@@ -62,6 +62,12 @@ La solución configura de forma idiomática `execution_options`
 y Connection, haciendo que la transacción nazca directamente como `REPEATABLE READ, READ ONLY`
 sin emitir sentencias SQL frágiles.
 
+Nota sobre el commit `eda208e`:
+Incluye adicionalmente una mejora de inyección de sesión opcional en `scripts/seed_source_cma.py`
+y `tests/test_cma_milestones.py` (`seed_cma_source(db=...)`), permitiendo que la suite de CMA
+se ejecute en local fuera de Docker contra SQLite sin intentar resolver el host `db:5432`.
+Cero impacto en producción.
+
 ## Próximo paso exacto
 
 1. En el ordenador de oficina:
