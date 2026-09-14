@@ -63,11 +63,13 @@ def test_v6_prompt_contracts_and_generic_rules(db_session):
     assert triage_v5 is not None
     assert deep_v5 is not None
 
-    # Triage v6: identical to v5 except version=6
+    # Triage v6: contains contiguous evidence instruction without skipping footnotes
     assert triage_v6.config.get("max_output_tokens") == 1024
     assert triage_v6.config.get("thinking_level") == "low"
-    assert triage_v6.system_prompt == triage_v5.system_prompt
     assert triage_v6.user_prompt_template == triage_v5.user_prompt_template
+    assert "CONTIGUO" in triage_v6.system_prompt
+    assert "footnotes" in triage_v6.system_prompt
+    assert "NUNCA unas fragmentos separados" in triage_v6.system_prompt
 
     # Deep v6: maintains 8192 max_output_tokens and medium thinking
     assert deep_v6.config.get("max_output_tokens") == 8192
@@ -77,10 +79,13 @@ def test_v6_prompt_contracts_and_generic_rules(db_session):
     # V5 prompts preserved intact
     assert deep_v5.config.get("max_output_tokens") == 8192
     assert "SALTO DE ARTEFACTOS O ENCABEZADOS DE" not in deep_v5.system_prompt
+    assert "footnotes" not in deep_v5.system_prompt
 
     # Deep v6 contains generic contiguous evidence instruction
     deep_prompt_text = deep_v6.system_prompt
-    assert "NUNCA construyas una cita uniendo fragmentos" in deep_prompt_text
+    assert "CONTIGUO" in deep_prompt_text
+    assert "footnotes" in deep_prompt_text
+    assert "NUNCA unas fragmentos separados" in deep_prompt_text
 
     # NON-OVERFITTING CHECK: must NOT mention Gormsen, Meta, Devenish, or specific header text
     forbidden_terms = [
@@ -89,6 +94,72 @@ def test_v6_prompt_contracts_and_generic_rules(db_session):
     for term in forbidden_terms:
         assert term not in deep_prompt_text.lower(), f"Overfitting detected: '{term}' found in deep v6 prompt!"
         assert term not in triage_v6.system_prompt.lower(), f"Overfitting detected: '{term}' found in triage v6 prompt!"
+
+
+def test_v6_prompt_contract_explicit_requirements(db_session):
+    """Bloque 15C.2: Verify v6 triage and deep prompts explicitly require contiguous quotes without footnote bridging."""
+    seed_analysis_prompts(db=db_session)
+
+    triage_v6 = db_session.query(AnalysisPromptVersion).filter(
+        AnalysisPromptVersion.code == "observatory_triage", AnalysisPromptVersion.version == 6
+    ).first()
+    deep_v6 = db_session.query(AnalysisPromptVersion).filter(
+        AnalysisPromptVersion.code == "observatory_deep_analysis", AnalysisPromptVersion.version == 6
+    ).first()
+
+    for prompt_obj, label in [(triage_v6, "triage_v6"), (deep_v6, "deep_v6")]:
+        text = prompt_obj.system_prompt
+        # 1. contiguous requirement
+        assert "CONTIGUO" in text or "contiguo" in text, f"{label} missing contiguous requirement"
+        # 2. exact/verbatim requirement
+        assert "VERBATIM" in text, f"{label} missing verbatim requirement"
+        # 3. no skipping footnotes / headers / page numbers
+        assert "notas al pie" in text and "footnotes" in text, f"{label} missing footnote skipping ban"
+        # 4. no stitching separated fragments
+        assert "NUNCA unas fragmentos separados" in text, f"{label} missing no-stitching rule"
+        # 5. short quote recommendation (50 a 160)
+        assert "50 a 160 caracteres" in text, f"{label} missing 50-160 char recommendation"
+        # 6. explicit example with footnotes
+        assert "The merger would not result in" in text, f"{label} missing explicit example"
+        assert "INCORRECTO" in text and "CORRECTO" in text, f"{label} missing example labels"
+
+
+def test_grounding_validator_footnote_bridging_fails_and_contiguous_passes():
+    """Bloque 15C.2: Validator strictly fails quotes that bridge across footnote blocks, but passes contiguous segments."""
+    from app.services.grounding_validator import validate_grounding_quote, AnalysisGroundingError
+    from app.schemas.analysis import GroundingEvidence
+
+    # Source text interrupted by a footnote block (as in Danone/Huel L35-42)
+    source_text = (
+        "the CMA has found that the Merger would not give rise to a realistic prospect "
+        "of a substantial lessening of [FOOTNOTES 35-42: UFIT, Barebells, PRO MLK] "
+        "competition (SLC) as a result of horizontal unilateral effects in the supply of RTD."
+    )
+    entry = Entry(id=uuid.uuid4(), title="Test Footnote Interruption", content=source_text)
+
+    # 1. A reconstructed quote bridging across the footnote block must strictly FAIL
+    bridged_quote = (
+        "the Merger would not give rise to a realistic prospect of a substantial "
+        "lessening of competition (SLC) as a result of horizontal unilateral effects"
+    )
+    ev_bridged = GroundingEvidence(quote=bridged_quote, source_field="content")
+    with pytest.raises(AnalysisGroundingError) as exc_info:
+        validate_grounding_quote(ev_bridged, entry)
+    assert "verbatim quote not found" in str(exc_info.value)
+
+    # 2. Contiguous quote entirely BEFORE the footnote block must PASS
+    ev_before = GroundingEvidence(
+        quote="the Merger would not give rise to a realistic prospect of a substantial lessening of",
+        source_field="content"
+    )
+    assert validate_grounding_quote(ev_before, entry) is True
+
+    # 3. Contiguous quote entirely AFTER the footnote block must PASS
+    ev_after = GroundingEvidence(
+        quote="competition (SLC) as a result of horizontal unilateral effects in the supply of RTD.",
+        source_field="content"
+    )
+    assert validate_grounding_quote(ev_after, entry) is True
 
 
 def test_grounding_validator_remains_strict_and_unmodified():

@@ -670,7 +670,7 @@ PROMPT_DEFINITIONS = [
         "name": "Observatorio Triage v6 — Generic Contiguous Evidence",
         "description": (
             "Clasificación rápida de relevancia HITCHINGS con Structured Output (TriageAnalysisResultV3) "
-            "y protocolo extract-first (Bloque 7H.3). Materialmente idéntico a v5 salvo versión 6."
+            "y protocolo extract-first con evidencia continua estricta sin salto de notas al pie (Bloque 15C.2)."
         ),
         "system_prompt": (
             "Eres un analista especializado en derecho de la competencia, regulación sectorial y mercados digitales "
@@ -685,18 +685,32 @@ PROMPT_DEFINITIONS = [
             "- Una resolución sobre tributación o derecho penal sin conexión con competencia/regulación: score bajo.\n"
             "- Una resolución de daños derivados de cárteles o litigación de competencia: score alto.\n"
             "- Las palabras clave son señales orientativas, no excluyentes.\n\n"
-            "REGLA CRÍTICA DE EVIDENCIA — PROTOCOLO EXTRACT-FIRST Y CITAS CORTAS:\n"
+            "REGLA CRÍTICA DE EVIDENCIA — PROTOCOLO EXTRACT-FIRST Y SPAN CONTIGUO ESTRICTO:\n"
             "1. PROTOCOLO EXTRACT-FIRST: Antes de redactar la justificación ('reason'), localiza y copia el fragmento textual "
             "exacto que determina tu decisión. Formula después tu justificación en torno a la cita extraída.\n"
-            "2. COPIA LITERAL VERBATIM AL 100%: Cada 'quote' debe copiarse de forma idéntica, carácter por carácter, del campo "
-            "indicado en 'source_field' ('title', 'content' o 'excerpt'). Un solo cambio de palabra, errata o paráfrasis anula la verificación.\n"
-            "3. PREFERENCIA POR CLÁUSULAS CORTAS (5 a 25 palabras): Selecciona frases o proposiciones cortas, precisas y continuas "
-            "(orientativamente entre 20 y 180 caracteres). Evita oraciones compuestas largas o párrafos completos que aumentan el riesgo de desajuste.\n"
-            "4. NUNCA PARAFRASEES NI RECONSTRUYAS: No unas fragmentos no contiguos ni resumas en la cita. No alteres la puntuación, "
-            "mayúsculas ni añadas comillas que no existan en el texto fuente.\n"
-            "5. IDIOMA ORIGINAL: NO traduzcas las citas. Conserva el idioma exacto en que está redactado el texto fuente (inglés, francés, etc.).\n"
-            "6. Sin formato Markdown en 'quote': No incluyas asteriscos de negrita, comillas tipográficas agregadas ni corchetes dentro del valor de 'quote'.\n"
-            "7. Evidencia en descarte: Si el documento es 'not_relevant' o 'uncertain', incluye igualmente 1-3 evidencias citando el fragmento que acredita que versa sobre otra materia ajena.\n\n"
+            "2. COPIA LITERAL VERBATIM Y CONTINUA: Cada 'quote' debe ser un fragmento CONTIGUO exacto copiado carácter por carácter "
+            "del campo indicado en 'source_field' ('title', 'content' o 'excerpt'). Un solo cambio de palabra, errata o paráfrasis anula la verificación.\n"
+            "3. PREFERENCIA POR CITAS CORTAS (50 a 160 caracteres): Selecciona proposiciones o cláusulas breves, precisas y continuas "
+            "(orientativamente entre 10 y 25 palabras / 50 a 160 caracteres). Las citas cortas evitan cruzar notas al pie o artefactos de PDF.\n"
+            "4. PROHIBICIÓN ABSOLUTA DE SALTAR NOTAS AL PIE, ENCABEZADOS O TABLAS (NO FOOTNOTE / PAGE BRIDGING):\n"
+            "Los textos de resoluciones judiciales o decisiones administrativas extraídos de PDF pueden contener notas al pie (footnotes), "
+            "encabezados o pies de página repetidos, números de página, tablas o texto intercalado.\n"
+            "NUNCA reconstruyas una oración saltando notas al pie, encabezados, pies de página o números de página.\n"
+            "NUNCA unas fragmentos separados aunque visualmente formen una frase coherente en el documento original.\n"
+            "Si una oración está interrumpida por notas al pie o texto intercalado, debes:\n"
+            "  * Citar ÚNICAMENTE el tramo continuo situado ÍNTEGRAMENTE ANTES de la nota al pie o artefacto; O BIEN\n"
+            "  * Citar ÚNICAMENTE el tramo continuo situado ÍNTEGRAMENTE DESPUÉS de la nota al pie o artefacto.\n"
+            "EJEMPLO:\n"
+            "  Fuente: 'The merger would not result in [footnotes 35-42] an SLC as a result of horizontal unilateral effects'\n"
+            "  INCORRECTO (reconstrucción saltando notas): 'The merger would not result in an SLC'\n"
+            "  CORRECTO (tramo continuo anterior): 'The merger would not result in'\n"
+            "  CORRECTO (tramo continuo posterior): 'an SLC as a result of horizontal unilateral effects'\n"
+            "5. NUNCA PARAFRASEES NI 'LIMPIES': La cita debe encontrarse como substring exacto del CONTENT. No resumas, no alteres "
+            "mayúsculas ni puntuación, y no agregues comillas que no existan en el texto fuente.\n"
+            "6. IDIOMA ORIGINAL: NO traduzcas las citas textuales. Consérvalas en su idioma original (inglés, francés, alemán, etc.).\n"
+            "7. SIN FORMATO MARKDOWN: No incluyas negritas, cursivas ni comillas tipográficas añadidas dentro del valor de 'quote'.\n"
+            "8. Evidencia en descarte: Si el documento es 'not_relevant' o 'uncertain', incluye igualmente 1-3 evidencias citando el "
+            "fragmento continuo que acredita que versa sobre otra materia ajena.\n\n"
             "INSTRUCCIONES DE IDIOMA Y CLASIFICACIÓN:\n"
             "- El campo 'reason' debe estar redactado en castellano, explicando analíticamente la decisión a partir de las citas extraídas.\n"
             "- Los códigos de tema deben proceder exclusivamente de la lista permitida. No inventes topic_codes.\n\n"
@@ -739,7 +753,7 @@ PROMPT_DEFINITIONS = [
         "name": "Observatorio Análisis en Profundidad v6 — Contiguous Evidence & Page-Break Hotfix",
         "description": (
             "Análisis jurídico profundo HITCHINGS con evidencia textual robusta extract-first, capacidad ampliada (8k tokens) "
-            "y regla estricta de span continuo contra artefactos de salto de página (Bloque 7H.3). "
+            "y regla estricta de span continuo contra notas al pie y saltos de página (Bloque 15C.2). "
             "Solo se ejecuta cuando relevance_status == 'relevant' y la fuente es suficiente. "
             "Usa Structured Output (DeepAnalysisResultV3) con max_output_tokens=8192 para evitar truncamiento por razonamiento. "
             "Produce: summary (150-300 palabras), summary_evidence (2-4 citas breves VERBATIM), y key_points (3-6 puntos "
@@ -751,27 +765,31 @@ PROMPT_DEFINITIONS = [
             "El triage previo ha confirmado que el documento es relevante para el observatorio. Tu misión es elaborar "
             "un resumen jurídico riguroso y los puntos clave esenciales, fundamentando cada conclusión central con citas "
             "textuales breves y exactas extraídas de la fuente.\n\n"
-            "REGLA CRÍTICA DE EVIDENCIA — PROTOCOLO EXTRACT-FIRST Y CITAS CORTAS:\n"
+            "REGLA CRÍTICA DE EVIDENCIA — PROTOCOLO EXTRACT-FIRST Y SPAN CONTIGUO ESTRICTO:\n"
             "1. PROTOCOLO EXTRACT-FIRST: Para cada afirmación o punto clave, localiza y extrae primero la cita literal del texto "
             "fuente; formula después tu análisis, resumen y puntos en torno a las citas verificadas.\n"
-            "2. COPIA LITERAL VERBATIM AL 100%: Cada 'quote' debe coincidir exactamente, carácter por carácter, con el texto del "
-            "'source_field' correspondiente ('title', 'content', 'excerpt'). Un solo cambio de palabra, errata o paráfrasis anula la verificación.\n"
-            "3. PREFERENCIA POR CLÁUSULAS CORTAS (5 a 25 palabras): Extrae proposiciones, incisos o cláusulas breves, concretas y continuas "
-            "(orientativamente entre 20 y 180 caracteres). Evita oraciones compuestas enteras, cadenas de oraciones subordinadas o unir "
-            "fragmentos discontinuos con elipsis.\n"
-            "4. NUNCA PARAFRASEES NI RECONSTRUYAS: La cita debe ser un fragmento continuo exacto tal como aparece en la fuente. "
-            "No corrijas puntuación, no alteres mayúsculas ni agregues comillas dentro del valor de 'quote'.\n"
-            "5. IDIOMA ORIGINAL: NO traduzcas las citas textuales. Consérvalas en su idioma original (inglés, francés, etc.).\n"
-            "6. Sin formato Markdown en 'quote': No utilices negritas, cursivas ni comillas añadidas dentro del campo 'quote'.\n"
-            "7. PROHIBICIÓN DE SALTO DE ARTEFACTOS O ENCABEZADOS DE PÁGINA (SPAN CONTINUO ESTRICTO):\n"
-            "Los textos extraídos de PDF o resoluciones judiciales pueden contener artefactos de salto de página intercalados "
-            "(encabezados repetidos de página, pies de página, numeración de página, cabeceras del tribunal o leyendas de publicación).\n"
-            "NUNCA construyas una cita uniendo fragmentos situados antes y después de dicho artefacto u omitiendo el texto intermedio.\n"
-            "Si una frase útil atraviesa un salto de página o encabezado físico intercalado:\n"
-            "  * Elige una cita más corta situada ÍNTEGRAMENTE ANTES del artefacto; O BIEN\n"
-            "  * Elige una cita más corta situada ÍNTEGRAMENTE DESPUÉS del artefacto; O BIEN\n"
+            "2. COPIA LITERAL VERBATIM Y CONTINUA: Cada 'quote' debe coincidir exactamente, carácter por carácter, con un fragmento "
+            "CONTIGUO del texto suministrado en 'source_field' ('title', 'content', 'excerpt'). Un solo cambio de palabra, errata o paráfrasis anula la verificación.\n"
+            "3. PREFERENCIA POR CITAS CORTAS (50 a 160 caracteres): Extrae proposiciones, incisos o cláusulas breves, concretas y continuas "
+            "(orientativamente entre 10 y 25 palabras / 50 a 160 caracteres). Las citas cortas evitan cruzar notas al pie o artefactos de salto de página.\n"
+            "4. PROHIBICIÓN ABSOLUTA DE SALTAR NOTAS AL PIE, ENCABEZADOS O TABLAS (NO FOOTNOTE / PAGE BRIDGING):\n"
+            "Los textos extraídos de PDF o resoluciones judiciales pueden contener notas al pie (footnotes), encabezados repetidos de página, "
+            "pies de página, numeración de página, tablas o texto intercalado.\n"
+            "NUNCA reconstruyas una oración saltando notas al pie, encabezados o números de página.\n"
+            "NUNCA unas fragmentos separados aunque visualmente formen una frase continua en el documento original.\n"
+            "Si una frase útil está interrumpida por notas al pie, encabezados o saltos de página:\n"
+            "  * Citar ÚNICAMENTE el tramo continuo situado ÍNTEGRAMENTE ANTES de la nota al pie o artefacto; O BIEN\n"
+            "  * Citar ÚNICAMENTE el tramo continuo situado ÍNTEGRAMENTE DESPUÉS de la nota al pie o artefacto; O BIEN\n"
             "  * Selecciona otro fragmento continuo diferente que respalde la misma conclusión.\n"
-            "Cada 'quote' debe ser copiable como una única subcadena continua del texto fuente suministrado.\n\n"
+            "EJEMPLO:\n"
+            "  Fuente: 'The merger would not result in [footnotes 35-42] an SLC as a result of horizontal unilateral effects'\n"
+            "  INCORRECTO (reconstrucción saltando notas): 'The merger would not result in an SLC'\n"
+            "  CORRECTO (tramo continuo anterior): 'The merger would not result in'\n"
+            "  CORRECTO (tramo continuo posterior): 'an SLC as a result of horizontal unilateral effects'\n"
+            "5. NUNCA PARAFRASEES NI 'LIMPIES': Cada 'quote' debe ser copiable como una única subcadena continua del texto fuente "
+            "suministrado ('content' o 'title'). No corrijas puntuación, no alteres mayúsculas ni agregues comillas dentro del valor de 'quote'.\n"
+            "6. IDIOMA ORIGINAL: NO traduzcas las citas textuales. Consérvalas en su idioma original (inglés, francés, alemán, etc.).\n"
+            "7. SIN FORMATO MARKDOWN: No utilices negritas, cursivas ni comillas añadidas dentro del campo 'quote'.\n\n"
             "ESTRUCTURA DEL ANÁLISIS:\n"
             "- 'summary': Resumen analítico en castellano (orientativamente 150-300 palabras si el material lo justifica). Preciso, sustantivo y sin generalidades vacías.\n"
             "- 'summary_evidence': Lista de 2 a 4 citas breves VERBATIM de la fuente que respalden las conclusiones nucleares del resumen.\n"
@@ -856,6 +874,17 @@ def seed_analysis_prompts(db: Optional[Session] = None) -> list[AnalysisPromptVe
                 )
                 if content_identical:
                     logger.info("Prompt version '%s:v%d' already exists and is unchanged (id=%s)", code, version, existing.id)
+                    seeded.append(existing)
+                elif version == 6:
+                    # Bloque 15C.2: Allow in-place hardening of active v6 prompts for contiguous evidence contract
+                    logger.info("Updating existing active prompt version '%s:v%d' with hardened evidence contract (id=%s)", code, version, existing.id)
+                    existing.system_prompt = prompt_data["system_prompt"]
+                    existing.name = prompt_data["name"]
+                    existing.description = prompt_data["description"]
+                    existing.user_prompt_template = prompt_data["user_prompt_template"]
+                    existing.response_schema_version = prompt_data["response_schema_version"]
+                    existing.config = prompt_data["config"]
+                    existing.active = prompt_data["active"]
                     seeded.append(existing)
                 else:
                     err_msg = (

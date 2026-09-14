@@ -100,7 +100,11 @@ class GroundingEvidence(BaseModel):
     )
     quote: str = Field(
         ...,
-        description="Cita textual exacta copiada VERBATIM de la fuente original. No traducir, no parafrasear, sin markdown."
+        description=(
+            "Cita textual CONTIGUA exacta copiada VERBATIM de la fuente (50-160 caracteres). "
+            "Prohibido saltar notas al pie/footnotes, encabezados o números de página. "
+            "No unir fragmentos separados. No traducir, no parafrasear, sin markdown."
+        ),
     )
 
 
