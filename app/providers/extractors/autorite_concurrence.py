@@ -255,16 +255,132 @@ def parse_iso_or_french_date(text: Optional[str]) -> Optional[datetime]:
     return parse_french_date(cleaned)
 
 
-def extract_adlc_published_at(
+def extract_adlc_act_date(
     soup: BeautifulSoup, url: str, html: str
 ) -> Optional[datetime]:
-    """Extract published_at with strict deterministic hierarchy.
+    """Extract official legal date of adoption/decision for numbered legal acts (D, MC, DCC, A).
 
-    Preferences:
+    Precedence:
+    1. Explicit Drupal act date field (.field--name-field-date-decision, .field--name-field-date-notice, .field--name-field-date-dcc, .field--name-field-date-de-decision)
+    2. Formal visible date in <time> tag associated with the act (e.g. inside H1)
+    3. Date expressed unequivocally in H1 or title ("du DD mois YYYY")
+    4. Explicit Drupal publication field (.field--name-field-date-de-publication, .field--name-field-date, .date-display-single)
+    5. Controlled visible text fallback (URL slug du-DD-mois-YYYY, body text)
+    6. meta article:published_time ONLY as last resort fallback (web CMS node date, NOT official legal date)
+    """
+    # 1. Explicit Drupal act date field
+    act_date_selectors = [
+        ".field--name-field-date-decision",
+        ".field--name-field-date-notice",
+        ".field--name-field-date-dcc",
+        ".field--name-field-date-de-decision",
+    ]
+    for sel in act_date_selectors:
+        el = soup.select_one(sel)
+        if el:
+            t = el.find("time")
+            raw = (t.get("datetime") or t.get_text()) if t else (el.get("datetime") or el.get_text())
+            dt = parse_iso_or_french_date(raw)
+            if dt:
+                return dt
+
+    # 2. Formal visible date in <time> within H1
+    h1 = soup.find("h1")
+    if h1:
+        t = h1.find("time")
+        if t:
+            raw = t.get("datetime") or t.get_text()
+            dt = parse_iso_or_french_date(raw)
+            if dt:
+                return dt
+
+    # 3. Date expressed unequivocally in H1 or title ("du DD mois YYYY")
+    h1_text = h1.get_text(separator=" ", strip=True) if h1 else (soup.title.get_text(separator=" ", strip=True) if soup.title else "")
+    m_title = re.search(r"\bdu\s+(\d{1,2}\s+[a-zA-Z\xe9\xfb\xe8\xe0\xf4]+\s+\d{4})\b", h1_text, re.IGNORECASE)
+    if m_title:
+        dt = parse_iso_or_french_date(m_title.group(1))
+        if dt:
+            return dt
+
+    # 4. Explicit Drupal publication field
+    pub_selectors = [
+        ".field--name-field-date-de-publication",
+        ".field--name-field-date",
+        ".field-date-publication",
+        ".date-display-single",
+        ".views-field-created",
+    ]
+    for sel in pub_selectors:
+        el = soup.select_one(sel)
+        if el:
+            t = el.find("time")
+            raw = (t.get("datetime") or t.get_text()) if t else (el.get("datetime") or el.get_text())
+            dt = parse_iso_or_french_date(raw)
+            if dt:
+                return dt
+
+    # 5. Controlled visible text fallback (URL slug du-DD-mois-YYYY, body text)
+    m_slug = re.search(r"\bdu-(\d{1,2}-[a-z\xe9\xfb\xe8\xe0\xf4]+-\d{4})\b", url, re.IGNORECASE)
+    if m_slug:
+        dt = parse_iso_or_french_date(m_slug.group(1).replace("-", " "))
+        if dt:
+            return dt
+
+    m_body = re.search(
+        r"\b(\d{1,2}\s+(?:janvier|fevrier|février|mars|avril|mai|juin|juillet|aout|août|septembre|octobre|novembre|decembre|décembre)\s+\d{4})\b",
+        html[:5000],
+        re.IGNORECASE,
+    )
+    if m_body:
+        dt = parse_iso_or_french_date(m_body.group(1))
+        if dt:
+            return dt
+
+    # 6. Web metadata fallback (Drupal web publication date, NOT official legal date)
+    logger.debug("Falling back to web publication metadata for legal act (url=%s)", url)
+    meta_props = [
+        ("property", "article:published_time"),
+        ("property", "og:published_time"),
+        ("name", "article:published_time"),
+        ("name", "publication_date"),
+        ("name", "dc.date"),
+        ("name", "DC.date"),
+        ("name", "dc.date.issued"),
+        ("name", "date"),
+    ]
+    for attr, val in meta_props:
+        meta = soup.find("meta", attrs={attr: val})
+        if meta and meta.get("content"):
+            dt = parse_iso_or_french_date(meta["content"])
+            if dt:
+                return dt
+
+    for s in soup.find_all("script", type="application/ld+json"):
+        if s.string:
+            try:
+                data = json.loads(s.string)
+                if isinstance(data, dict):
+                    for key in ("datePublished", "dateCreated", "dateModified"):
+                        if data.get(key):
+                            dt = parse_iso_or_french_date(str(data[key]))
+                            if dt:
+                                return dt
+            except Exception:
+                pass
+
+    return None
+
+
+def extract_adlc_communique_date(
+    soup: BeautifulSoup, url: str, html: str
+) -> Optional[datetime]:
+    """Extract published_at for Communiqués de presse.
+
+    Precedence:
     1. Structured machine-readable metadata (meta article:published_time, og:published_time, JSON-LD)
-    2. <time datetime="..."> tag
-    3. Explicit Drupal fields (.field--name-field-date-decision, .field--name-field-date-notice, etc.)
-    4. Controlled visible text fallbacks (URL slug du-..., H1 title regex, document body regex)
+    2. <time datetime="..."> tag or inner text
+    3. Explicit Drupal fields (.field--name-field-date-de-publication, .field--name-field-date, etc.)
+    4. Controlled visible text fallback
     """
     # 1. Structured machine-readable metadata
     meta_props = [
@@ -310,11 +426,9 @@ def extract_adlc_published_at(
 
     # 3. Explicit Drupal fields
     drupal_selectors = [
+        ".field--name-field-date-de-publication",
         ".field--name-field-date-decision",
         ".field--name-field-date-notice",
-        ".field--name-field-date-dcc",
-        ".field--name-field-date-de-publication",
-        ".field--name-field-date-de-decision",
         ".field--name-field-date",
         ".field-date-publication",
         ".date-display-single",
@@ -323,13 +437,15 @@ def extract_adlc_published_at(
     for sel in drupal_selectors:
         el = soup.select_one(sel)
         if el:
-            dt = parse_iso_or_french_date(el.get("datetime") or el.get_text())
+            t = el.find("time")
+            raw = (t.get("datetime") or t.get_text()) if t else (el.get("datetime") or el.get_text())
+            dt = parse_iso_or_french_date(raw)
             if dt:
                 return dt
 
     # 4. Controlled visible text fallback
     # A. URL slug: du-DD-month-YYYY
-    m_slug = re.search(r"\bdu-(\d{1,2}-[a-z\xe9\xfb\xe8\xe0]+-\d{4})\b", url, re.IGNORECASE)
+    m_slug = re.search(r"\bdu-(\d{1,2}-[a-z\xe9\xfb\xe8\xe0\xf4]+-\d{4})\b", url, re.IGNORECASE)
     if m_slug:
         dt = parse_iso_or_french_date(m_slug.group(1).replace("-", " "))
         if dt:
@@ -337,8 +453,8 @@ def extract_adlc_published_at(
 
     # B. H1 or Title regex: du DD month YYYY
     h1 = soup.find("h1")
-    title_text = h1.get_text() if h1 else (soup.title.get_text() if soup.title else "")
-    m_title = re.search(r"\bdu\s+(\d{1,2}\s+[a-zA-Z\xe9\xfb\xe8\xe0]+\s+\d{4})\b", title_text, re.IGNORECASE)
+    title_text = h1.get_text(separator=" ", strip=True) if h1 else (soup.title.get_text(separator=" ", strip=True) if soup.title else "")
+    m_title = re.search(r"\bdu\s+(\d{1,2}\s+[a-zA-Z\xe9\xfb\xe8\xe0\xf4]+\s+\d{4})\b", title_text, re.IGNORECASE)
     if m_title:
         dt = parse_iso_or_french_date(m_title.group(1))
         if dt:
@@ -356,6 +472,33 @@ def extract_adlc_published_at(
             return dt
 
     return None
+
+
+def extract_adlc_published_at(
+    soup: BeautifulSoup,
+    url: str,
+    html: str,
+    is_communique: Optional[bool] = None,
+) -> Optional[datetime]:
+    """Unified entry point for extracting published_at across ADLC publications."""
+    if is_communique is None:
+        path_lower = url.lower()
+        fid_el = soup.select_one(".field--name-field-id, .field-id")
+        official_id = fid_el.get_text(strip=True) if fid_el else ""
+        if not official_id:
+            m_id = ACT_ID_REGEX.search(url)
+            if m_id:
+                official_id = m_id.group(1).upper()
+        is_communique = (
+            ("/communiques-de-presse/" in path_lower
+             or "/article/" in path_lower
+             or "/communique" in path_lower)
+            and not official_id
+        )
+
+    if is_communique:
+        return extract_adlc_communique_date(soup, url, html)
+    return extract_adlc_act_date(soup, url, html)
 
 
 def clean_html_content(raw_html: str) -> str:
@@ -665,20 +808,7 @@ class AutoriteConcurrenceExtractor:
         if not title and soup.title:
             title = re.sub(r"\s*\|\s*Autorité.*$", "", soup.title.get_text()).strip()
 
-        # 3. Extract Published Date (strict hierarchy + temporal fail-closed)
-        published_at = extract_adlc_published_at(soup, canonical_url, html)
-        if published_at is None:
-            logger.warning("Fail-closed: skipping undated ADLC publication '%s' (url=%s)", title, canonical_url)
-            self.metrics.undated_items_skipped += 1
-            return None
-
-        # 4. Strict Lookback Cutoff Filter
-        if published_at < cutoff:
-            self.metrics.outside_lookback += 1
-            return None
-        self.metrics.inside_lookback += 1
-
-        # 5. Determine Act Type and Official ID
+        # 3. Determine Act Type and Official ID
         fid_el = soup.select_one(".field--name-field-id, .field-id")
         official_id = fid_el.get_text(strip=True) if fid_el else ""
         if not official_id:
@@ -693,6 +823,23 @@ class AutoriteConcurrenceExtractor:
             or "/communique" in path_lower
             or not official_id
         )
+
+        # 4. Extract Published Date (separated legal act vs communique precedence)
+        if is_communique and not official_id:
+            published_at = extract_adlc_communique_date(soup, canonical_url, html)
+        else:
+            published_at = extract_adlc_act_date(soup, canonical_url, html)
+
+        if published_at is None:
+            logger.warning("Fail-closed: skipping undated ADLC publication '%s' (url=%s)", title, canonical_url)
+            self.metrics.undated_items_skipped += 1
+            return None
+
+        # 5. Strict Lookback Cutoff Filter
+        if published_at < cutoff:
+            self.metrics.outside_lookback += 1
+            return None
+        self.metrics.inside_lookback += 1
 
         # Handle Communiqués
         if is_communique and not official_id:
