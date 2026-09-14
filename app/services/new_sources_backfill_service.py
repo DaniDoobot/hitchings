@@ -679,28 +679,28 @@ class NewSourcesBackfillService:
                 active_matrix.code,
             )
 
-            # Resolve active v6 prompts
+            # Resolve active prompts
             triage_prompt = (
                 db.query(AnalysisPromptVersion)
                 .filter(
                     AnalysisPromptVersion.code == "observatory_triage",
-                    AnalysisPromptVersion.version == 6,
                     AnalysisPromptVersion.active.is_(True),
                 )
+                .order_by(AnalysisPromptVersion.version.desc())
                 .first()
             )
             deep_prompt = (
                 db.query(AnalysisPromptVersion)
                 .filter(
                     AnalysisPromptVersion.code == "observatory_deep_analysis",
-                    AnalysisPromptVersion.version == 6,
                     AnalysisPromptVersion.active.is_(True),
                 )
+                .order_by(AnalysisPromptVersion.version.desc())
                 .first()
             )
 
             if not triage_prompt or not deep_prompt:
-                err_p = "Active v6 triage or deep prompts not found in database"
+                err_p = "Active triage or deep prompts not found in database"
                 logger.error("[Backfill] %s", err_p)
                 report.guard_triggered = err_p
                 report.status = "failed"

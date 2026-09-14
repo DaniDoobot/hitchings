@@ -44,6 +44,10 @@ from app.services.grounding_validator import (
     validate_triage_evidence,
     validate_deep_evidence,
 )
+from app.services.evidence_block_builder import (
+    build_evidence_block_set,
+    resolve_grounding_evidence_blocks,
+)
 from app.services.source_sufficiency_service import assess_source_sufficiency
 
 logger = logging.getLogger(__name__)
@@ -251,6 +255,11 @@ class AnalysisPipelineService:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _is_evidence_blocks_mode(self, prompt_version: AnalysisPromptVersion) -> bool:
+        """Check if prompt version uses structural evidence blocks."""
+        cfg = getattr(prompt_version, "config", None) or {}
+        return cfg.get("grounding_mode") == "evidence_blocks_v1" or getattr(prompt_version, "version", 0) >= 7
+
     def _record_call(
         self,
         analysis: EntryAnalysis,
@@ -356,6 +365,20 @@ class AnalysisPipelineService:
             triage_call.error_message = str(val_exc)
             return analysis, triage_call, None
 
+        # Resolve evidence block references if v7+ evidence_blocks_v1 mode
+        if self._is_evidence_blocks_mode(triage_prompt):
+            block_set = build_evidence_block_set(entry)
+            try:
+                resolve_grounding_evidence_blocks(payload, block_set, stage="triage")
+            except AnalysisGroundingError as gr_exc:
+                analysis.status = "failed"
+                analysis.reason = str(gr_exc)
+                analysis.completed_at = utc_now()
+                triage_call.status = "failed"
+                triage_call.error_type = "AnalysisGroundingError"
+                triage_call.error_message = str(gr_exc)
+                return analysis, triage_call, None
+
         # Validate grounding evidence if v3 triage
         if getattr(payload, "evidence", None) is not None or getattr(triage_prompt, "response_schema_version", None) == "v3" or triage_prompt.version >= 3:
             try:
@@ -445,6 +468,20 @@ class AnalysisPipelineService:
             return analysis
 
         payload = result.payload
+
+        # Resolve evidence block references if v7+ evidence_blocks_v1 mode
+        if self._is_evidence_blocks_mode(deep_prompt):
+            block_set = build_evidence_block_set(entry)
+            try:
+                resolve_grounding_evidence_blocks(payload, block_set, stage="deep_analysis")
+            except AnalysisGroundingError as gr_exc:
+                analysis.status = "failed"
+                analysis.reason = str(gr_exc)
+                analysis.completed_at = utc_now()
+                deep_call.status = "failed"
+                deep_call.error_type = "AnalysisGroundingError"
+                deep_call.error_message = str(gr_exc)
+                return analysis
 
         # Validate grounding evidence if v3 deep
         if (

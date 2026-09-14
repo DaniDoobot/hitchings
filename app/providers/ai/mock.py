@@ -160,20 +160,39 @@ class MockAIProvider(BaseAIProvider):
         ]
         reason = f"Deterministic evaluation score of {score} based on regulatory keyword analysis."
 
-        # Verbatim quote for strict grounding validation in v3/v6 prompts
-        if entry.title and entry.title.strip():
-            evidence_quote = entry.title.strip()[:40].strip()
-            source_field = "title"
-        elif entry.content and entry.content.strip():
-            evidence_quote = entry.content.strip()[:40].strip()
-            source_field = "content"
+        # Evidence quote generation: check if evidence blocks mode is active (v7+)
+        cfg = getattr(prompt_version, "config", None) or {}
+        is_evidence_blocks = cfg.get("grounding_mode") == "evidence_blocks_v1" or getattr(prompt_version, "version", 0) >= 7
+
+        if is_evidence_blocks:
+            if entry.title and entry.title.strip():
+                evidence_quote = "T0001"
+                source_field = "title"
+            elif entry.content and entry.content.strip():
+                evidence_quote = "C0001"
+                source_field = "content"
+            elif entry.excerpt and entry.excerpt.strip():
+                evidence_quote = "E0001"
+                source_field = "excerpt"
+            else:
+                evidence_quote = "T0001"
+                source_field = "title"
         else:
-            evidence_quote = "Publication"
-            source_field = "title"
+            # Verbatim quote for strict grounding validation in v3/v6 prompts
+            if entry.title and entry.title.strip():
+                evidence_quote = entry.title.strip()[:40].strip()
+                source_field = "title"
+            elif entry.content and entry.content.strip():
+                evidence_quote = entry.content.strip()[:40].strip()
+                source_field = "content"
+            else:
+                evidence_quote = "Publication"
+                source_field = "title"
 
         evidence_list = [GroundingEvidence(source_field=source_field, quote=evidence_quote)]
+        summary_evidence = [GroundingEvidence(source_field=source_field, quote=evidence_quote)]
         key_point_items = [
-            KeyPointV3(point=kp, evidence=evidence_list)
+            KeyPointV3(point=kp, evidence=[GroundingEvidence(source_field=source_field, quote=evidence_quote)])
             for kp in key_points
         ]
 
@@ -185,7 +204,7 @@ class MockAIProvider(BaseAIProvider):
             key_points=key_points,
             reason=reason,
             evidence=evidence_list,
-            summary_evidence=evidence_list,
+            summary_evidence=summary_evidence,
             key_point_items=key_point_items,
         )
 

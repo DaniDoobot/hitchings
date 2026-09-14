@@ -177,30 +177,30 @@ class IncrementalAnalysisService:
             max_cost,
         )
 
-        # Resolve active v6 prompts
+        # Resolve active prompts
         triage_prompt = (
             db.query(AnalysisPromptVersion)
             .filter(
                 AnalysisPromptVersion.code == "observatory_triage",
-                AnalysisPromptVersion.version == 6,
                 AnalysisPromptVersion.active.is_(True),
             )
+            .order_by(AnalysisPromptVersion.version.desc())
             .first()
         )
         if not triage_prompt:
-            raise RuntimeError("Active observatory_triage:v6 prompt not found in database")
+            raise RuntimeError("Active observatory_triage prompt not found in database")
 
         deep_prompt = (
             db.query(AnalysisPromptVersion)
             .filter(
                 AnalysisPromptVersion.code == "observatory_deep_analysis",
-                AnalysisPromptVersion.version == 6,
                 AnalysisPromptVersion.active.is_(True),
             )
+            .order_by(AnalysisPromptVersion.version.desc())
             .first()
         )
         if not deep_prompt:
-            raise RuntimeError("Active observatory_deep_analysis:v6 prompt not found in database")
+            raise RuntimeError("Active observatory_deep_analysis prompt not found in database")
 
         matrix = db.query(TrackingMatrix).filter(TrackingMatrix.status == "active").first()
         if not matrix:

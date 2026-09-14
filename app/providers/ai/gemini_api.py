@@ -25,6 +25,7 @@ from app.schemas.analysis import (
     TriageAnalysisResult,
     TriageAnalysisResultV3,
 )
+from app.services.evidence_block_builder import build_evidence_block_set
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,55 @@ class GeminiAPIProvider(BaseAIProvider):
 
         return section, len(section)
 
+    def _is_evidence_blocks_mode(self, prompt_version: AnalysisPromptVersion) -> bool:
+        """Check if prompt version uses structural evidence blocks."""
+        cfg = getattr(prompt_version, "config", None) or {}
+        return cfg.get("grounding_mode") == "evidence_blocks_v1" or getattr(prompt_version, "version", 0) >= 7
+
+    def _build_document_fields(
+        self,
+        prompt_version: AnalysisPromptVersion,
+        entry: Entry,
+        max_chars: int,
+        stage: str,
+    ) -> tuple[str, str]:
+        """Build title text and content section, formatting with Evidence Block IDs if v7+."""
+        if self._is_evidence_blocks_mode(prompt_version):
+            block_set = build_evidence_block_set(entry)
+            title_text = block_set.render_title() or (entry.title or "(sin título)")
+            content = entry.content or ""
+            excerpt = entry.excerpt or ""
+
+            if content:
+                if len(content) > max_chars:
+                    raise AnalysisInputTooLarge(
+                        f"Entry '{entry.id}' content length ({len(content)} chars) exceeds "
+                        f"{stage} stage maximum ({max_chars} chars). "
+                        f"Chunking is not yet implemented; please handle this entry manually."
+                    )
+                content_section = f"Contenido completo:\n{block_set.render_content()}"
+            elif excerpt:
+                content_section = (
+                    f"[AVISO: Contenido completo no disponible. Se proporciona extracto.]\n"
+                    f"Extracto:\n{block_set.render_content()}"
+                )
+            else:
+                meta_str = ""
+                if entry.raw_metadata:
+                    try:
+                        meta_str = json.dumps(entry.raw_metadata, ensure_ascii=False, indent=2)
+                    except Exception:
+                        meta_str = str(entry.raw_metadata)
+                content_section = (
+                    f"[AVISO: Contenido completo y extracto no disponibles.]\n"
+                    f"Título: {title_text}\n"
+                    f"Metadatos disponibles:\n{meta_str or '(ninguno)'}"
+                )
+            return title_text, content_section
+        else:
+            content_section, _ = self._build_content_section(entry, max_chars, stage)
+            return entry.title or "(sin título)", content_section
+
     def _build_triage_prompt(
         self,
         prompt_version: AnalysisPromptVersion,
@@ -173,7 +223,7 @@ class GeminiAPIProvider(BaseAIProvider):
             (system_text, user_text, input_chars)
         """
         max_chars = self._settings.ANALYSIS_TRIAGE_MAX_INPUT_CHARS
-        content_section, _ = self._build_content_section(entry, max_chars, "triage")
+        title_text, content_section = self._build_document_fields(prompt_version, entry, max_chars, "triage")
 
         topics_block = self._build_topics_block(snapshot)
         topic_codes_list = ", ".join(t.get("code", "") for t in snapshot.get("topics", []))
@@ -210,7 +260,7 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Códigos permitidos: [{topic_codes_list}]\n\n"
             f"[DOCUMENTO A ANALIZAR]\n"
             f"Fuente: {entry.source.name if entry.source else 'Desconocida'}\n"
-            f"Título: {entry.title or '(sin título)'}\n"
+            f"Título: {title_text}\n"
             f"Fecha de publicación: {published_at_str}\n"
             f"Tipo de contenido: {content_type}\n"
             f"URL: {entry.url or '(sin URL)'}\n"
@@ -235,7 +285,7 @@ class GeminiAPIProvider(BaseAIProvider):
             (system_text, user_text, input_chars)
         """
         max_chars = self._settings.ANALYSIS_DEEP_MAX_INPUT_CHARS
-        content_section, _ = self._build_content_section(entry, max_chars, "deep_analysis")
+        title_text, content_section = self._build_document_fields(prompt_version, entry, max_chars, "deep_analysis")
 
         triage_info = triage_result or {}
         primary_topic = triage_info.get("primary_topic_code") or "(sin tema principal)"
@@ -276,7 +326,7 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Motivo de relevancia: {triage_reason}\n\n"
             f"[DOCUMENTO]\n"
             f"Fuente: {entry.source.name if entry.source else 'Desconocida'}\n"
-            f"Título: {entry.title or '(sin título)'}\n"
+            f"Título: {title_text}\n"
             f"Fecha de publicación: {published_at_str}\n"
             f"URL: {entry.url or '(sin URL)'}\n"
             f"{sufficiency_info}\n"
