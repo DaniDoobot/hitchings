@@ -1220,7 +1220,6 @@ def test_15b2_j_unknown_case_type_cannot_fallback_to_institutional_publication()
         "information-and-advice-to-government",
         "oim-project",
         "regulatory-references-and-appeals",
-        "review-of-orders-and-undertakings",
         "procurement",
         "corporate-governance",
     ]
@@ -1247,4 +1246,64 @@ def test_15b2_l_other_sources_unaffected():
     assert EuropeanCommissionDMAExtractor is not None
     assert OECDCompetitionExtractor is not None
     assert GeradinPartnersAdapter is not None
+
+
+# ==============================================================================
+# BLOQUE 15B.2.1: REVIEW OF ORDERS & UNDERTAKINGS VALIDATION TESTS (A through D)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_15b21_a_relevant_remedies_review_included():
+    """A. review-of-orders-and-undertakings is included and mapped to market_investigation."""
+    mapped = map_cma_content_type("review-of-orders-and-undertakings", "cma_case")
+    assert mapped == "market_investigation"
+
+    case_data = {
+        "title": "Strategic review of CMA markets remedies",
+        "content_id": "remedies-review-uuid",
+        "details": {
+            "metadata": {"case_type": "review-of-orders-and-undertakings"},
+            "body": "<p>" + "Review of 33 market remedies under Enterprise Act 2002. " * 50 + "</p>",
+            "change_history": [
+                {"public_timestamp": "2026-08-12T09:05:10Z", "note": "Provisional decision consultation published."},
+            ],
+            "attachments": [],
+        },
+    }
+
+    def handler(request: httpx.Request):
+        return httpx.Response(200, json=case_data)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        extractor = CMAExtractor()
+        src = Source(id=uuid.uuid4(), name=CMA_SOURCE_NAME, type=SourceType.INSTITUTIONAL)
+        entries = await extractor.extract_case_milestones(
+            client=client,
+            source=src,
+            base_path="/cma-cases/strategic-review-of-cma-markets-remedies",
+            cutoff_dt=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.content_type == "market_investigation"
+        assert entry.raw_metadata["legal_basis"] == "Enterprise Act 2002 (Part 4)"
+        assert "Provisional decision consultation" in entry.title
+
+
+def test_15b21_b_consumer_enforcement_still_skipped():
+    """B. consumer-enforcement remains strictly skipped."""
+    assert map_cma_content_type("consumer-enforcement", "cma_case") is None
+
+
+def test_15b21_c_sau_referral_still_skipped():
+    """C. sau-referral remains strictly skipped."""
+    assert map_cma_content_type("sau-referral", "cma_case") is None
+
+
+def test_15b21_d_unknown_and_regulatory_appeals_still_fail_closed():
+    """D. Unknown case types and regulatory appeals remain fail-closed."""
+    assert map_cma_content_type("regulatory-references-and-appeals", "cma_case") is None
+    assert map_cma_content_type("unknown-type-xyz", "cma_case") is None
+    assert map_cma_content_type("procurement", "cma_case") is None
 

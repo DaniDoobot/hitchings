@@ -306,6 +306,7 @@ SUPPORTED_CMA_CASE_TYPES: dict[str, str] = {
     "director-disqualification": "director_disqualification",
     "markets": "market_investigation",
     "digital-markets-unit": "digital_markets",
+    "review-of-orders-and-undertakings": "market_investigation",
 }
 
 
