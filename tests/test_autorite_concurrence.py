@@ -25,6 +25,8 @@ from app.providers.extractors.autorite_concurrence import (
     MAX_PDF_PAGES_FULL,
     MAX_PDF_PAGES_PARTIAL,
     MAX_EXTRACTED_CHARS,
+    extract_adlc_published_at,
+    parse_iso_or_french_date,
 )
 from app.services.source_sufficiency_service import (
     SourceSufficiencyService,
@@ -368,6 +370,7 @@ class TestADLCActIngestion:
 
         unsupported_html = """
         <main>
+          <div class="field--name-field-date-de-publication">10 janvier 2026</div>
           <div class="field--name-field-numero-de-decision">26-UNKNOWN-99</div>
           <h1>Acte administratif interne</h1>
         </main>
@@ -831,3 +834,187 @@ class TestADLCPreviewIntegration:
             assert summary.new_items[0].case_type == "decision"
             assert summary.adlc_metrics is not None
             assert summary.adlc_metrics.get("decisions_d") == 1
+
+
+# ==============================================================================
+# 9. PUBLICATION DATE HARDENING & TEMPORAL FAIL-CLOSED (TESTS A - F)
+# ==============================================================================
+
+class TestADLCPublicationDateHardening:
+    """Test strict deterministic date hierarchy and temporal fail-closed rules."""
+
+    @pytest.mark.asyncio
+    async def test_a_communique_with_valid_html_date(self):
+        """A) Communiqué with valid HTML date -> parses correct date (2026-07-20)."""
+        html = """<!DOCTYPE html>
+        <html>
+        <head>
+          <meta property="article:published_time" content="2026-07-20T14:30:00+02:00" />
+        </head>
+        <body>
+          <h1>Opération de visite inopinée</h1>
+          <div class="field--name-body"><p>""" + "Texte d'enquête inopinée sans décision rattachée. " * 30 + """</p></div>
+        </body>
+        </html>"""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=html)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/visite-inopinee",
+            html=html,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is not None
+        assert res.published_at == datetime(2026, 7, 20, 12, 30, 0, tzinfo=timezone.utc)
+        assert res.published_at.date().isoformat() == "2026-07-20"
+
+    @pytest.mark.asyncio
+    async def test_b_communique_without_date_skipped_fail_closed(self):
+        """B) Communiqué without date -> skipped fail-closed (undated_items_skipped == 1, inside_lookback == 0)."""
+        html = """<!DOCTYPE html>
+        <html>
+        <head><title>Communiqué sans date</title></head>
+        <body>
+          <h1>Communiqué sans date</h1>
+          <div class="field--name-body"><p>""" + "Texte sans aucune date détectable. " * 30 + """</p></div>
+        </body>
+        </html>"""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=html)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/sans-date",
+            html=html,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is None
+        assert extractor.metrics.undated_items_skipped == 1
+        assert extractor.metrics.inside_lookback == 0
+
+    @pytest.mark.asyncio
+    async def test_c_sitemap_lastmod_does_not_become_published_at(self):
+        """C) Sitemap lastmod does NOT become published_at."""
+        # When page HTML has no date, even if sitemap had a lastmod, extractor must reject it as undated
+        html = """<!DOCTYPE html>
+        <html>
+        <head><title>Communiqué test</title></head>
+        <body>
+          <h1>Communiqué test sans date dans HTML</h1>
+          <div class="field--name-body"><p>""" + "Contenu sans date. " * 30 + """</p></div>
+        </body>
+        </html>"""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=html)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/test-no-html-date",
+            html=html,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is None
+        assert extractor.metrics.undated_items_skipped == 1
+        # Also test with extract_adlc_published_at directly
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        assert extract_adlc_published_at(soup, "https://example.com", html) is None
+
+    @pytest.mark.asyncio
+    async def test_d_real_sfr_html_fixture_extracts_date_and_is_full_eligible(self):
+        """D) Real SFR HTML fixture -> extracts 2026-07-15, is autonomous, FULL, eligible."""
+        html = """<!DOCTYPE html>
+        <html lang="fr">
+        <head>
+          <meta charset="utf-8" />
+          <title>Télécoms – SFR : l’Autorité de la concurrence sera l’autorité en charge de l’examen | Autorité de la concurrence</title>
+          <meta property="article:published_time" content="2026-07-15T09:30:45+0200" />
+          <link rel="canonical" href="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/telecoms-sfr-lautorite-de-la-concurrence-sera-lautorite-en-charge-de-lexamen" />
+        </head>
+        <body>
+        <main>
+          <h1>Télécoms – SFR : l’Autorité de la concurrence sera l’autorité en charge de l’examen</h1>
+          <time datetime="2026-07-15T09:30:45+02:00">15 juillet 2026</time>
+          <div class="field--name-body">
+            <p>La Commission européenne a fait droit à la demande de renvoi partiel de l’examen du projet de rachat formulée par les autorités de concurrence.</p>
+            <p>L’Autorité examinera l’impact concurrentiel sur les marchés de gros et de détail des communications électroniques en France métropolitaine et outre-mer.</p>
+            <p>""" + "Ce communiqué autonome expose les orientations et le calendrier de l'instruction sur le marché pertinent. " * 30 + """</p>
+          </div>
+        </main>
+        </body>
+        </html>"""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=html)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/telecoms-sfr-lautorite-de-la-concurrence-sera-lautorite-en-charge-de-lexamen",
+            html=html,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is not None
+        assert res.published_at.date().isoformat() == "2026-07-15"
+        assert res.content_type == "press_release"
+        assert res.raw_metadata.get("act_type") == "communique"
+        assert res.raw_metadata.get("is_autonomous_communique") is True
+
+        entry = Entry(
+            id=uuid.uuid4(),
+            source_id=uuid.uuid4(),
+            external_id=res.external_id,
+            url=res.url,
+            title=res.title,
+            content=res.content,
+            published_at=res.published_at,
+            language=res.language,
+        )
+        sufficiency = SourceSufficiencyService.assess(entry)
+        assert sufficiency.level == SourceSufficiencyLevel.FULL
+        assert sufficiency.level in (SourceSufficiencyLevel.FULL, SourceSufficiencyLevel.PARTIAL)
+
+    @pytest.mark.asyncio
+    async def test_e_derivative_communique_remains_skipped(self):
+        """E) Derivative communiqué remains skipped."""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=HTML_DERIVATIVE_COMMUNIQUE)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/distribution-sanction",
+            html=HTML_DERIVATIVE_COMMUNIQUE,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is None
+        assert extractor.metrics.derivative_communiques_skipped == 1
+
+    @pytest.mark.asyncio
+    async def test_f_autonomous_substantive_communique_remains_included(self):
+        """F) Autonomous substantive communiqué remains included."""
+        extractor = AutoriteConcurrenceExtractor()
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_resp = MagicMock(status_code=200, text=HTML_AUTONOMOUS_COMMUNIQUE)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        res = await extractor.parse_detail_page(
+            client=mock_client,
+            url="https://www.autoritedelaconcurrence.fr/fr/communiques-de-presse/visite-saisie-transports",
+            html=HTML_AUTONOMOUS_COMMUNIQUE,
+            cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        assert res is not None
+        assert res.content_type == "press_release"
+        assert res.raw_metadata.get("act_type") == "communique"
+        assert extractor.metrics.autonomous_communiques_included == 1
+        assert res.raw_metadata.get("is_autonomous_communique") is True
+

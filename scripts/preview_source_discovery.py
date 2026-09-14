@@ -1810,13 +1810,14 @@ class SourceDiscoveryPreviewService:
 
             for raw in raw_entries:
                 pub_dt = raw.published_at
-                if pub_dt:
-                    pub_date = pub_dt.date()
-                    if pub_date > self.current_date:
-                        summary.excluded_future += 1
-                        continue
-                    if pub_date < cutoff_date:
-                        continue
+                if not pub_dt:
+                    continue
+                pub_date = pub_dt.date()
+                if pub_date > self.current_date:
+                    summary.excluded_future += 1
+                    continue
+                if pub_date < cutoff_date:
+                    continue
 
                 summary.inside_lookback += 1
 
@@ -1975,6 +1976,7 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  autonomous_comm_inc    : {am.get('autonomous_communiques_included')}")
             print(f"  institution_comm_excl  : {am.get('institutional_communiques_excluded')}")
             print(f"  unsupported_act_skipped: {am.get('unsupported_act_type_skipped')}")
+            print(f"  undated_items_skipped  : {am.get('undated_items_skipped')}")
             print(f"  pdfs_downloaded        : {am.get('pdfs_downloaded_and_extracted')}")
             print(f"  pdfs_skipped_mergers   : {am.get('pdfs_skipped_simplified_mergers')}")
             print(f"  delayed_pdfs_skipped   : {am.get('delayed_pdfs_skipped_existing_entries')}")
