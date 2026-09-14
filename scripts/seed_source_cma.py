@@ -28,9 +28,15 @@ CMA_SOURCE_NAME = "Competition and Markets Authority (UK)"
 CMA_BASE_URL = "https://www.gov.uk/cma-cases"
 
 
-def seed_cma_source() -> Source:
+from typing import Optional
+from sqlalchemy.orm import Session
+
+def seed_cma_source(db: Optional[Session] = None) -> Source:
     """Create or update the real CMA source idempotently."""
-    db = SessionLocal()
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
     try:
         # 1. Check if a TrackedEntity exists for CMA
         entity = db.execute(
@@ -103,7 +109,8 @@ def seed_cma_source() -> Source:
         return source
 
     finally:
-        db.close()
+        if close_db:
+            db.close()
 
 
 if __name__ == "__main__":

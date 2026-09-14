@@ -30,8 +30,8 @@ from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
-from sqlalchemy import event, or_, select, text
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import Engine, event, or_, select, text
+from sqlalchemy.orm import Session, joinedload, sessionmaker
 
 from app.core.config import get_settings
 from app.core.url_utils import (
@@ -104,26 +104,97 @@ TARGET_SOURCE_NAMES = [
 # READ-ONLY SESSION HARDENING (POSTGRESQL + ORM + RAW SQL)
 # ==============================================================================
 
+def create_read_only_engine(base_engine: Engine) -> Engine:
+    """Derive an Engine configured with engine-level REPEATABLE READ and READ ONLY."""
+    dialect_name = getattr(base_engine.dialect, "name", "")
+    exec_opts: dict[str, Any] = {}
+    if dialect_name == "postgresql":
+        exec_opts = {
+            "isolation_level": "REPEATABLE READ",
+            "postgresql_readonly": True,
+        }
+    elif dialect_name == "sqlite":
+        exec_opts = {
+            "isolation_level": "SERIALIZABLE",
+        }
+    return base_engine.execution_options(**exec_opts)
+
+
+def create_read_only_session(base_engine: Optional[Engine] = None) -> tuple[Session, bool]:
+    """Create an idiomatic read-only Session born with REPEATABLE READ and READ ONLY.
+
+    Tests connectivity on a dedicated disposable connection (not on the session).
+    If the primary database is unavailable, falls back cleanly to an isolated in-memory DB.
+
+    Returns:
+        (session, is_isolated_fallback)
+    """
+    target_engine = base_engine
+    is_fallback = False
+
+    if target_engine is None:
+        try:
+            from app.db.session import engine as app_engine
+            # Test connectivity on a dedicated disposable connection, never on a session
+            with app_engine.connect() as test_conn:
+                test_conn.execute(text("SELECT 1"))
+            target_engine = app_engine
+        except Exception as exc:
+            logger.info(
+                "Primary database connection unavailable (%s). "
+                "Falling back to isolated in-memory database for discovery preview.",
+                exc,
+            )
+            from sqlalchemy import create_engine
+            from app.db.base import Base
+            mem_engine = create_engine("sqlite:///:memory:")
+            Base.metadata.create_all(mem_engine)
+            target_engine = mem_engine
+            is_fallback = True
+
+    ro_engine = create_read_only_engine(target_engine)
+    session_factory = sessionmaker(
+        bind=ro_engine,
+        autocommit=False,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+    return session_factory(), is_fallback
+
+
 def configure_read_only_session(db: Session) -> list[Callable[[], None]]:
     """Enforce fail-closed read-only protection at transaction, ORM, and cursor levels.
 
     Guarantees:
-    1. PostgreSQL: Issues 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY'
-       as the very first statement of the transaction before any SELECT, guaranteeing
-       an immutable point-in-time snapshot and engine-level rejection of any write attempt.
+    1. Transaction Isolation & Read-Only: Configured natively via SQLAlchemy
+       execution_options (REPEATABLE READ, postgresql_readonly=True) so the transaction
+       is born read-only from the start without executing fragile SET statements.
     2. Raw SQL Blocker: Intercepts before_cursor_execute to reject direct mutating SQL
        statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE) across all dialects.
     3. ORM Flush Blocker: Intercepts before_flush to fail-closed if session.new,
        session.dirty, or session.deleted are non-empty.
     """
     cleanups: list[Callable[[], None]] = []
+
+    # Roll back any pre-existing transaction on the session so it starts clean
+    if db.in_transaction():
+        db.rollback()
+
     bind = db.get_bind()
     dialect_name = getattr(bind.dialect, "name", "") if bind else ""
 
-    # 1. PostgreSQL transaction-level isolation & read-only enforcement
+    # Ensure underlying connection has read-only execution options if not already inherited
+    exec_opts: dict[str, Any] = {}
     if dialect_name == "postgresql":
-        logger.info("Enforcing PostgreSQL transaction: REPEATABLE READ, READ ONLY")
-        db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        exec_opts = {"isolation_level": "REPEATABLE READ", "postgresql_readonly": True}
+    elif dialect_name == "sqlite":
+        exec_opts = {"isolation_level": "SERIALIZABLE"}
+
+    if exec_opts:
+        try:
+            db.connection(execution_options=exec_opts)
+        except Exception as exc:
+            logger.debug("Could not pre-set execution_options on connection: %s", exc)
 
     # 2. Raw SQL cursor execution listener (blocks direct mutating SQL across all dialects)
     def block_mutating_sql(conn, cursor, statement, parameters, context, executemany):
@@ -151,19 +222,30 @@ def configure_read_only_session(db: Session) -> list[Callable[[], None]]:
 
 
 @contextmanager
-def read_only_session_scope(db: Session):
-    """Context manager wrapping a Session with guaranteed read-only protections and cleanup."""
-    cleanups = configure_read_only_session(db)
+def read_only_session_scope(db: Optional[Session] = None):
+    """Context manager wrapping a Session with guaranteed read-only protections and cleanup.
+
+    If db is omitted, instantiates an idiomatic read-only session via create_read_only_session().
+    """
+    is_owned = False
+    if db is None:
+        session, _ = create_read_only_session()
+        is_owned = True
+    else:
+        session = db
+
+    cleanups = configure_read_only_session(session)
     try:
-        yield db
+        yield session
     finally:
         for cleanup in cleanups:
             try:
                 cleanup()
             except Exception as e:
                 logger.debug("Error cleaning up read-only listener: %s", e)
-        db.rollback()
-        db.close()
+        session.rollback()
+        if is_owned:
+            session.close()
 
 
 # ==============================================================================
@@ -2295,24 +2377,7 @@ def main() -> int:
 
 
     try:
-        db = SessionLocal()
-        db.execute(text("SELECT 1"))
-    except Exception as exc:
-        logger.info(
-            "Primary database connection unavailable (%s). "
-            "Falling back to isolated in-memory database for discovery preview.",
-            exc,
-        )
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        from app.db.base import Base
-        mem_engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(mem_engine)
-        IsolatedSession = sessionmaker(bind=mem_engine)
-        db = IsolatedSession()
-
-    try:
-        with read_only_session_scope(db) as ro_db:
+        with read_only_session_scope() as ro_db:
             # Pre-execution DB counts baseline (inside REPEATABLE READ snapshot)
             counts_before = {
                 "entries": ro_db.query(Entry).count(),

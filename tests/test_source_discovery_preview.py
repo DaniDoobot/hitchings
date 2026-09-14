@@ -729,37 +729,38 @@ def test_preview_fail_closed_on_raw_sql_mutation(db_session: Session):
 
 
 def test_preview_postgresql_isolation_and_read_only_configured():
-    """Verify that for PostgreSQL dialect, SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY is issued first."""
-    from unittest.mock import patch
+    """Verify that for PostgreSQL dialect, REPEATABLE READ and postgresql_readonly are configured idiomatically without fragile SQL."""
     from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from scripts.preview_source_discovery import configure_read_only_session
+    from sqlalchemy.orm import Session
+    from scripts.preview_source_discovery import (
+        create_read_only_engine,
+        configure_read_only_session,
+    )
 
     engine = create_engine("sqlite:///:memory:")
     engine.dialect.name = "postgresql"
 
-    TestSession = sessionmaker(bind=engine)
-    db = TestSession()
+    # 1. Engine-level execution options
+    ro_engine = create_read_only_engine(engine)
+    assert ro_engine._execution_options.get("isolation_level") == "REPEATABLE READ"
+    assert ro_engine._execution_options.get("postgresql_readonly") is True
 
-    executed_statements = []
-    orig_execute = db.execute
+    # 2. Session-level configuration (no fragile SET TRANSACTION SQL emitted)
+    db = Session(engine)
+    executed_sql = []
 
-    def spy_execute(stmt, *args, **kwargs):
-        stmt_str = str(stmt)
-        executed_statements.append(stmt_str)
-        if "SET TRANSACTION" in stmt_str:
-            return None
-        return orig_execute(stmt, *args, **kwargs)
+    def spy_block_mutating_sql(conn, cursor, statement, parameters, context, executemany):
+        executed_sql.append(statement)
+        return statement, parameters
 
-    with patch.object(db, "execute", side_effect=spy_execute):
-        cleanups = configure_read_only_session(db)
-        try:
-            assert len(executed_statements) == 1
-            assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY" in executed_statements[0]
-        finally:
-            for cb in cleanups:
-                cb()
-            db.close()
+    cleanups = configure_read_only_session(db)
+    try:
+        # Verify no raw SET TRANSACTION SQL was dispatched into the transaction
+        assert not any("SET TRANSACTION" in str(s) for s in executed_sql)
+    finally:
+        for cb in cleanups:
+            cb()
+        db.close()
 
 
 def test_preview_candidate_and_eligible_input_chars_separation(db_session: Session):

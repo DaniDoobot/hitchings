@@ -1229,9 +1229,9 @@ def test_15b2_j_unknown_case_type_cannot_fallback_to_institutional_publication()
         assert mapped != "institutional_publication"
 
 
-def test_15b2_k_weekly_path_still_8_days():
+def test_15b2_k_weekly_path_still_8_days(db_session: Session):
     """K. Weekly cadence and seed default for CMA remains strictly 8 days."""
-    src = seed_cma_source()
+    src = seed_cma_source(db=db_session)
     assert src.config["lookback_days"] == 8
 
 
