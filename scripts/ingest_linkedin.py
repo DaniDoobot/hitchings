@@ -70,6 +70,15 @@ VERIFIED_LINKEDIN_PILOT_ENTITIES = [
         "linkedin_url_verification_method": "public_linkedin_page_identity_and_official_domain",
         "linkedin_declared_website": "commission.europa.eu",
     },
+    {
+        "name": "Miguel Sousa Ferro",
+        "linkedin_url": "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666",
+        "linkedin_entity_type": "person",
+        "linkedin_url_verified": True,
+        "linkedin_url_verified_at": "2026-09-15T16:00:00Z",
+        "linkedin_url_verification_method": "public_profile_identity_and_official_domain",
+        "linkedin_declared_website": "sousaferro.com",
+    },
 ]
 
 

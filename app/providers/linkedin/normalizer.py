@@ -61,18 +61,50 @@ def normalize_linkedin_canonical_url(url: str) -> str:
     return clean
 
 
+def normalize_linkedin_profile_url(url: Optional[str]) -> str:
+    """Normalize a LinkedIn profile or company page URL for strict provenance matching.
+
+    - Lowercases
+    - Strips protocol (http/https)
+    - Normalizes regional/www subdomains (e.g., es., uk., pt., www. -> linkedin.com)
+    - Strips query parameters and fragments
+    - Strips trailing slashes
+    """
+    if not url or not isinstance(url, str):
+        return ""
+    clean = url.strip().lower()
+    clean = re.sub(r"^https?://", "", clean)
+    clean = re.sub(r"^(?:[a-z]{2}\.)?linkedin\.com/", "linkedin.com/", clean)
+    clean = re.sub(r"^www\.linkedin\.com/", "linkedin.com/", clean)
+    clean = clean.split("?")[0].split("#")[0].strip().rstrip("/")
+    return clean
+
+
+def is_author_profile_coherent(
+    author_profile_url: Optional[str],
+    expected_entity_url: Optional[str],
+) -> bool:
+    """Verify that author_profile_url matches the configured entity LinkedIn URL."""
+    norm_author = normalize_linkedin_profile_url(author_profile_url)
+    norm_expected = normalize_linkedin_profile_url(expected_entity_url)
+    if not norm_author or not norm_expected:
+        return False
+    return norm_author == norm_expected
+
+
 def resolve_canonical_identity(
     post_url_or_id: str,
     post_url: Optional[str] = None,
 ) -> Tuple[str, str, Optional[str], str]:
-    """Resolve canonical external_id, canonical_url, activity_id, and provenance_status.
+    """Resolve canonical external_id, canonical_url, activity_id, and identity_status.
 
     Can be called as:
       resolve_canonical_identity(post_url)
       resolve_canonical_identity(item_id, post_url)
 
     Returns:
-        tuple: (external_id, canonical_url, activity_id, provenance_status)
+        tuple: (external_id, canonical_url, activity_id, identity_status)
+        where identity_status is either "activity_id" or "canonical_url_fallback".
     """
     if post_url is None:
         target_url = post_url_or_id
@@ -86,11 +118,11 @@ def resolve_canonical_identity(
 
     if activity_id:
         external_id = f"urn:li:activity:{activity_id}"
-        provenance_status = "verified"
+        identity_status = "activity_id"
     else:
         # Deterministic fallback based on normalized canonical URL
         url_hash = hashlib.sha256(canon_url.encode("utf-8")).hexdigest()[:24]
         external_id = f"linkedin:post:{url_hash}"
-        provenance_status = "fallback"
+        identity_status = "canonical_url_fallback"
 
-    return external_id, canon_url, activity_id, provenance_status
+    return external_id, canon_url, activity_id, identity_status

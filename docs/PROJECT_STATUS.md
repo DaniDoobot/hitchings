@@ -48,19 +48,27 @@ CLOSED & IMPLEMENTED
 - Scope guard fail-closed: exclusión automática de causas USAO/no-antitrust.
 - Identidad canónica: `doj_atr:node:{node_id}` o `doj_atr:{year}:{month}:{slug}`
 
-## LinkedIn Discovery Hardening (Bloque 9C)
+## LinkedIn Discovery Hardening (Bloque 9C / Provenance Closure)
 
 HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
 - Discovery status: `LINKEDIN_DISCOVERY_ENABLED=false` (sin llamadas reales ni consumo de créditos).
-- Normalizador canónico (`app/providers/linkedin/normalizer.py`):
-  - Extracción de Activity ID numérico de longitud arbitraria (`urn:li:activity:...`, `/feed/update/...`, `/posts/...-activity-...`).
-  - Fallback determinista `linkedin:post:{sha256}` con trazado `provenance_status="fallback"`.
-  - Normalización de `canonical_url` (stripping de querystrings/tracking, fragmentos y trailing slashes).
-- Gating de autoría fail-closed: posts con autores vacíos o genéricos ("LinkedIn Author", "Unknown") o sin entidad trackeada son descartados sin persistir.
-- Desacoplamiento estricto de procedencia:
-  - Autor editorial = Persona u organización (`author_name`).
-  - Proveedor técnico = Bright Data / Apify (`retrieval_provider`, nunca visible al usuario).
-  - Origen / Source = LinkedIn.
+- Semántica de Identidad vs Procedencia:
+  - `identity_status`: `"activity_id"` (ID numérico extraído canónicamente) o `"canonical_url_fallback"` (hash determinista sha256 sobre URL canónica).
+  - `provenance_status`: `"verified"` o `"unverified"`. No se marca `provenance_status="verified"` únicamente por tener `activity_id`.
+  - Requisitos de `provenance_status="verified"`:
+    1. `TrackedEntity` inequívoca en base de datos.
+    2. `author_name` fiable (no vacío, no genérico/placeholder).
+    3. `author_profile_url` coherente con la URL configurada para esa entidad en `TrackedEntity.metadata_["linkedin_url"]` (normalizando subdominios regionales, query params y trailing slashes).
+  - Gating de autoría fail-closed: posts con autores no verificables o URLs incoherentes son descartados sin persistir.
+- Gestión de proveedor técnico (Legacy Provider):
+  - Nuevas escrituras: persisten ÚNICAMENTE `raw_metadata["retrieval_provider"]` (Bright Data / Apify). Se prohíbe escribir la clave duplicada `raw_metadata["provider"]`.
+  - Compatibilidad de lectura: `LinkedInIngestionService.get_retrieval_provider(entry)` resuelve con fallback retrocompatible `meta.get("retrieval_provider") or meta.get("provider")`.
+- Perfiles de Entidades Piloto Verificados (5):
+  - Organizaciones (4): Hausfeld, ESKARIAM, CNMC, European Commission.
+  - Personas (1): Miguel Sousa Ferro (`https://www.linkedin.com/in/miguel-sousa-ferro-b7551666`).
+- Perfiles Personales Pendientes (23):
+  - Por homónimos, falta de URL indexada en abierto o ausencia de enlace directo verificado sin login:
+    Pablo Ibáñez Colomo, Francisco Marcos, Pinar Akman, Damien Geradin, Thomas Höppner, Assimakis Komninos, Julia Suderow, Fernando Díez Estella, Antonio Robles Martín-Laborda, Alba Ribera Martínez, Pierre Bichet, Christian Bergqvist, Emilija Berzanskaite, Jaime Concheiro, Adoni Llosa, Eduardo Pastor, Pedro Suárez, Javier Pérez, Joost Fanoy, Stefan Tuinenga, Thomas Funke, James Hain-Cole, Lena Hornkohl.
 - Deduplicación cross-provider: orden estricto `external_id -> canonical_url -> fallback`.
 - UI portal (`ObservatoryPage` y `EntryDetailPage`):
   - Cabecera: `LinkedIn · {author_name}` acompañado de icono contextual (`Building2` para organización, `User` para persona).

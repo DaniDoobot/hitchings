@@ -33,6 +33,7 @@ from app.providers.linkedin.normalizer import (
     extract_linkedin_activity_id,
     normalize_linkedin_canonical_url,
     resolve_canonical_identity,
+    is_author_profile_coherent,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,7 +268,7 @@ class LinkedInIngestionService:
                         report.stopped_by_cap = True
                         break
 
-                    # Skip if no reliable author or generic placeholder or no tracked entity
+                    # Strict Provenance Verification (Section 1: TrackedEntity, author_name, and author_profile_url coherence)
                     author_name = (post.author_name or "").strip()
                     if (
                         not author_name
@@ -281,8 +282,20 @@ class LinkedInIngestionService:
                         )
                         continue
 
-                    # Resolve canonical identity & normalized URL
-                    external_id, canonical_url, activity_id, provenance_status = resolve_canonical_identity(
+                    if not is_author_profile_coherent(post.author_profile_url, job.linkedin_url):
+                        logger.warning(
+                            "Skipping LinkedIn post with unverified authorship provenance: author_profile_url=%r does not match configured entity url=%r for entity %r",
+                            post.author_profile_url,
+                            job.linkedin_url,
+                            job.entity_name,
+                        )
+                        continue
+
+                    # Authorship provenance is strictly verified
+                    provenance_status = "verified"
+
+                    # Resolve canonical identity & normalized URL (returns identity_status: 'activity_id' | 'canonical_url_fallback')
+                    external_id, canonical_url, activity_id, identity_status = resolve_canonical_identity(
                         post.provider_item_id, post.linkedin_post_url
                     )
 
@@ -328,16 +341,18 @@ class LinkedInIngestionService:
 
                     # Metadata enrichment & Strict Provenance (Sections 17, 21, 22)
                     enriched_meta = dict(post.raw_metadata or {})
+                    # Ensure legacy 'provider' key is NOT written to new entries (Requirement 2)
+                    enriched_meta.pop("provider", None)
                     enriched_meta.update({
                         "retrieval_provider": post.provider,
-                        "provider": post.provider,  # Backward compatibility
+                        "identity_status": identity_status,
+                        "provenance_status": provenance_status,
                         "author_name": author_name,
                         "author_type": author_type,
                         "author_profile_url": post.author_profile_url,
                         "tracked_entity_id": str(job.tracked_entity_id),
                         "tracked_entity_name": job.entity_name,
                         "linkedin_activity_id": activity_id,
-                        "provenance_status": provenance_status,
                         "engagement": post.engagement,
                         "fallback_used": used_fallback_for_job,
                     })
@@ -506,3 +521,10 @@ class LinkedInIngestionService:
             )
             db.add(usage)
         db.flush()
+
+    @staticmethod
+    def get_retrieval_provider(entry: Entry) -> Optional[str]:
+        """Read retrieval provider from entry metadata with backward-compatible fallback to legacy 'provider'."""
+        meta = entry.raw_metadata or {}
+        return meta.get("retrieval_provider") or meta.get("provider")
+

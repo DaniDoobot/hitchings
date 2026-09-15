@@ -494,7 +494,8 @@ def test_ingestion_creates_canonical_source_and_entries(db_session: Session, mon
     assert first_entry.title.startswith("LinkedIn — Hausfeld — 2026-03-")
     assert first_entry.raw_metadata["tracked_entity_id"] == str(entity.id)
     assert first_entry.raw_metadata["tracked_entity_name"] == "Hausfeld"
-    assert first_entry.raw_metadata["provider"] == "brightdata"
+    assert first_entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in first_entry.raw_metadata
     assert first_entry.raw_metadata["fallback_used"] is False
 
     # Verify NO EntryAnalysis created (0 Gemini!)
@@ -574,7 +575,8 @@ def test_primary_timeout_triggers_fallback(db_session: Session, monkeypatch):
     assert report.failed_jobs == 0
 
     entry = db_session.execute(select(Entry)).scalars().first()
-    assert entry.raw_metadata["provider"] == "apify"
+    assert entry.raw_metadata["retrieval_provider"] == "apify"
+    assert "provider" not in entry.raw_metadata
     assert entry.raw_metadata["fallback_used"] is True
     assert "timed out" in entry.raw_metadata["fallback_reason"].lower()
 
@@ -700,19 +702,19 @@ def test_normalizer_extract_activity_id_and_canonical_url():
     assert clean_url == "https://www.linkedin.com/posts/lawfirm_antitrust-activity-7123456789"
 
     # 3. Canonical identity resolution with activity ID
-    ext_id, canon_url, act_id, status = resolve_canonical_identity(dirty_url)
+    ext_id, canon_url, act_id, identity_status = resolve_canonical_identity(dirty_url)
     assert ext_id == "urn:li:activity:7123456789"
     assert canon_url == "https://www.linkedin.com/posts/lawfirm_antitrust-activity-7123456789"
     assert act_id == "7123456789"
-    assert status == "verified"
+    assert identity_status == "activity_id"
 
     # 4. Fallback identity when activity ID cannot be extracted
     generic_url = "https://www.linkedin.com/pulse/some-article-slug?trk=pulse-article"
-    f_ext_id, f_canon_url, f_act_id, f_status = resolve_canonical_identity(generic_url)
+    f_ext_id, f_canon_url, f_act_id, f_identity_status = resolve_canonical_identity(generic_url)
     assert f_ext_id.startswith("linkedin:post:")
     assert f_canon_url == "https://www.linkedin.com/pulse/some-article-slug"
     assert f_act_id is None
-    assert f_status == "fallback"
+    assert f_identity_status == "canonical_url_fallback"
 
 
 def test_cross_provider_dedupe_brightdata_and_apify_different_urls(db_session: Session, monkeypatch):
@@ -752,6 +754,8 @@ def test_cross_provider_dedupe_brightdata_and_apify_different_urls(db_session: S
     assert entry1.author == "Cuatrecasas"
     assert entry1.raw_metadata["author_type"] == "organization"
     assert entry1.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in entry1.raw_metadata  # Strict Requirement 2: legacy key not written to new entries
+    assert entry1.raw_metadata["identity_status"] == "activity_id"
     assert entry1.raw_metadata["provenance_status"] == "verified"
     assert entry1.raw_metadata["linkedin_activity_id"] == "7299881122334455667"
     assert "?" not in entry1.url
@@ -839,6 +843,192 @@ def test_missing_or_generic_author_fails_closed(db_session: Session, monkeypatch
     valid_entry = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:444444444")).scalar_one()
     assert valid_entry.author == "Uría Menéndez"
     assert valid_entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in valid_entry.raw_metadata
+    assert valid_entry.raw_metadata["identity_status"] == "activity_id"
+    assert valid_entry.raw_metadata["provenance_status"] == "verified"
     assert "brightdata" not in valid_entry.author.lower()
+
+
+def test_incoherent_author_profile_url_skips_fail_closed(db_session: Session, monkeypatch):
+    """Verify that a post with author_profile_url mismatched from the tracked entity URL is skipped (fail-closed)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+
+    matrix = TrackingMatrix(code="TEST-INCOHERENT", name="Test Incoherent", status="active")
+    entity = TrackedEntity(
+        display_name="Garrigues",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/garrigues"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Post has legitimate author name but author profile URL points to a different entity
+    impostor_post = [{
+        "url": "https://www.linkedin.com/posts/activity-999999999",
+        "id": "999999999",
+        "author": "Garrigues",
+        "use_url": "https://www.linkedin.com/company/someone-else-entirely",  # Incoherent with Garrigues
+        "post_text": "Post claiming to be from Garrigues but from different company page.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=impostor_post)))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+
+    # Must be skipped fail-closed: 0 entries created
+    assert report.entries_created == 0
+    assert report.duplicates == 0
+
+
+def test_identity_and_provenance_separation_with_fallback(db_session: Session, monkeypatch):
+    """Verify that a post with verified author but without numeric activity ID gets fallback identity and verified provenance."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+
+    matrix = TrackingMatrix(code="TEST-IDENTITY-SEP", name="Test Sep", status="active")
+    entity = TrackedEntity(
+        display_name="Miguel Sousa Ferro",
+        entity_type="person",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Post with coherent author profile URL but non-activity URL structure (no numeric ID)
+    fallback_post = [{
+        "url": "https://www.linkedin.com/pulse/eu-competition-law-briefing-2026?trk=pulse-article",
+        "id": "",  # No numeric activity ID
+        "author": "Miguel Sousa Ferro",
+        "use_url": "https://pt.linkedin.com/in/miguel-sousa-ferro-b7551666/",  # Regional subdomain + trailing slash -> coherent
+        "post_text": "New developments in private enforcement of competition law.",
+        "date_posted": "2026-03-15T11:00:00Z",
+        "account_type": "Person",
+    }]
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=fallback_post)))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+
+    assert report.entries_created == 1
+    entry = db_session.execute(select(Entry).where(Entry.author == "Miguel Sousa Ferro")).scalar_one()
+
+    # Identity status is canonical_url_fallback, but provenance status is verified
+    assert entry.raw_metadata["identity_status"] == "canonical_url_fallback"
+    assert entry.raw_metadata["provenance_status"] == "verified"
+    assert entry.external_id.startswith("linkedin:post:")
+    assert entry.raw_metadata["linkedin_activity_id"] is None
+    assert entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in entry.raw_metadata  # Strict Requirement 2
+
+
+def test_legacy_provider_read_compatibility(db_session: Session):
+    """Verify that get_retrieval_provider reads legacy 'provider' when 'retrieval_provider' is absent."""
+    service = LinkedInIngestionService()
+    source = service.get_or_create_linkedin_source(db_session)
+    db_session.commit()
+
+    # 1. Historical entry with only legacy 'provider'
+    legacy_entry = Entry(
+        source_id=source.id,
+        external_id="urn:li:activity:1000000001",
+        url="https://www.linkedin.com/posts/legacy-1",
+        title="Legacy Entry",
+        author="Historical Author",
+        raw_metadata={"provider": "brightdata"},
+    )
+    db_session.add(legacy_entry)
+
+    # 2. Modern entry with only 'retrieval_provider'
+    modern_entry = Entry(
+        source_id=source.id,
+        external_id="urn:li:activity:1000000002",
+        url="https://www.linkedin.com/posts/modern-2",
+        title="Modern Entry",
+        author="Modern Author",
+        raw_metadata={"retrieval_provider": "apify"},
+    )
+    db_session.add(modern_entry)
+    db_session.commit()
+
+    assert LinkedInIngestionService.get_retrieval_provider(legacy_entry) == "brightdata"
+    assert LinkedInIngestionService.get_retrieval_provider(modern_entry) == "apify"
+
+
+def test_new_writes_never_include_legacy_provider_key(db_session: Session, monkeypatch):
+    """Verify that raw_metadata on newly ingested entries never contains the legacy 'provider' key."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+
+    matrix = TrackingMatrix(code="TEST-NO-LEGACY-WRITE", name="Test No Legacy Write", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    post_data = [{
+        "url": "https://www.linkedin.com/posts/hausfeld-activity-888888888",
+        "id": "888888888",
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "Antitrust litigation update.",
+        "date_posted": "2026-03-15T12:00:00Z",
+        # Even if raw data somehow had a 'provider' key:
+        "provider": "brightdata",
+    }]
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=post_data)))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+
+    assert report.entries_created == 1
+    entry = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:888888888")).scalar_one()
+    assert "retrieval_provider" in entry.raw_metadata
+    assert entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in entry.raw_metadata
+
+
+def test_is_author_profile_coherent_edge_cases():
+    """Verify is_author_profile_coherent handles subdomains, casing, slashes, query params, and mismatches."""
+    from app.providers.linkedin.normalizer import is_author_profile_coherent
+
+    # Matching subdomains and casing
+    assert is_author_profile_coherent(
+        "https://es.linkedin.com/company/hausfeld/",
+        "https://www.linkedin.com/company/hausfeld"
+    ) is True
+
+    assert is_author_profile_coherent(
+        "https://pt.linkedin.com/in/miguel-sousa-ferro-b7551666?trk=public_profile",
+        "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"
+    ) is True
+
+    # Trailing slashes
+    assert is_author_profile_coherent(
+        "https://linkedin.com/company/eskariam/",
+        "https://www.linkedin.com/company/eskariam"
+    ) is True
+
+    # Incoherent / Mismatch
+    assert is_author_profile_coherent(
+        "https://www.linkedin.com/company/competitor",
+        "https://www.linkedin.com/company/hausfeld"
+    ) is False
+
+    # Empty / None
+    assert is_author_profile_coherent("", "https://www.linkedin.com/company/hausfeld") is False
+    assert is_author_profile_coherent(None, "https://www.linkedin.com/company/hausfeld") is False
+    assert is_author_profile_coherent("https://www.linkedin.com/company/hausfeld", None) is False
+
 
 
