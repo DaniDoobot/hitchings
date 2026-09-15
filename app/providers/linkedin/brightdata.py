@@ -19,6 +19,46 @@ from app.providers.linkedin.base import (
 logger = logging.getLogger(__name__)
 
 
+def resolve_discover_by(
+    target_url: str,
+    entity_type: Optional[str] = None,
+) -> str:
+    """Determine the Bright Data discover_by parameter based on entity type and target URL.
+
+    Returns:
+        'company_url' for organizations / companies
+        'profile_url' for individuals / persons
+    """
+    if entity_type:
+        norm_type = entity_type.strip().lower()
+        if norm_type in ("organization", "institution", "company"):
+            return "company_url"
+        if norm_type in ("person", "individual"):
+            return "profile_url"
+
+    clean_url = target_url.strip().lower()
+    if "/company/" in clean_url:
+        return "company_url"
+    return "profile_url"
+
+
+def build_discovery_payload(
+    target_url: str,
+    entity_type: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """Build the discovery input payload for Bright Data dataset API.
+
+    Rules:
+    - organization: [{"url": target_url}]
+    - person: [{"url": target_url, "only_authored_posts": True}]
+    """
+    clean_url = target_url.strip()
+    discover_by = resolve_discover_by(clean_url, entity_type)
+    if discover_by == "company_url":
+        return [{"url": clean_url}]
+    return [{"url": clean_url, "only_authored_posts": True}]
+
+
 class BrightDataLinkedInProvider(BaseLinkedInProvider):
     """Primary provider for LinkedIn post discovery using Bright Data's Web Scraper API."""
 
@@ -37,6 +77,7 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         limit: int = 5,
         entity_name: Optional[str] = None,
         entity_id: Optional[uuid.UUID] = None,
+        entity_type: Optional[str] = None,
     ) -> list[LinkedInDiscoveredPost]:
         """Fetch posts for a target LinkedIn URL via Bright Data Dataset API."""
         token = self.settings.brightdata_token
@@ -47,26 +88,24 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
 
         endpoint = self.settings.BRIGHTDATA_LINKEDIN_ENDPOINT
         dataset_id = self.settings.BRIGHTDATA_LINKEDIN_DATASET_ID
+        discover_by = resolve_discover_by(target_url, entity_type)
 
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "User-Agent": "HITCHINGS/1.0",
         }
-        params = {"dataset_id": dataset_id}
-        payload = {
-            "input": [
-                {
-                    "url": target_url,
-                    "only_authored_posts": True,
-                }
-            ]
+        params = {
+            "dataset_id": dataset_id,
+            "discover_by": discover_by,
         }
+        payload = build_discovery_payload(target_url, entity_type)
 
         logger.info(
-            "Bright Data discovery dispatching target_url=%s (dataset=%s, limit=%d)",
+            "Bright Data discovery dispatching target_url=%s (dataset=%s, discover_by=%s, limit=%d)",
             target_url,
             dataset_id,
+            discover_by,
             limit,
         )
 

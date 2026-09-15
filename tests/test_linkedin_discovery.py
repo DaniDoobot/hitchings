@@ -22,7 +22,11 @@ from app.providers.linkedin.base import (
     LinkedInTimeoutError,
     LinkedInQuotaExceededError,
 )
-from app.providers.linkedin.brightdata import BrightDataLinkedInProvider
+from app.providers.linkedin.brightdata import (
+    BrightDataLinkedInProvider,
+    build_discovery_payload,
+    resolve_discover_by,
+)
 from app.providers.linkedin.apify import ApifyLinkedInProvider
 from app.services.linkedin_discovery_planner import (
     LinkedInDiscoveryPlanner,
@@ -95,9 +99,73 @@ def test_brightdata_provider_success(monkeypatch):
 
     # 1. Verify request format
     assert "mock_dataset_123" in captured_request["url"]
+    assert "discover_by=company_url" in captured_request["url"]
     assert captured_request["headers"]["authorization"] == "Bearer mock-token-xyz"
-    assert captured_request["body"]["input"][0]["url"] == "https://www.linkedin.com/company/hausfeld"
-    assert captured_request["body"]["input"][0]["only_authored_posts"] is True
+    assert captured_request["body"] == [{"url": "https://www.linkedin.com/company/hausfeld"}]
+    assert "only_authored_posts" not in captured_request["body"][0]
+
+
+def test_brightdata_build_discovery_payload_and_params():
+    """Verify build_discovery_payload and resolve_discover_by contracts for org vs person."""
+    # 1. Organization / Company: discover_by=company_url, NO only_authored_posts
+    org_url = "https://www.linkedin.com/company/hausfeld"
+    assert resolve_discover_by(org_url, entity_type="organization") == "company_url"
+    assert resolve_discover_by(org_url) == "company_url"
+
+    payload_org = build_discovery_payload(org_url, entity_type="organization")
+    assert payload_org == [{"url": org_url}]
+    assert "only_authored_posts" not in payload_org[0]
+
+    # Without explicit entity_type (inferred by /company/ in URL)
+    payload_org_inferred = build_discovery_payload(org_url)
+    assert payload_org_inferred == [{"url": org_url}]
+    assert "only_authored_posts" not in payload_org_inferred[0]
+
+    # 2. Person: discover_by=profile_url, WITH only_authored_posts=True
+    person_url = "https://www.linkedin.com/in/alex-hitchings"
+    assert resolve_discover_by(person_url, entity_type="person") == "profile_url"
+    assert resolve_discover_by(person_url) == "profile_url"
+
+    payload_person = build_discovery_payload(person_url, entity_type="person")
+    assert payload_person == [{"url": person_url, "only_authored_posts": True}]
+    assert payload_person[0]["only_authored_posts"] is True
+
+    # Without explicit entity_type (inferred by /in/ in URL)
+    payload_person_inferred = build_discovery_payload(person_url)
+    assert payload_person_inferred == [{"url": person_url, "only_authored_posts": True}]
+    assert payload_person_inferred[0]["only_authored_posts"] is True
+
+
+def test_brightdata_provider_person_url_success(monkeypatch):
+    """Verify Bright Data provider builds correct request with profile_url and only_authored_posts for person."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "mock_dataset_123")
+
+    captured_request = {}
+
+    def mock_transport_handler(request: httpx.Request):
+        captured_request["url"] = str(request.url)
+        captured_request["headers"] = dict(request.headers)
+        captured_request["body"] = json.loads(request.read().decode())
+        return httpx.Response(200, json=MOCK_BRIGHTDATA_POSTS)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+
+    provider = BrightDataLinkedInProvider()
+    posts = provider.discover_posts(
+        target_url="https://www.linkedin.com/in/alex-hitchings",
+        client=client,
+        limit=5,
+        entity_name="Alex Hitchings",
+        entity_type="person",
+    )
+
+    assert "mock_dataset_123" in captured_request["url"]
+    assert "discover_by=profile_url" in captured_request["url"]
+    assert captured_request["body"] == [{"url": "https://www.linkedin.com/in/alex-hitchings", "only_authored_posts": True}]
+    assert captured_request["body"][0]["only_authored_posts"] is True
+    assert len(posts) == 2
 
     # 2. Verify parsed posts
     assert len(posts) == 2
