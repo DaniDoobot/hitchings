@@ -246,7 +246,7 @@ def test_source_failure_isolation(
     now = datetime.now(timezone.utc)
 
     # Make CURIA fail while other sources succeed
-    def side_effect(source_id, db):
+    def side_effect(source_id, db, *args, **kwargs):
         if source_id == test_sources["curia"].id:
             raise ConnectionError("CURIA server timeout 504")
         return IngestionResult(
@@ -416,3 +416,220 @@ def test_scheduler_loop_disabled_idles():
     with patch("app.scheduler.get_settings", return_value=settings):
         # Should return quickly when stop_event is set without calling any services
         run_scheduler_loop(stop_event=stop_event)
+
+
+def test_scheduler_default_lookback_is_8(
+    db_session: Session, active_matrix: TrackingMatrix
+):
+    """Weekly refresh uses exactly lookback=8 by default when not specified."""
+    service = WeeklyRefreshService()
+    report = service.run_weekly_refresh(
+        db=db_session,
+        lookback_days=None,
+        confirm_real_calls=False,
+    )
+    assert report.lookback_days == 8
+
+
+def test_lookback_propagates_to_extractor_and_preserves_source_config(
+    db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
+):
+    """Lookback propagates to native and direct web providers, and Source.config is never mutated."""
+    source_cnmc = test_sources["cnmc"]
+    initial_config = dict(source_cnmc.config) if source_cnmc.config else None
+
+    mock_ingest = MagicMock()
+    mock_ingest.ingest_source.return_value = IngestionResult(
+        ingestion_run_id=uuid.uuid4(),
+        source_id=source_cnmc.id,
+        status="success",
+        fetched=1,
+        created=0,
+        duplicates=1,
+        started_at=datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc),
+    )
+
+    mock_dw = MagicMock()
+    mock_dw.execute_ingestion.return_value = DirectWebIngestionReport(
+        is_dry_run=False,
+        total_discovered=1,
+        total_created=0,
+        total_duplicates=1,
+    )
+
+    service = WeeklyRefreshService(
+        ingestion_service=mock_ingest,
+        direct_web_service=mock_dw,
+    )
+
+    report = service.run_weekly_refresh(
+        db=db_session,
+        lookback_days=8,
+        confirm_real_calls=True,
+        sources_filter=["CNMC Test", "Chillin'Competition Test"],
+    )
+
+    # 1. Verify lookback was propagated to ingest_source
+    mock_ingest.ingest_source.assert_called_once_with(
+        source_cnmc.id,
+        db_session,
+        lookback_days=8,
+    )
+
+    # 2. Verify lookback was propagated to direct_web_service.execute_ingestion
+    mock_dw.execute_ingestion.assert_called_once()
+    _, dw_kwargs = mock_dw.execute_ingestion.call_args
+    assert dw_kwargs.get("lookback_days") == 8
+
+    # 3. Verify Source.config was not mutated
+    db_session.refresh(source_cnmc)
+    assert source_cnmc.config == initial_config
+
+
+@pytest.mark.asyncio
+async def test_native_provider_and_ingestion_service_pass_lookback_to_extractor(
+    db_session: Session, test_sources: dict[str, Source]
+):
+    """IngestionService and NativeProvider pass lookback_days down without altering Source.config."""
+    from app.services.ingestion_service import IngestionService
+    from app.providers.native import NativeProvider
+    from app.providers.base import RawEntryData
+
+    source_ec = test_sources["ec"]
+    initial_config = dict(source_ec.config) if source_ec.config else None
+
+    ingest_svc = IngestionService()
+    native_provider = ingest_svc.get_provider("native")
+
+    captured_kwargs = {}
+
+    async def mock_extract(client, source, **kwargs):
+        captured_kwargs.update(kwargs)
+        return [
+            RawEntryData(
+                source_id=source.id,
+                external_id=f"mock-{uuid.uuid4().hex[:6]}",
+                url=f"https://example.com/test-{uuid.uuid4().hex[:6]}",
+                title="Mock European Commission News",
+                published_at=datetime.now(timezone.utc),
+                content="Sample content for lookback test " * 20,
+            )
+        ]
+
+    with patch("app.providers.extractors.european_commission.EuropeanCommissionExtractor.extract", side_effect=mock_extract):
+        result = await ingest_svc.ingest_source(
+            source_id=source_ec.id,
+            db=db_session,
+            lookback_days=8,
+        )
+
+    assert result.status == "success"
+    assert captured_kwargs.get("lookback_days") == 8
+    db_session.refresh(source_ec)
+    assert source_ec.config == initial_config
+
+
+def test_sufficiency_gating_full_analyzed_partial_insufficient_skipped(
+    db_session: Session, active_matrix: TrackingMatrix
+):
+    """FULL is analyzed; PARTIAL and INSUFFICIENT are strictly omitted from analysis."""
+    now = datetime.now(timezone.utc)
+    source = Source(
+        id=uuid.uuid4(),
+        name="DOJ Antitrust Division Test",
+        type=SourceType.WEBSITE,
+        provider="native",
+        url="https://www.justice.gov/atr",
+        active=True,
+    )
+    db_session.add(source)
+    db_session.flush()
+
+    # Entry 1: FULL (>= 1500 chars)
+    entry_full = Entry(
+        id=uuid.uuid4(),
+        source_id=source.id,
+        external_id=f"full-{uuid.uuid4().hex[:6]}",
+        url=f"https://justice.gov/full-{uuid.uuid4().hex[:6]}",
+        title="DOJ Antitrust Full Statement FULL",
+        content="Contenido extenso oficial del comunicado con fundamentos jurídicos detallados. " * 30,  # ~2400 chars
+        published_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Entry 2: PARTIAL (300-1499 chars)
+    entry_partial = Entry(
+        id=uuid.uuid4(),
+        source_id=source.id,
+        external_id=f"partial-{uuid.uuid4().hex[:6]}",
+        url=f"https://justice.gov/partial-{uuid.uuid4().hex[:6]}",
+        title="DOJ Antitrust Partial Statement PARTIAL",
+        content="Resumen breve de la actuación administrativa sin texto completo de la resolución. " * 6,  # ~500 chars
+        published_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    # Entry 3: INSUFFICIENT (< 300 chars)
+    entry_insufficient = Entry(
+        id=uuid.uuid4(),
+        source_id=source.id,
+        external_id=f"insuff-{uuid.uuid4().hex[:6]}",
+        url=f"https://justice.gov/insuff-{uuid.uuid4().hex[:6]}",
+        title="Titular sin contenido INSUFFICIENT",
+        content="Titular corto.",  # 14 chars
+        published_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    db_session.add_all([entry_full, entry_partial, entry_insufficient])
+    db_session.commit()
+
+    from app.services.incremental_analysis_planner import IncrementalAnalysisPlanner
+    planner = IncrementalAnalysisPlanner(db_session)
+
+    cand_full = planner.evaluate_entry(entry_full)
+    cand_partial = planner.evaluate_entry(entry_partial)
+    cand_insuff = planner.evaluate_entry(entry_insufficient)
+
+    # Assert planner evaluation
+    assert cand_full.reason == "eligible"
+    assert cand_full.sufficiency == "full"
+
+    assert cand_partial.reason == "partial"
+    assert cand_partial.sufficiency == "partial"
+    assert cand_partial.estimated_stage_plan == "skip_partial"
+
+    assert cand_insuff.reason == "insufficient"
+    assert cand_insuff.sufficiency == "insufficient"
+    assert cand_insuff.estimated_stage_plan == "skip_insufficient"
+
+    # Assert scheduler _analyze_new_entries only analyzes the FULL entry
+    mock_analysis_svc = MagicMock()
+    from app.services.incremental_analysis_service import IncrementalAnalysisReport
+    mock_analysis_svc.execute_incremental_run.return_value = IncrementalAnalysisReport(
+        run_id="test-run",
+        completed=1,
+        failed=0,
+        skipped_budget=0,
+    )
+
+    service = WeeklyRefreshService(incremental_analysis_service=mock_analysis_svc)
+    completed, skipped, failed = service._analyze_new_entries(
+        db=db_session,
+        entry_ids=[entry_full.id, entry_partial.id, entry_insufficient.id],
+        confirm_real_calls=True,
+    )
+
+    assert completed == 1
+    assert skipped == 2
+    assert failed == 0
+
+    mock_analysis_svc.execute_incremental_run.assert_called_once()
+    plan_passed = mock_analysis_svc.execute_incremental_run.call_args[1]["plan"]
+    assert plan_passed.eligible_count == 1
+    assert plan_passed.candidates[0].entry_id == entry_full.id
+

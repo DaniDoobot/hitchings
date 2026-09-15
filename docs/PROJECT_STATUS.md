@@ -13,9 +13,17 @@ CLOSED
 0 new candidates
 
 Fuentes:
-FTC es la fuente 16/17 en curso.
-Después queda:
-DOJ Antitrust Division.
+17/17 integradas (incluidas FTC y DOJ Antitrust Division).
+
+## Scheduler Semanal (Weekly Refresh)
+
+HARDENED & AUDITED
+- Daemon: `scheduler` en `docker-compose.prod.yml` (`python -m app.scheduler`).
+- Cadencia: Lunes 06:00 `Europe/Madrid`.
+- Cobertura: 17/17 fuentes activas procesadas con aislamiento estricto de fallos.
+- Lookback: 8 días fijados por defecto y propagados a nivel de ejecución (`ingestion_service.ingest_source` y `direct_web_service.execute_ingestion`).
+- Inmutabilidad: `Source.config` no se modifica.
+- Gating de suficiencia: FULL analizada; PARTIAL e INSUFFICIENT omitidas de análisis automático.
 
 ## FTC
 
@@ -33,30 +41,18 @@ e9671e46-94a5-49eb-ba0a-db96d35ffc24
 
 ## DOJ Antitrust Division (Source 17/17)
 
-IMPLEMENTED
+CLOSED & IMPLEMENTED
 - Extractor nativo: `app/providers/extractors/doj_antitrust.py`
 - RSS feed: `https://www.justice.gov/news/rss?field_component=376&type=press_release`
 - Seeder idempotente: `scripts/seed_source_doj_antitrust.py`
 - Scope guard fail-closed: exclusión automática de causas USAO/no-antitrust.
 - Identidad canónica: `doj_atr:node:{node_id}` o `doj_atr:{year}:{month}:{slug}`
-- Previews locales validados (strict read-only, 0 Gemini, 0 DB mutations):
-  - 14d: 1 new candidate (1 FULL, 1 eligible)
-  - 30d: 4 new candidates (4 FULL, 4 eligible)
-  - 90d: 13 new candidates (12 FULL, 1 PARTIAL, 12 eligible, 1 USAO excluido)
-- Tests: 9 passed (`tests/test_doj_antitrust_extractor.py`)
 
 ## Próximo paso exacto
 
 1. En producción (Dokploy):
    - Redeploy SOLO Compose con el commit final (NO tocar PostgreSQL).
-   - Ejecutar seed idempotente:
-     `python -m scripts.seed_source_doj_antitrust`
-   - Ejecutar previews read-only en backend producción:
-     `python -m scripts.preview_source_discovery --source doj --lookback-days 14`
-     `python -m scripts.preview_source_discovery --source doj --lookback-days 30`
-     `python -m scripts.preview_source_discovery --source doj --lookback-days 90`
-2. Revisar resultados de los 3 previews.
-3. Primera sonda controlada de 1 candidato (`--lookback-days 14 --max-new-entries 1`).
+   - Verificar variables de entorno del contenedor `scheduler`: `ANALYSIS_PROVIDER=gemini` y `GEMINI_API_KEY`.
 
 ## Invariantes
 

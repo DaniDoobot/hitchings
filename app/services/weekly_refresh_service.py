@@ -314,6 +314,7 @@ class WeeklyRefreshService:
                     db=db,
                     sources=[source],
                     confirm_real_calls=confirm_real_calls,
+                    lookback_days=lookback_days,
                 )
                 detail.found = report_dw.total_discovered
                 detail.new_entries = report_dw.total_created
@@ -329,7 +330,11 @@ class WeeklyRefreshService:
                     logger.info("[WeeklyRefresh] Source '%s' native dry-run preview (0 HTTP, 0 DB)", source.name)
                     detail.status = "success"
                 else:
-                    res_or_coro = self.ingestion_service.ingest_source(source.id, db)
+                    res_or_coro = self.ingestion_service.ingest_source(
+                        source.id,
+                        db,
+                        lookback_days=lookback_days,
+                    )
                     if inspect.isawaitable(res_or_coro):
                         try:
                             loop = asyncio.get_running_loop()
