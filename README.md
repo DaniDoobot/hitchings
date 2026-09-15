@@ -114,7 +114,9 @@ cp .env.example .env
 - `BRIGHTDATA_MONTHLY_LIMIT=5000`
 - `BRIGHTDATA_SOFT_LIMIT=4500`
 - `BRIGHTDATA_ALLOW_PAID_USAGE=false`
+- `BRIGHTDATA_API_TOKEN` (suministrado en runtime en Dokploy / .env; sin valores en repo)
 - `APIFY_ENABLED=false`
+- `APIFY_API_TOKEN` (suministrado en runtime en Dokploy / .env; sin valores en repo)
 
 ---
 

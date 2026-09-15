@@ -92,6 +92,7 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
     8. Deduplicación activa.
   - Reporte post-ejecución desglosado: HTTP/provider status, registros devueltos, author_name, author_profile_url, linkedin_post_url, activity/post ID, published_at, identity_status, provenance_status, retrieval_provider, acción (CREATED / DUPLICATE), consumo/coste.
   - Pruebas automatizadas: 31/31 en pytest backend, 47/47 en vitest frontend.
+  - Exposición en Producción (Dokploy): `docker-compose.prod.yml` expone `BRIGHTDATA_API_TOKEN` y `APIFY_API_TOKEN` en runtime tanto en `backend` como en `scheduler` para que las variables de Dokploy se propaguen a los contenedores (sin valores en el repositorio).
 
 ## Próximo paso exacto
 
