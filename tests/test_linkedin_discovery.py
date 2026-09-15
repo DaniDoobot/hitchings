@@ -524,6 +524,7 @@ def test_ingestion_creates_canonical_source_and_entries(db_session: Session, mon
     settings = get_settings()
     monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
     monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "token")
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY", 5)
 
     matrix = TrackingMatrix(code="TEST-MAT", name="Test", status="active")
     entity = TrackedEntity(
@@ -696,6 +697,7 @@ def test_provider_usage_accounting(db_session: Session, monkeypatch):
     monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
     monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "token")
     monkeypatch.setattr(settings, "BRIGHTDATA_COST_PER_RECORD_USD", 0.0025)
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY", 5)
 
     matrix = TrackingMatrix(code="TEST-MAT", name="Test", status="active")
     entity = TrackedEntity(
@@ -862,6 +864,7 @@ def test_missing_or_generic_author_fails_closed(db_session: Session, monkeypatch
     settings = get_settings()
     monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
     monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY", 5)
 
     matrix = TrackingMatrix(code="TEST-AUTHOR-FAIL", name="Test Author", status="active")
     entity = TrackedEntity(
@@ -1669,6 +1672,336 @@ def test_brightdata_async_snapshot_dedupe_and_provenance(db_session, monkeypatch
     assert report2.entries_created == 0
     assert report2.duplicates == 1
     assert report2.items_detail[0]["action"] == "DUPLICATE"
+
+
+# ==============================================================================
+# PHASE 1-5: OPERATIONAL DISCOVERY PIPELINE TESTS
+# ==============================================================================
+
+def test_controlled_local_mock_full_flow_person(db_session: Session, client, monkeypatch):
+    """Phase 1: Full controlled discovery flow for a person entity (e.g. Miguel Sousa Ferro).
+
+    Validates:
+    - payload with only_authored_posts: true
+    - discover_by=profile_url
+    - async Bright Data flow (/trigger -> /progress -> /snapshot)
+    - parse of author_profile_url and author_name
+    - creation of Entry with content_type="social_post", author_type="person"
+    - provenance_status="verified", identity_status="activity_id"
+    - deduplication on second run
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-bd-token")
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_INTERVAL_SECONDS", 0.001)
+
+    person_name = "Miguel Sousa Ferro"
+    person_url = "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"
+
+    matrix = TrackingMatrix(code="TEST-PERSON-E2E", name="Person E2E Matrix", status="active")
+    entity = TrackedEntity(
+        display_name=person_name,
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": person_url,
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Step 1: Planner selects entity
+    planner = LinkedInDiscoveryPlanner()
+    jobs = planner.plan_jobs(db_session, max_entities=10)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.entity_name == person_name
+    assert job.entity_type == "person"
+    assert job.linkedin_url == person_url
+    assert job.priority == 70
+
+    # Step 2: Mock async Bright Data
+    activity_id = "7991122334455667788"
+    snapshot_id = "sd_person_mock_789"
+    captured_trigger_params = {}
+    captured_trigger_payload = []
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            captured_trigger_params.update(dict(request.url.params))
+            captured_trigger_payload.extend(json.loads(request.read()))
+            return httpx.Response(200, json={"snapshot_id": snapshot_id, "status": "running"})
+        elif f"/progress/{snapshot_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready"})
+        elif f"/snapshot/{snapshot_id}" in url_str:
+            return httpx.Response(200, json=[{
+                "url": f"https://www.linkedin.com/posts/miguel-sousa-ferro-b7551666_private-enforcement-activity-{activity_id}?ref=share",
+                "id": activity_id,
+                "author": person_name,
+                "use_url": person_url,
+                "post_text": "Groundbreaking analysis on private enforcement of EU competition law.",
+                "date_posted": "2026-03-15T11:00:00Z",
+                "account_type": "Person",
+            }])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    service = LinkedInIngestionService(planner=planner)
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=mock_client)
+
+    # Validate trigger params & payload for person
+    assert captured_trigger_params.get("discover_by") == "profile_url"
+    assert captured_trigger_params.get("type") == "discover_new"
+    assert len(captured_trigger_payload) == 1
+    assert captured_trigger_payload[0]["url"] == person_url
+    assert captured_trigger_payload[0]["only_authored_posts"] is True
+
+    # Validate report
+    assert report.entities_executed == 1
+    assert report.posts_seen == 1
+    assert report.entries_created == 1
+    assert report.duplicates == 0
+
+    # Validate Entry
+    expected_ext_id = f"urn:li:activity:{activity_id}"
+    created_entry = db_session.execute(select(Entry).where(Entry.external_id == expected_ext_id)).scalar_one()
+    assert created_entry.author == person_name
+    assert created_entry.content_type == "social_post"
+    assert created_entry.canonical_url == f"https://www.linkedin.com/posts/miguel-sousa-ferro-b7551666_private-enforcement-activity-{activity_id}"
+    assert created_entry.raw_metadata["author_type"] == "person"
+    assert created_entry.raw_metadata["author_name"] == person_name
+    assert created_entry.raw_metadata["author_profile_url"] == person_url
+    assert created_entry.raw_metadata["provenance_status"] == "verified"
+    assert created_entry.raw_metadata["identity_status"] == "activity_id"
+    assert created_entry.raw_metadata["retrieval_provider"] == "brightdata"
+
+    # Step 3: Deduplication on second run
+    report2 = service.execute_discovery(db=db_session, confirm_real_calls=True, client=mock_client)
+    assert report2.entries_created == 0
+    assert report2.duplicates == 1
+
+    total_in_db = db_session.execute(select(Entry).where(Entry.external_id == expected_ext_id)).scalars().all()
+    assert len(total_in_db) == 1
+
+
+def test_linkedin_cost_calculation(db_session: Session, monkeypatch):
+    """Phase 2: Cost tracking with BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD and fallback rates."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-bd-token")
+
+    matrix = TrackingMatrix(code="TEST-COST", name="Cost Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    post_data = [{
+        "url": "https://www.linkedin.com/posts/hausfeld_test-activity-71990001",
+        "id": "71990001",
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "Cost tracking post.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=post_data)))
+    service = LinkedInIngestionService()
+
+    # Case A: BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD configured
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD", 0.0025)
+    monkeypatch.setattr(settings, "BRIGHTDATA_COST_PER_RECORD_USD", None)
+    report_a = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+    assert report_a.provider_records_fetched == 1
+    assert report_a.estimated_provider_cost == 0.0025
+
+    # Case B: BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD is None, falls back to BRIGHTDATA_COST_PER_RECORD_USD
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD", None)
+    monkeypatch.setattr(settings, "BRIGHTDATA_COST_PER_RECORD_USD", 0.0050)
+    report_b = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+    assert report_b.provider_records_fetched == 1
+    assert report_b.estimated_provider_cost == 0.0050
+
+    # Case C: Both cost settings unset (None)
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD", None)
+    monkeypatch.setattr(settings, "BRIGHTDATA_COST_PER_RECORD_USD", None)
+    report_c = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+    assert report_c.provider_records_fetched == 1
+    assert report_c.estimated_provider_cost is None
+
+
+def test_batch_planner_multiple_entities_and_safe_caps(db_session: Session):
+    """Phase 3: Decoupled multi-entity discovery planner with safe caps and deterministic priority ordering."""
+    matrix = TrackingMatrix(code="TEST-BATCH-PLAN", name="Batch Plan Matrix", status="active")
+    inst = TrackedEntity(
+        display_name="European Commission",
+        entity_type="institution",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/european-commission"},
+    )
+    org = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    person = TrackedEntity(
+        display_name="Miguel Sousa Ferro",
+        entity_type="person",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"},
+    )
+    db_session.add_all([matrix, inst, org, person])
+    db_session.commit()
+
+    planner = LinkedInDiscoveryPlanner()
+
+    # Default cap: LINKEDIN_DISCOVERY_MAX_ENTITIES = 1
+    jobs_default = planner.plan_jobs(db_session)
+    assert len(jobs_default) == 1
+    assert jobs_default[0].entity_name == "European Commission"
+    assert jobs_default[0].priority == 90
+
+    # Explicit cap: 2
+    jobs_2 = planner.plan_jobs(db_session, max_entities=2)
+    assert len(jobs_2) == 2
+    assert jobs_2[0].entity_name == "European Commission"
+    assert jobs_2[1].entity_name == "Hausfeld"
+
+    # All jobs: cap=10 (deterministic sort: priority DESC, display_name ASC)
+    jobs_all = planner.plan_jobs(db_session, max_entities=10)
+    assert len(jobs_all) == 3
+    assert [j.entity_name for j in jobs_all] == ["European Commission", "Hausfeld", "Miguel Sousa Ferro"]
+    assert [j.priority for j in jobs_all] == [90, 80, 70]
+
+
+def test_batch_planner_fail_closed_missing_or_invalid_url(db_session: Session):
+    """Phase 3: Entities with missing, invalid or non-HTTP LinkedIn URLs fail-closed and are excluded."""
+    matrix = TrackingMatrix(code="TEST-FAIL-CLOSED-URL", name="Fail Closed Matrix", status="active")
+    e_no_meta = TrackedEntity(display_name="Entity No Meta", entity_type="organization", active=True, metadata_={})
+    e_bad_url = TrackedEntity(display_name="Entity Bad URL", entity_type="organization", active=True, metadata_={"linkedin_url": "ftp://not-linkedin.com"})
+    e_inactive = TrackedEntity(display_name="Entity Inactive", entity_type="organization", active=False, metadata_={"linkedin_url": "https://www.linkedin.com/company/valid"})
+    e_valid = TrackedEntity(display_name="Entity Valid", entity_type="organization", active=True, metadata_={"linkedin_url": "https://www.linkedin.com/company/valid"})
+
+    db_session.add_all([matrix, e_no_meta, e_bad_url, e_inactive, e_valid])
+    db_session.commit()
+
+    planner = LinkedInDiscoveryPlanner()
+    jobs = planner.plan_jobs(db_session, max_entities=10)
+    assert len(jobs) == 1
+    assert jobs[0].entity_name == "Entity Valid"
+
+
+def test_discovery_fail_closed_author_mismatch(db_session: Session, monkeypatch):
+    """Phase 3: Discovered post with mismatched author profile fails closed (provenance_status='unverified')."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token")
+
+    matrix = TrackingMatrix(code="TEST-MISMATCH", name="Mismatch Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Discovered post has author_profile_url pointing to a completely different company
+    mismatched_post = [{
+        "url": "https://www.linkedin.com/posts/unrelated_post-activity-719999999",
+        "id": "719999999",
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/some-unrelated-company",
+        "post_text": "Post with mismatched authorship profile.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=mismatched_post)))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+
+    assert report.entries_created == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "SKIPPED_PROVENANCE"
+    assert report.items_detail[0]["provenance_status"] == "unverified"
+
+    # Database contains 0 entries
+    entries = db_session.execute(select(Entry)).scalars().all()
+    assert len(entries) == 0
+
+
+def test_cli_batch_run_output_formatting(db_session: Session, monkeypatch, capsys):
+    """Phase 4: CLI batch run executes discovery and formats LINKEDIN DISCOVERY REPORT accurately."""
+    from scripts.ingest_linkedin import main
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-bd-token")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD", 0.0025)
+
+    matrix = TrackingMatrix(code="TEST-CLI-REPORT", name="CLI Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    post_data = [{
+        "url": "https://www.linkedin.com/posts/hausfeld_cli-test-activity-7200112233",
+        "id": "7200112233",
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "CLI reporting post test.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=post_data)))
+
+    # Intercept SessionLocal and httpx.Client inside ingest_linkedin
+    monkeypatch.setattr("scripts.ingest_linkedin.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.services.linkedin_ingestion_service.httpx.Client", lambda *a, **kw: mock_client)
+
+    # 1. Dry run
+    monkeypatch.setattr("sys.argv", ["scripts.ingest_linkedin"])
+    main()
+    captured_dry = capsys.readouterr().out
+    assert "[DRY RUN]" in captured_dry
+    assert "HITCHINGS - LINKEDIN DISCOVERY" in captured_dry
+    assert "Hausfeld" in captured_dry
+
+    # 2. Confirmed real calls
+    monkeypatch.setattr("sys.argv", ["scripts.ingest_linkedin", "--confirm-real-calls"])
+    main()
+    captured_real = capsys.readouterr().out
+
+    assert "LINKEDIN DISCOVERY REPORT" in captured_real
+    assert "Entities planned: 1" in captured_real
+    assert "Entities executed: 1" in captured_real
+    assert "Posts discovered: 1" in captured_real
+    assert "Entries created: 1" in captured_real
+    assert "Duplicates: 0" in captured_real
+    assert "Failed: 0" in captured_real
+    assert "Provider Consumption:" in captured_real
+    assert "1 records fetched" in captured_real
+    assert "Estimated Cost:" in captured_real
+    assert "$0.0025 USD" in captured_real
+    assert "Por entidad:" in captured_real
+    assert "Entity: Hausfeld" in captured_real
+    assert "Provider: brightdata" in captured_real
+    assert "Posts: 1" in captured_real
+    assert "Created: 1" in captured_real
+    assert "Duplicates: 0" in captured_real
+    assert "Errors: 0" in captured_real
+
 
 
 

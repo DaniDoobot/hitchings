@@ -78,26 +78,22 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
   - Validado de extremo a extremo sin llamadas HTTP externas: TrackedEntity -> Planner -> Mock Provider -> Normalizer (`external_id=urn:li:activity:{id}`) -> Provenance (`identity_status=activity_id`, `provenance_status=verified`) -> Metadata (sin legacy `provider`, solo `retrieval_provider`) -> Entry DB -> Dedupe cruzado contra simulación Apify -> API & UI contract (`LinkedIn · Hausfeld`).
   - Pruebas automatizadas: 25/25 en pytest backend, 47/47 en vitest frontend.
 
-- Sonda Controlada Bright Data (Hausfeld) preparada:
-  - Modo dry-run seguro: `python -m scripts.ingest_linkedin --probe` (0 llamadas, 0 escrituras, validación de las 7 guardas).
-  - Modo ejecución real: `python -m scripts.ingest_linkedin --probe --confirm-real-calls` (llamada única a Bright Data, max_entities=1, max_posts=1, sin fallback Apify).
-  - Guardas de seguridad pre-ejecución:
-    1. `BRIGHTDATA_API_TOKEN` presente en entorno (verificación sin mostrar el valor).
-    2. `TrackingMatrix` activa en base de datos.
-    3. `TrackedEntity` inequívoca para Hausfeld.
-    4. URL configurada exactamente `https://www.linkedin.com/company/hausfeld`.
-    5. Límites estrictos: `max_entities=1`, `max_posts=1` (consumo rígidamente acotado).
-    6. Fallback Apify desactivado (`disable_fallback=True`).
-    7. Procedencia fail-closed activa.
-    8. Deduplicación activa.
-  - Reporte post-ejecución desglosado: HTTP/provider status, registros devueltos, author_name, author_profile_url, linkedin_post_url, activity/post ID, published_at, identity_status, provenance_status, retrieval_provider, acción (CREATED / DUPLICATE), consumo/coste.
-  - Pruebas automatizadas: 31/31 en pytest backend, 47/47 en vitest frontend.
-  - Exposición en Producción (Dokploy): `docker-compose.prod.yml` expone `BRIGHTDATA_API_TOKEN` y `APIFY_API_TOKEN` en runtime tanto en `backend` como en `scheduler` para que las variables de Dokploy se propaguen a los contenedores (sin valores en el repositorio).
+- Pipeline Operativo LinkedIn Discovery (Transición completada desde Sonda):
+  - Flujo asíncrono Bright Data validado en producción: `POST /datasets/v3/trigger` -> polling `GET /datasets/v3/progress/{snapshot_id}` -> descarga `GET /datasets/v3/snapshot/{snapshot_id}?format=json` (snapshot real `sd_mu34g4n42ptmtxyidh` validado con 1 post, external_id `urn:li:activity:7503008038128119808`).
+  - Soporte completo y verificado para organizaciones (`/company/`, `discover_by=company_url`) y personas (`/in/`, `discover_by=profile_url`, `only_authored_posts: true`, `author_type=person`).
+  - Límites seguros configurables en entorno (`LINKEDIN_DISCOVERY_MAX_ENTITIES=1`, `LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY=1`).
+  - Seguimiento de costes con `BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD` (ej. 0.0025) y fallback automático a `BRIGHTDATA_COST_PER_RECORD_USD`.
+  - Desacoplamiento de Hausfeld: `LinkedInDiscoveryPlanner` selecciona deterministamente entidades activas con prioridad institucional (`institution`: 90, `organization`: 80, `person`: 70, resto: 50).
+  - Procedencia estricta fail-closed: exclusión automática de entidades sin URL y posts con autor mismatch.
+  - CLI `scripts/ingest_linkedin.py` adaptado para ejecución batch estándar (`--confirm-real-calls`, `--max-entities`, `--max-posts`, `--entity`), con generación estructurada de `LINKEDIN DISCOVERY REPORT` con resumen, consumo de proveedor y desglose `Por entidad:`.
+  - Flag `--probe` conservado para pruebas quirúrgicas controladas de Hausfeld.
+  - Scheduler globalmente inactivo (`LINKEDIN_DISCOVERY_ENABLED=false` por defecto).
+  - Cobertura de tests: 44/44 en `tests/test_linkedin_discovery.py`, 47/47 en Vitest frontend.
 
 ## Próximo paso exacto
 
-1. Ejecutar sonda real de Bright Data para Hausfeld cuando el usuario configure `BRIGHTDATA_API_TOKEN` en el entorno y proporcione confirmación explícita:
-   `python -m scripts.ingest_linkedin --probe --confirm-real-calls`
+1. Ejecución de prueba batch controlada en entorno de pruebas/producción cuando se autorice:
+   `python -m scripts.ingest_linkedin --confirm-real-calls --max-entities 1 --max-posts 1`
 
 ## Invariantes
 

@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/trigger"
     BRIGHTDATA_LINKEDIN_DATASET_ID: str = "gd_lyy3tktm25m4avu764"
     BRIGHTDATA_COST_PER_RECORD_USD: Optional[float] = None
+    BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD: Optional[float] = None
     BRIGHTDATA_POLL_INTERVAL_SECONDS: float = 2.0
     BRIGHTDATA_POLL_MAX_ATTEMPTS: int = 30
     BRIGHTDATA_POLL_TIMEOUT_SECONDS: float = 120.0
@@ -132,6 +133,8 @@ class Settings(BaseSettings):
     LINKEDIN_DISCOVERY_ENABLED: bool = False
     LINKEDIN_PRIMARY_PROVIDER: str = "brightdata"
     LINKEDIN_FALLBACK_PROVIDER: str = "apify"
+    LINKEDIN_DISCOVERY_MAX_ENTITIES: int = 1
+    LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY: int = 1
     LINKEDIN_MAX_ENTITIES_PER_RUN: int = 10
     LINKEDIN_MAX_POSTS_PER_ENTITY: int = 5
     LINKEDIN_MAX_NEW_ENTRIES_PER_RUN: int = 25

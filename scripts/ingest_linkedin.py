@@ -247,6 +247,18 @@ def main() -> None:
         default=None,
         help="Target a single entity by display name or UUID for discovery.",
     )
+    parser.add_argument(
+        "--max-entities",
+        type=int,
+        default=None,
+        help="Maximum entities to discover (overrides config default).",
+    )
+    parser.add_argument(
+        "--max-posts",
+        type=int,
+        default=None,
+        help="Maximum posts per entity (overrides config default).",
+    )
 
     args = parser.parse_args()
     settings = get_settings()
@@ -329,13 +341,13 @@ def main() -> None:
             else:
                 print("\nNo items returned or recorded.")
 
-            consumed = report.posts_seen
+            consumed = report.provider_records_fetched if report.provider_records_fetched else report.posts_seen
             cost_str = (
                 f"${report.estimated_provider_cost:.4f} USD"
                 if report.estimated_provider_cost is not None
-                else f"{consumed} record(s) consumed (per-record rate not configured)"
+                else "N/A"
             )
-            print(f"\nProvider Consumption   : {consumed} record(s) fetched")
+            print(f"\nProvider Consumption   : {consumed} records fetched")
             print(f"Estimated Cost         : {cost_str}")
 
             if report.errors:
@@ -345,14 +357,24 @@ def main() -> None:
             print("=" * 60)
             return
 
+        effective_max_entities = (
+            args.max_entities
+            if args.max_entities is not None
+            else getattr(settings, "LINKEDIN_DISCOVERY_MAX_ENTITIES", settings.LINKEDIN_MAX_ENTITIES_PER_RUN)
+        )
+        effective_max_posts = (
+            args.max_posts
+            if args.max_posts is not None
+            else getattr(settings, "LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY", settings.LINKEDIN_MAX_POSTS_PER_ENTITY)
+        )
         print("=" * 60)
         print("HITCHINGS - LINKEDIN DISCOVERY (BLOQUE 9C)")
         print("=" * 60)
         print(f"Primary Provider  : {settings.LINKEDIN_PRIMARY_PROVIDER}")
         print(f"Fallback Provider : {settings.LINKEDIN_FALLBACK_PROVIDER}")
         print(f"Discovery Enabled : {settings.LINKEDIN_DISCOVERY_ENABLED}")
-        print(f"Max Entities/Run  : {settings.LINKEDIN_MAX_ENTITIES_PER_RUN}")
-        print(f"Max Posts/Entity  : {settings.LINKEDIN_MAX_POSTS_PER_ENTITY}")
+        print(f"Max Entities/Run  : {effective_max_entities}")
+        print(f"Max Posts/Entity  : {effective_max_posts}")
         print(f"Max New Entries   : {settings.LINKEDIN_MAX_NEW_ENTRIES_PER_RUN}")
         print(f"Timeout (seconds) : {settings.LINKEDIN_TIMEOUT_SECONDS}")
 
@@ -381,7 +403,7 @@ def main() -> None:
 
         # Plan discovery jobs
         planner = LinkedInDiscoveryPlanner()
-        jobs = planner.plan_jobs(db)
+        jobs = planner.plan_jobs(db, max_entities=args.max_entities)
         if target_uuid:
             jobs = [j for j in jobs if j.tracked_entity_id == target_uuid]
 
@@ -401,7 +423,7 @@ def main() -> None:
             return
 
         if not has_brightdata_token and not has_apify_token:
-            print("\n[SKIPPED] Real smoke skipped: provider credentials not configured.")
+            print("\n[SKIPPED] Real execution skipped: provider credentials not configured.")
             return
 
         # Execute discovery
@@ -410,27 +432,49 @@ def main() -> None:
             db=db,
             confirm_real_calls=True,
             target_entity_id=target_uuid,
+            max_entities=args.max_entities,
+            max_posts_per_entity=args.max_posts,
         )
 
-        print("\n" + "=" * 60)
-        print("DISCOVERY EXECUTION REPORT")
-        print("=" * 60)
-        print(f"Run ID            : {report.run_id}")
-        print(f"Primary Provider  : {report.primary_provider}")
-        print(f"Entities Planned  : {report.entities_planned}")
-        print(f"Entities Executed : {report.entities_executed}")
-        print(f"Posts Seen        : {report.posts_seen}")
-        print(f"Entries Created   : {report.entries_created}")
-        print(f"Duplicates        : {report.duplicates}")
-        print(f"Failed Jobs       : {report.failed_jobs}")
-        print(f"Fallback Count    : {report.fallback_count}")
-        print(f"Stopped By Cap    : {report.stopped_by_cap}")
-        print(f"Estimated Cost    : {report.estimated_provider_cost}")
+        cost_str = (
+            f"${report.estimated_provider_cost:.4f} USD"
+            if report.estimated_provider_cost is not None
+            else "N/A"
+        )
+        consumption = report.provider_records_fetched if report.provider_records_fetched else report.posts_seen
+
+        print("\n" + "=" * 48)
+        print("LINKEDIN DISCOVERY REPORT")
+        print("=" * 48)
+        print(f"Entities planned: {report.entities_planned}")
+        print(f"Entities executed: {report.entities_executed}")
+        print(f"Posts discovered: {report.posts_seen}")
+        print(f"Entries created: {report.entries_created}")
+        print(f"Duplicates: {report.duplicates}")
+        print(f"Failed: {report.failed_jobs}")
+        print()
+        print("Provider Consumption:")
+        print(f"  {consumption} records fetched")
+        print("Estimated Cost:")
+        print(f"  {cost_str}")
+        print()
+        print("Por entidad:")
+        if report.per_entity:
+            for pe in report.per_entity:
+                print(f"Entity: {pe['entity']}")
+                print(f"Provider: {pe['provider']}")
+                print(f"Posts: {pe['posts']}")
+                print(f"Created: {pe['created']}")
+                print(f"Duplicates: {pe['duplicates']}")
+                print(f"Errors: {pe['errors']}")
+        else:
+            print("  Ninguna entidad ejecutada.")
+        print("=" * 48)
+
         if report.errors:
-            print(f"Errors ({len(report.errors)}):")
+            print(f"\nErrors ({len(report.errors)}):")
             for err in report.errors:
                 print(f"  - {err}")
-        print("=" * 60)
 
     finally:
         db.close()

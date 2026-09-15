@@ -59,8 +59,10 @@ class LinkedInIngestionReport:
     fallback_count: int = 0
     stopped_by_cap: bool = False
     estimated_provider_cost: Optional[float] = None
+    provider_records_fetched: int = 0
     errors: list[str] = field(default_factory=list)
     items_detail: list[dict[str, Any]] = field(default_factory=list)
+    per_entity: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ==============================================================================
@@ -118,6 +120,7 @@ class LinkedInIngestionService:
         max_new_entries: Optional[int] = None,
         allow_probe: bool = False,
         disable_fallback: bool = False,
+        max_entities: Optional[int] = None,
     ) -> LinkedInIngestionReport:
         """Execute discovery workflow for verified LinkedIn tracked entities."""
         report = LinkedInIngestionReport(
@@ -127,7 +130,7 @@ class LinkedInIngestionService:
         )
 
         # 1. Plan jobs
-        planned_jobs = self.planner.plan_jobs(db)
+        planned_jobs = self.planner.plan_jobs(db, max_entities=max_entities)
         if target_entity_id:
             planned_jobs = [j for j in planned_jobs if j.tracked_entity_id == target_entity_id]
 
@@ -172,10 +175,13 @@ class LinkedInIngestionService:
             client = httpx.Client(timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS)
             should_close_client = True
 
+        default_max_posts = getattr(self.settings, "LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY", None)
+        if default_max_posts is None:
+            default_max_posts = getattr(self.settings, "LINKEDIN_MAX_POSTS_PER_ENTITY", 1)
         max_posts_eff = (
             max_posts_per_entity
             if max_posts_per_entity is not None
-            else self.settings.LINKEDIN_MAX_POSTS_PER_ENTITY
+            else default_max_posts
         )
         max_new_entries_eff = (
             max_new_entries
@@ -198,6 +204,8 @@ class LinkedInIngestionService:
                     break
 
                 report.entities_executed += 1
+                job_created_start = report.entries_created
+                job_duplicates_start = report.duplicates
                 posts: list[LinkedInDiscoveredPost] = []
                 used_fallback_for_job = False
                 fallback_reason: Optional[str] = None
@@ -221,7 +229,16 @@ class LinkedInIngestionService:
                     )
                     report.failed_jobs += 1
                     report.errors.append(f"Auth error on {job.entity_name}: {auth_err}")
+                    report.per_entity.append({
+                        "entity": job.entity_name,
+                        "provider": self.primary.provider_name,
+                        "posts": 0,
+                        "created": 0,
+                        "duplicates": 0,
+                        "errors": 1,
+                    })
                     report.items_detail.append({
+                        "entity_name": job.entity_name,
                         "http_status": getattr(self.primary, "last_http_status", None) or 401,
                         "records_returned": 0,
                         "author_name": None,
@@ -274,7 +291,16 @@ class LinkedInIngestionService:
                             )
                             report.failed_jobs += 1
                             report.errors.append(f"Job failed on {job.entity_name}: {fb_err}")
+                            report.per_entity.append({
+                                "entity": job.entity_name,
+                                "provider": self.fallback.provider_name,
+                                "posts": 0,
+                                "created": 0,
+                                "duplicates": 0,
+                                "errors": 1,
+                            })
                             report.items_detail.append({
+                                "entity_name": job.entity_name,
                                 "http_status": getattr(self.fallback, "last_http_status", None) or "ERROR",
                                 "records_returned": 0,
                                 "author_name": None,
@@ -300,7 +326,16 @@ class LinkedInIngestionService:
                         )
                         report.failed_jobs += 1
                         report.errors.append(f"Job failed on {job.entity_name}: {rec_err} ({reason_msg})")
+                        report.per_entity.append({
+                            "entity": job.entity_name,
+                            "provider": self.primary.provider_name,
+                            "posts": 0,
+                            "created": 0,
+                            "duplicates": 0,
+                            "errors": 1,
+                        })
                         report.items_detail.append({
+                            "entity_name": job.entity_name,
                             "http_status": getattr(self.primary, "last_http_status", None) or "ERROR",
                             "records_returned": 0,
                             "author_name": None,
@@ -321,7 +356,16 @@ class LinkedInIngestionService:
                     logger.error("Unexpected error for '%s': %s", job.entity_name, unk_err)
                     report.failed_jobs += 1
                     report.errors.append(f"Unexpected error on {job.entity_name}: {unk_err}")
+                    report.per_entity.append({
+                        "entity": job.entity_name,
+                        "provider": self.primary.provider_name,
+                        "posts": 0,
+                        "created": 0,
+                        "duplicates": 0,
+                        "errors": 1,
+                    })
                     report.items_detail.append({
+                        "entity_name": job.entity_name,
                         "http_status": getattr(self.primary, "last_http_status", None) or "ERROR",
                         "records_returned": 0,
                         "author_name": None,
@@ -343,6 +387,7 @@ class LinkedInIngestionService:
 
                 if len(posts) == 0:
                     report.items_detail.append({
+                        "entity_name": job.entity_name,
                         "http_status": getattr(self.primary, "last_http_status", 200),
                         "records_returned": 0,
                         "author_name": None,
@@ -377,6 +422,7 @@ class LinkedInIngestionService:
                             author_name,
                         )
                         report.items_detail.append({
+                            "entity_name": job.entity_name,
                             "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
                             "records_returned": len(posts),
                             "author_name": author_name or None,
@@ -401,6 +447,7 @@ class LinkedInIngestionService:
                             job.entity_name,
                         )
                         report.items_detail.append({
+                            "entity_name": job.entity_name,
                             "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
                             "records_returned": len(posts),
                             "author_name": author_name,
@@ -429,6 +476,7 @@ class LinkedInIngestionService:
                     if self._is_duplicate(db, external_id, canonical_url, intra_run_seen_urls, intra_run_seen_ids):
                         report.duplicates += 1
                         report.items_detail.append({
+                            "entity_name": job.entity_name,
                             "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
                             "records_returned": len(posts),
                             "author_name": author_name,
@@ -519,6 +567,7 @@ class LinkedInIngestionService:
                     db.flush()
                     report.entries_created += 1
                     report.items_detail.append({
+                        "entity_name": job.entity_name,
                         "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
                         "records_returned": len(posts),
                         "author_name": author_name,
@@ -534,6 +583,19 @@ class LinkedInIngestionService:
                         "external_id": external_id,
                     })
 
+                job_created = report.entries_created - job_created_start
+                job_duplicates = report.duplicates - job_duplicates_start
+                job_posts = len(posts)
+                used_prov = self.fallback.provider_name if used_fallback_for_job else self.primary.provider_name
+                report.per_entity.append({
+                    "entity": job.entity_name,
+                    "provider": used_prov,
+                    "posts": job_posts,
+                    "created": job_created,
+                    "duplicates": job_duplicates,
+                    "errors": 0,
+                })
+
             # 5. Record ProviderUsage (Section 13)
             current_period = datetime.now(timezone.utc).strftime("%Y-%m")
             for prov_name, items_count in provider_items_used.items():
@@ -542,7 +604,9 @@ class LinkedInIngestionService:
 
             # 6. Calculate estimated provider cost if rates configured (Section 13 & 14)
             est_cost: Optional[float] = None
-            bd_cost = self.settings.BRIGHTDATA_COST_PER_RECORD_USD
+            bd_cost = getattr(self.settings, "BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD", None)
+            if bd_cost is None:
+                bd_cost = self.settings.BRIGHTDATA_COST_PER_RECORD_USD
             ap_cost = self.settings.APIFY_COST_PER_RECORD_USD
             if bd_cost is not None or ap_cost is not None:
                 cost_sum = 0.0
@@ -552,6 +616,7 @@ class LinkedInIngestionService:
                     cost_sum += provider_items_used.get("apify", 0) * ap_cost
                 est_cost = round(cost_sum, 6)
             report.estimated_provider_cost = est_cost
+            report.provider_records_fetched = sum(provider_items_used.values())
 
             # 7. Update IngestionRun
             run.status = (
@@ -576,6 +641,7 @@ class LinkedInIngestionService:
                 "failed_jobs": report.failed_jobs,
                 "fallback_count": report.fallback_count,
                 "stopped_by_cap": report.stopped_by_cap,
+                "provider_records_fetched": report.provider_records_fetched,
                 "estimated_provider_cost": report.estimated_provider_cost,
                 "errors": report.errors[:10],
             }

@@ -47,7 +47,10 @@ class LinkedInDiscoveryPlanner:
         5. Orders deterministically by priority DESC, display_name ASC.
         6. Applies max_entities limit.
         """
-        cap = max_entities if max_entities is not None else self.settings.LINKEDIN_MAX_ENTITIES_PER_RUN
+        default_cap = getattr(self.settings, "LINKEDIN_DISCOVERY_MAX_ENTITIES", None)
+        if default_cap is None:
+            default_cap = getattr(self.settings, "LINKEDIN_MAX_ENTITIES_PER_RUN", 1)
+        cap = max_entities if max_entities is not None else default_cap
         primary_provider = self.settings.LINKEDIN_PRIMARY_PROVIDER
 
         # 1. Active matrix
