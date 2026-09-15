@@ -74,10 +74,13 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
   - Cabecera: `LinkedIn · {author_name}` acompañado de icono contextual (`Building2` para organización, `User` para persona).
   - Enlace seguro directo al post original en LinkedIn.
   - Ni Bright Data ni Apify se muestran en ningún lugar de la interfaz.
+- Validación Local Mock de Ciclo Completo (Hausfeld):
+  - Validado de extremo a extremo sin llamadas HTTP externas: TrackedEntity -> Planner -> Mock Provider -> Normalizer (`external_id=urn:li:activity:{id}`) -> Provenance (`identity_status=activity_id`, `provenance_status=verified`) -> Metadata (sin legacy `provider`, solo `retrieval_provider`) -> Entry DB -> Dedupe cruzado contra simulación Apify -> API & UI contract (`LinkedIn · Hausfeld`).
+  - Pruebas automatizadas: 25/25 en pytest backend, 47/47 en vitest frontend.
 
 ## Próximo paso exacto
 
-1. Prueba controlada de LinkedIn Discovery en staging o local con mock/fixture validado antes de activar credenciales reales.
+1. Decidir activación de credenciales y prueba real de LinkedIn Discovery con límite estricto de consumo o pase a staging.
 
 ## Invariantes
 

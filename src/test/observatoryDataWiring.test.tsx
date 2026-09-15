@@ -430,6 +430,80 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
   });
+
+  it('renders LinkedIn · Hausfeld with organization icon for Hausfeld social post without exposing retrieval provider', async () => {
+    const mockHausfeldEntry = {
+      entry_id: 'hausfeld-e2e-1',
+      title: 'LinkedIn — Hausfeld — 2026-03-15',
+      source: { id: 'source-li-hf', name: 'LinkedIn' },
+      author: 'Hausfeld',
+      author_type: 'organization',
+      published_at: '2026-03-15T10:00:00Z',
+      url: 'https://www.linkedin.com/posts/hausfeld_antitrust-damages-activity-7188223344556677889',
+      content_type: 'social_post',
+      raw_metadata: {
+        author_name: 'Hausfeld',
+        author_type: 'organization',
+        retrieval_provider: 'brightdata',
+        identity_status: 'activity_id',
+        provenance_status: 'verified',
+        linkedin_activity_id: '7188223344556677889',
+      },
+      relevance: { status: 'relevant' as const, score: 95 },
+      summary: 'Groundbreaking CAT collective proceedings judgment on trucks cartel damages.',
+      canonical_topics: [{ code: 'private_enforcement', name: 'Aplicación privada' }],
+      canonical_primary_topic: { code: 'private_enforcement', name: 'Aplicación privada' },
+      key_points: ['Sentencia del CAT en litigación colectiva de daños'],
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntries').mockResolvedValueOnce({
+      items: [mockHausfeldEntry],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.spyOn(apiModule.observatoryApi, 'getSources').mockResolvedValueOnce([]);
+    vi.spyOn(apiModule.observatoryApi, 'getTopics').mockResolvedValueOnce([]);
+
+    const { ObservatoryPage } = await import('../pages/ObservatoryPage');
+
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/observatorio']}>
+        <Routes>
+          <Route path="/observatorio" element={<ObservatoryPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('LinkedIn · Hausfeld')).toBeInTheDocument();
+    expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
+
+    unmount();
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce({
+      ...mockHausfeldEntry,
+      evidence: null,
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/hausfeld-e2e-1']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('LinkedIn · Hausfeld')).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Acceder a la publicación original/i });
+    expect(link).toHaveAttribute(
+      'href',
+      'https://www.linkedin.com/posts/hausfeld_antitrust-damages-activity-7188223344556677889'
+    );
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
+  });
 });
 
 

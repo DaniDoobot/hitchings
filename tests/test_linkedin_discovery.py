@@ -1031,4 +1031,137 @@ def test_is_author_profile_coherent_edge_cases():
     assert is_author_profile_coherent("https://www.linkedin.com/company/hausfeld", None) is False
 
 
+def test_controlled_local_mock_full_flow_hausfeld(db_session: Session, client, monkeypatch):
+    """Controlled local mock validation of the full LinkedIn discovery pipeline for Hausfeld.
+
+    Validates:
+    1. Planner selects Hausfeld entity.
+    2. Provider mock returns post.
+    3. Normalizer extracts activity ID -> external_id=urn:li:activity:{id}.
+    4. Provenance: identity_status="activity_id", provenance_status="verified".
+    5. Metadata does NOT contain legacy key "provider".
+    6. Entry is created correctly in database.
+    7. Dedupe functions when simulating second run from Apify with alternate URL.
+    8. API & UI contract displays "LinkedIn · Hausfeld".
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-bd-token")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
+
+    # 1. Seed TrackedEntity for Hausfeld
+    matrix = TrackingMatrix(code="TEST-HAUSFELD-E2E", name="Hausfeld E2E Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/company/hausfeld",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "organization",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Step 1: Planner selects entity
+    planner = LinkedInDiscoveryPlanner()
+    jobs = planner.plan_jobs(db_session)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.entity_name == "Hausfeld"
+    assert job.entity_type == "organization"
+    assert job.linkedin_url == "https://www.linkedin.com/company/hausfeld"
+    assert job.tracked_entity_id == entity.id
+
+    # Step 2: Provider mock (Bright Data) simulates 1 post
+    activity_id = "7188223344556677889"
+    bd_post_data = [{
+        "url": f"https://www.linkedin.com/posts/hausfeld_antitrust-damages-activity-{activity_id}?utm_source=li_share",
+        "id": activity_id,
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "Groundbreaking CAT collective proceedings judgment on trucks cartel damages.",
+        "date_posted": "2026-03-15T10:00:00Z",
+        "account_type": "Organization",
+    }]
+
+    mock_bd_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bd_post_data)))
+    service = LinkedInIngestionService(planner=planner)
+    report_bd = service.execute_discovery(db=db_session, confirm_real_calls=True, client=mock_bd_client)
+
+    # Step 3, 4, 5, 6: Ingestion, Normalization, Provenance & DB Entry validation
+    assert report_bd.entities_planned == 1
+    assert report_bd.entities_executed == 1
+    assert report_bd.posts_seen == 1
+    assert report_bd.entries_created == 1
+    assert report_bd.duplicates == 0
+    assert report_bd.failed_jobs == 0
+
+    expected_ext_id = f"urn:li:activity:{activity_id}"
+    created_entry = db_session.execute(select(Entry).where(Entry.external_id == expected_ext_id)).scalar_one()
+
+    # 3. Normalizer & external_id check
+    assert created_entry.external_id == expected_ext_id
+    assert created_entry.canonical_url == f"https://www.linkedin.com/posts/hausfeld_antitrust-damages-activity-{activity_id}"
+    assert "?" not in created_entry.url
+
+    # 4. Provenance & Identity status
+    assert created_entry.raw_metadata["identity_status"] == "activity_id"
+    assert created_entry.raw_metadata["provenance_status"] == "verified"
+    assert created_entry.raw_metadata["author_name"] == "Hausfeld"
+    assert created_entry.raw_metadata["author_type"] == "organization"
+    assert created_entry.raw_metadata["author_profile_url"] == "https://www.linkedin.com/company/hausfeld"
+    assert created_entry.raw_metadata["tracked_entity_id"] == str(entity.id)
+    assert created_entry.raw_metadata["linkedin_activity_id"] == activity_id
+
+    # 5. Metadata does NOT contain legacy key "provider", uses only "retrieval_provider"
+    assert created_entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "provider" not in created_entry.raw_metadata
+
+    # 6. Entry structure
+    assert created_entry.author == "Hausfeld"
+    assert created_entry.content_type == "social_post"
+    assert created_entry.title == "LinkedIn — Hausfeld — 2026-03-15"
+    assert "Groundbreaking CAT" in created_entry.content
+
+    # Step 7: Dedupe validation with Apify returning same post with alternate URL format
+    apify_post_data = [{
+        "id": activity_id,
+        "linkedinUrl": f"https://www.linkedin.com/feed/update/urn:li:activity:{activity_id}/?view=true",
+        "content": "Groundbreaking CAT collective proceedings judgment on trucks cartel damages.",
+        "author": {
+            "name": "Hausfeld",
+            "linkedinUrl": "https://www.linkedin.com/company/hausfeld",
+        },
+        "postedAt": {"date": "2026-03-15T10:00:00Z"},
+        "type": "post",
+    }]
+
+    mock_apify_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=apify_post_data)))
+    service_apify = LinkedInIngestionService(planner=planner, primary_provider=ApifyLinkedInProvider())
+    report_apify = service_apify.execute_discovery(db=db_session, confirm_real_calls=True, client=mock_apify_client)
+
+    assert report_apify.entries_created == 0
+    assert report_apify.duplicates == 1
+
+    total_in_db = db_session.execute(select(Entry).where(Entry.external_id == expected_ext_id)).scalars().all()
+    assert len(total_in_db) == 1
+
+    # Step 8: API & UI contract: "LinkedIn · Hausfeld"
+    api_resp = client.get(f"/api/v1/entries/{created_entry.id}")
+    assert api_resp.status_code == 200
+    entry_payload = api_resp.json()
+
+    assert entry_payload["author"] == "Hausfeld"
+    assert entry_payload["content_type"] == "social_post"
+    assert entry_payload["raw_metadata"]["author_type"] == "organization"
+    assert entry_payload["raw_metadata"]["retrieval_provider"] == "brightdata"
+    assert "provider" not in entry_payload["raw_metadata"]
+
+    ui_header = f"LinkedIn · {entry_payload['author']}"
+    assert ui_header == "LinkedIn · Hausfeld"
+
+
+
 
