@@ -99,6 +99,7 @@ def test_brightdata_provider_success(monkeypatch):
 
     # 1. Verify request format
     assert "mock_dataset_123" in captured_request["url"]
+    assert "type=discover_new" in captured_request["url"]
     assert "discover_by=company_url" in captured_request["url"]
     assert captured_request["headers"]["authorization"] == "Bearer mock-token-xyz"
     assert captured_request["body"] == [{"url": "https://www.linkedin.com/company/hausfeld"}]
@@ -162,6 +163,7 @@ def test_brightdata_provider_person_url_success(monkeypatch):
     )
 
     assert "mock_dataset_123" in captured_request["url"]
+    assert "type=discover_new" in captured_request["url"]
     assert "discover_by=profile_url" in captured_request["url"]
     assert captured_request["body"] == [{"url": "https://www.linkedin.com/in/alex-hitchings", "only_authored_posts": True}]
     assert captured_request["body"][0]["only_authored_posts"] is True

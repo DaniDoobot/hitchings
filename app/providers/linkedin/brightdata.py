@@ -97,6 +97,7 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         }
         params = {
             "dataset_id": dataset_id,
+            "type": "discover_new",
             "discover_by": discover_by,
         }
         payload = build_discovery_payload(target_url, entity_type)
