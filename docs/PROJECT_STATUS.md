@@ -78,9 +78,25 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
   - Validado de extremo a extremo sin llamadas HTTP externas: TrackedEntity -> Planner -> Mock Provider -> Normalizer (`external_id=urn:li:activity:{id}`) -> Provenance (`identity_status=activity_id`, `provenance_status=verified`) -> Metadata (sin legacy `provider`, solo `retrieval_provider`) -> Entry DB -> Dedupe cruzado contra simulación Apify -> API & UI contract (`LinkedIn · Hausfeld`).
   - Pruebas automatizadas: 25/25 en pytest backend, 47/47 en vitest frontend.
 
+- Sonda Controlada Bright Data (Hausfeld) preparada:
+  - Modo dry-run seguro: `python -m scripts.ingest_linkedin --probe` (0 llamadas, 0 escrituras, validación de las 7 guardas).
+  - Modo ejecución real: `python -m scripts.ingest_linkedin --probe --confirm-real-calls` (llamada única a Bright Data, max_entities=1, max_posts=1, sin fallback Apify).
+  - Guardas de seguridad pre-ejecución:
+    1. `BRIGHTDATA_API_TOKEN` presente en entorno (verificación sin mostrar el valor).
+    2. `TrackingMatrix` activa en base de datos.
+    3. `TrackedEntity` inequívoca para Hausfeld.
+    4. URL configurada exactamente `https://www.linkedin.com/company/hausfeld`.
+    5. Límites estrictos: `max_entities=1`, `max_posts=1` (consumo rígidamente acotado).
+    6. Fallback Apify desactivado (`disable_fallback=True`).
+    7. Procedencia fail-closed activa.
+    8. Deduplicación activa.
+  - Reporte post-ejecución desglosado: HTTP/provider status, registros devueltos, author_name, author_profile_url, linkedin_post_url, activity/post ID, published_at, identity_status, provenance_status, retrieval_provider, acción (CREATED / DUPLICATE), consumo/coste.
+  - Pruebas automatizadas: 31/31 en pytest backend, 47/47 en vitest frontend.
+
 ## Próximo paso exacto
 
-1. Decidir activación de credenciales y prueba real de LinkedIn Discovery con límite estricto de consumo o pase a staging.
+1. Ejecutar sonda real de Bright Data para Hausfeld cuando el usuario configure `BRIGHTDATA_API_TOKEN` en el entorno y proporcione confirmación explícita:
+   `python -m scripts.ingest_linkedin --probe --confirm-real-calls`
 
 ## Invariantes
 

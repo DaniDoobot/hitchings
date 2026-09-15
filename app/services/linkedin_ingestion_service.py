@@ -60,6 +60,7 @@ class LinkedInIngestionReport:
     stopped_by_cap: bool = False
     estimated_provider_cost: Optional[float] = None
     errors: list[str] = field(default_factory=list)
+    items_detail: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ==============================================================================
@@ -113,6 +114,10 @@ class LinkedInIngestionService:
         confirm_real_calls: bool = False,
         target_entity_id: Optional[uuid.UUID] = None,
         client: Optional[httpx.Client] = None,
+        max_posts_per_entity: Optional[int] = None,
+        max_new_entries: Optional[int] = None,
+        allow_probe: bool = False,
+        disable_fallback: bool = False,
     ) -> LinkedInIngestionReport:
         """Execute discovery workflow for verified LinkedIn tracked entities."""
         report = LinkedInIngestionReport(
@@ -136,7 +141,7 @@ class LinkedInIngestionService:
             logger.info("LinkedIn discovery dry-run complete. %d jobs planned.", len(planned_jobs))
             return report
 
-        if not self.settings.LINKEDIN_DISCOVERY_ENABLED:
+        if not self.settings.LINKEDIN_DISCOVERY_ENABLED and not allow_probe:
             logger.warning(
                 "LINKEDIN_DISCOVERY_ENABLED=false. Cannot execute real calls. Aborting."
             )
@@ -167,8 +172,16 @@ class LinkedInIngestionService:
             client = httpx.Client(timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS)
             should_close_client = True
 
-        max_posts_per_entity = self.settings.LINKEDIN_MAX_POSTS_PER_ENTITY
-        max_new_entries = self.settings.LINKEDIN_MAX_NEW_ENTRIES_PER_RUN
+        max_posts_eff = (
+            max_posts_per_entity
+            if max_posts_per_entity is not None
+            else self.settings.LINKEDIN_MAX_POSTS_PER_ENTITY
+        )
+        max_new_entries_eff = (
+            max_new_entries
+            if max_new_entries is not None
+            else self.settings.LINKEDIN_MAX_NEW_ENTRIES_PER_RUN
+        )
 
         intra_run_seen_urls: set[str] = set()
         intra_run_seen_ids: set[str] = set()
@@ -179,8 +192,8 @@ class LinkedInIngestionService:
 
         try:
             for job in planned_jobs:
-                if report.entries_created >= max_new_entries:
-                    logger.info("Reached maximum new entries cap (%d); stopping run.", max_new_entries)
+                if report.entries_created >= max_new_entries_eff:
+                    logger.info("Reached maximum new entries cap (%d); stopping run.", max_new_entries_eff)
                     report.stopped_by_cap = True
                     break
 
@@ -194,7 +207,7 @@ class LinkedInIngestionService:
                     posts = self.primary.discover_posts(
                         target_url=job.linkedin_url,
                         client=client,
-                        limit=max_posts_per_entity,
+                        limit=max_posts_eff,
                         entity_name=job.entity_name,
                         entity_id=job.tracked_entity_id,
                     )
@@ -208,6 +221,22 @@ class LinkedInIngestionService:
                     )
                     report.failed_jobs += 1
                     report.errors.append(f"Auth error on {job.entity_name}: {auth_err}")
+                    report.items_detail.append({
+                        "http_status": getattr(self.primary, "last_http_status", None) or 401,
+                        "records_returned": 0,
+                        "author_name": None,
+                        "author_profile_url": None,
+                        "linkedin_post_url": None,
+                        "activity_id": None,
+                        "published_at": None,
+                        "identity_status": None,
+                        "provenance_status": None,
+                        "retrieval_provider": self.primary.provider_name,
+                        "action": "AUTH_ERROR",
+                        "entry_id": None,
+                        "external_id": None,
+                        "error": str(auth_err),
+                    })
                     continue
                 except LinkedInRecoverableError as rec_err:
                     logger.warning(
@@ -217,13 +246,13 @@ class LinkedInIngestionService:
                     )
                     fallback_reason = str(rec_err)
 
-                    # 4.2 Attempt Fallback Provider if configured
-                    if self.settings.apify_token:
+                    # 4.2 Attempt Fallback Provider if configured and not disabled
+                    if not disable_fallback and self.settings.apify_token:
                         try:
                             posts = self.fallback.discover_posts(
                                 target_url=job.linkedin_url,
                                 client=client,
-                                limit=max_posts_per_entity,
+                                limit=max_posts_eff,
                                 entity_name=job.entity_name,
                                 entity_id=job.tracked_entity_id,
                             )
@@ -245,26 +274,93 @@ class LinkedInIngestionService:
                             )
                             report.failed_jobs += 1
                             report.errors.append(f"Job failed on {job.entity_name}: {fb_err}")
+                            report.items_detail.append({
+                                "http_status": getattr(self.fallback, "last_http_status", None) or "ERROR",
+                                "records_returned": 0,
+                                "author_name": None,
+                                "author_profile_url": None,
+                                "linkedin_post_url": None,
+                                "activity_id": None,
+                                "published_at": None,
+                                "identity_status": None,
+                                "provenance_status": None,
+                                "retrieval_provider": self.fallback.provider_name,
+                                "action": "FAILED",
+                                "entry_id": None,
+                                "external_id": None,
+                                "error": f"Fallback failed: {fb_err}",
+                            })
                             continue
                     else:
+                        reason_msg = "fallback disabled" if disable_fallback else "fallback token not configured"
                         logger.error(
-                            "Primary failed and fallback token not configured. Skipping '%s'.",
+                            "Primary failed and %s. Skipping '%s'.",
+                            reason_msg,
                             job.entity_name,
                         )
                         report.failed_jobs += 1
-                        report.errors.append(f"Job failed on {job.entity_name}: {rec_err}")
+                        report.errors.append(f"Job failed on {job.entity_name}: {rec_err} ({reason_msg})")
+                        report.items_detail.append({
+                            "http_status": getattr(self.primary, "last_http_status", None) or "ERROR",
+                            "records_returned": 0,
+                            "author_name": None,
+                            "author_profile_url": None,
+                            "linkedin_post_url": None,
+                            "activity_id": None,
+                            "published_at": None,
+                            "identity_status": None,
+                            "provenance_status": None,
+                            "retrieval_provider": self.primary.provider_name,
+                            "action": "FAILED",
+                            "entry_id": None,
+                            "external_id": None,
+                            "error": f"{rec_err} ({reason_msg})",
+                        })
                         continue
                 except Exception as unk_err:
                     logger.error("Unexpected error for '%s': %s", job.entity_name, unk_err)
                     report.failed_jobs += 1
                     report.errors.append(f"Unexpected error on {job.entity_name}: {unk_err}")
+                    report.items_detail.append({
+                        "http_status": getattr(self.primary, "last_http_status", None) or "ERROR",
+                        "records_returned": 0,
+                        "author_name": None,
+                        "author_profile_url": None,
+                        "linkedin_post_url": None,
+                        "activity_id": None,
+                        "published_at": None,
+                        "identity_status": None,
+                        "provenance_status": None,
+                        "retrieval_provider": self.primary.provider_name,
+                        "action": "ERROR",
+                        "entry_id": None,
+                        "external_id": None,
+                        "error": str(unk_err),
+                    })
                     continue
 
                 report.posts_seen += len(posts)
 
+                if len(posts) == 0:
+                    report.items_detail.append({
+                        "http_status": getattr(self.primary, "last_http_status", 200),
+                        "records_returned": 0,
+                        "author_name": None,
+                        "author_profile_url": None,
+                        "linkedin_post_url": None,
+                        "activity_id": None,
+                        "published_at": None,
+                        "identity_status": None,
+                        "provenance_status": None,
+                        "retrieval_provider": self.primary.provider_name,
+                        "action": "NO_POSTS",
+                        "entry_id": None,
+                        "external_id": None,
+                    })
+
                 # 4.3 Process Discovered Posts
                 for post in posts:
-                    if report.entries_created >= max_new_entries:
+                    if report.entries_created >= max_new_entries_eff:
                         report.stopped_by_cap = True
                         break
 
@@ -280,6 +376,21 @@ class LinkedInIngestionService:
                             post.linkedin_post_url,
                             author_name,
                         )
+                        report.items_detail.append({
+                            "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
+                            "records_returned": len(posts),
+                            "author_name": author_name or None,
+                            "author_profile_url": post.author_profile_url,
+                            "linkedin_post_url": post.linkedin_post_url,
+                            "activity_id": post.provider_item_id,
+                            "published_at": post.published_at.isoformat() if post.published_at else None,
+                            "identity_status": None,
+                            "provenance_status": "unverified",
+                            "retrieval_provider": post.provider,
+                            "action": "SKIPPED_PROVENANCE",
+                            "entry_id": None,
+                            "external_id": None,
+                        })
                         continue
 
                     if not is_author_profile_coherent(post.author_profile_url, job.linkedin_url):
@@ -289,6 +400,21 @@ class LinkedInIngestionService:
                             job.linkedin_url,
                             job.entity_name,
                         )
+                        report.items_detail.append({
+                            "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
+                            "records_returned": len(posts),
+                            "author_name": author_name,
+                            "author_profile_url": post.author_profile_url,
+                            "linkedin_post_url": post.linkedin_post_url,
+                            "activity_id": post.provider_item_id,
+                            "published_at": post.published_at.isoformat() if post.published_at else None,
+                            "identity_status": None,
+                            "provenance_status": "unverified",
+                            "retrieval_provider": post.provider,
+                            "action": "SKIPPED_PROVENANCE",
+                            "entry_id": None,
+                            "external_id": None,
+                        })
                         continue
 
                     # Authorship provenance is strictly verified
@@ -302,6 +428,21 @@ class LinkedInIngestionService:
                     # Deduplication checks
                     if self._is_duplicate(db, external_id, canonical_url, intra_run_seen_urls, intra_run_seen_ids):
                         report.duplicates += 1
+                        report.items_detail.append({
+                            "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
+                            "records_returned": len(posts),
+                            "author_name": author_name,
+                            "author_profile_url": post.author_profile_url,
+                            "linkedin_post_url": post.linkedin_post_url,
+                            "activity_id": activity_id or post.provider_item_id,
+                            "published_at": post.published_at.isoformat() if post.published_at else None,
+                            "identity_status": identity_status,
+                            "provenance_status": provenance_status,
+                            "retrieval_provider": post.provider,
+                            "action": "DUPLICATE",
+                            "entry_id": None,
+                            "external_id": external_id,
+                        })
                         continue
 
                     # Track in intra-run cache
@@ -375,7 +516,23 @@ class LinkedInIngestionService:
                         raw_metadata=enriched_meta,
                     )
                     db.add(entry)
+                    db.flush()
                     report.entries_created += 1
+                    report.items_detail.append({
+                        "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
+                        "records_returned": len(posts),
+                        "author_name": author_name,
+                        "author_profile_url": post.author_profile_url,
+                        "linkedin_post_url": post.linkedin_post_url,
+                        "activity_id": activity_id or post.provider_item_id,
+                        "published_at": post.published_at.isoformat() if post.published_at else None,
+                        "identity_status": identity_status,
+                        "provenance_status": provenance_status,
+                        "retrieval_provider": post.provider,
+                        "action": "CREATED",
+                        "entry_id": str(entry.id),
+                        "external_id": external_id,
+                    })
 
             # 5. Record ProviderUsage (Section 13)
             current_period = datetime.now(timezone.utc).strftime("%Y-%m")

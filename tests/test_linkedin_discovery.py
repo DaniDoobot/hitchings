@@ -1163,5 +1163,252 @@ def test_controlled_local_mock_full_flow_hausfeld(db_session: Session, client, m
     assert ui_header == "LinkedIn · Hausfeld"
 
 
+# ==============================================================================
+# 9. CONTROLLED BRIGHT DATA PROBE TESTS (HAUSFELD)
+# ==============================================================================
+
+def test_brightdata_probe_guard_missing_token(db_session, monkeypatch):
+    """Probe must fail-closed immediately if BRIGHTDATA_API_TOKEN is missing without logging secret."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "")
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_KEY", "")
+
+    exit_code, report, logs = run_brightdata_probe(db_session, confirm_real_calls=False, settings=settings)
+    assert exit_code == 1
+    assert report is None
+    assert any("BRIGHTDATA_API_TOKEN is not configured" in log for log in logs)
+
+
+def test_brightdata_probe_guard_entity_and_url_validation(db_session, monkeypatch):
+    """Probe must validate unequivocal Hausfeld entity and exact configured LinkedIn URL."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+
+    # 0. Reject if active TrackingMatrix is missing
+    exit_code, report, logs = run_brightdata_probe(db_session, confirm_real_calls=False, settings=settings)
+    assert exit_code == 1
+    assert any("Active TrackingMatrix not found" in log for log in logs)
+
+    # Add active TrackingMatrix
+    matrix = TrackingMatrix(code="TEST-PROBE-VAL", name="Validation Matrix", status="active")
+    db_session.add(matrix)
+    db_session.commit()
+
+    # 1. Reject targeting another entity
+    exit_code, report, logs = run_brightdata_probe(
+        db_session, confirm_real_calls=False, settings=settings, entity_override="CNMC"
+    )
+    assert exit_code == 1
+    assert any("strictly locked to entity 'Hausfeld'" in log for log in logs)
+
+    # 2. Reject if Hausfeld entity is not in database
+    exit_code, report, logs = run_brightdata_probe(db_session, confirm_real_calls=False, settings=settings)
+    assert exit_code == 1
+    assert any("TrackedEntity for 'Hausfeld' not found" in log for log in logs)
+
+    # 3. Create Hausfeld entity with wrong URL
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld-wrong"},
+    )
+    db_session.add(entity)
+    db_session.commit()
+
+    exit_code, report, logs = run_brightdata_probe(db_session, confirm_real_calls=False, settings=settings)
+    assert exit_code == 1
+    assert any("expected 'https://www.linkedin.com/company/hausfeld'" in log for log in logs)
+
+
+def test_brightdata_probe_dry_run_success(db_session, monkeypatch):
+    """Probe dry-run must validate all 7 guards, make 0 calls, 0 DB writes, and exit cleanly."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+
+    matrix = TrackingMatrix(code="TEST-PROBE-DRY", name="Test Probe Matrix Dry", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/company/hausfeld",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "organization",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    exit_code, report, logs = run_brightdata_probe(db_session, confirm_real_calls=False, settings=settings)
+    assert exit_code == 0
+    assert report is None
+    # All 7 guards confirmed in dry run
+    assert any("[GUARD 1]" in log for log in logs)
+    assert any("[GUARD 2]" in log for log in logs)
+    assert any("[GUARD 3]" in log for log in logs)
+    assert any("[GUARD 4]" in log for log in logs)
+    assert any("[GUARD 5]" in log for log in logs)
+    assert any("[GUARD 6]" in log for log in logs)
+    assert any("[GUARD 7]" in log for log in logs)
+
+    # Confirm 0 entries written to DB
+    entries = db_session.execute(select(Entry)).scalars().all()
+    assert len(entries) == 0
+
+
+def test_brightdata_probe_execution_success_and_itemized_reporting(db_session, monkeypatch):
+    """Probe real execution must enforce max_posts=1, Bright Data only, and return complete itemized fields."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+    monkeypatch.setattr(settings, "BRIGHTDATA_COST_PER_RECORD_USD", 0.0025)
+
+    matrix = TrackingMatrix(code="TEST-PROBE-EXEC", name="Test Probe Matrix Exec", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/company/hausfeld",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "organization",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    activity_id = "7199112233445566778"
+    mock_response_data = [{
+        "url": f"https://www.linkedin.com/posts/hausfeld_antitrust-probe-activity-{activity_id}?ref=test",
+        "id": activity_id,
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "First controlled probe of LinkedIn private enforcement publication.",
+        "date_posted": "2026-03-20T12:00:00Z",
+        "account_type": "Organization",
+    }]
+
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=mock_response_data))
+    )
+
+    exit_code, report, logs = run_brightdata_probe(
+        db=db_session,
+        confirm_real_calls=True,
+        client=mock_client,
+        settings=settings,
+    )
+
+    assert exit_code == 0
+    assert report is not None
+    assert report.entries_created == 1
+    assert report.posts_seen == 1
+    assert report.duplicates == 0
+    assert report.failed_jobs == 0
+    assert report.fallback_count == 0
+    assert report.primary_provider == "brightdata"
+    assert report.estimated_provider_cost == 0.0025
+
+    # Validate itemized details for post-run reporting
+    assert len(report.items_detail) == 1
+    detail = report.items_detail[0]
+    assert detail["http_status"] == 200
+    assert detail["records_returned"] == 1
+    assert detail["author_name"] == "Hausfeld"
+    assert detail["author_profile_url"] == "https://www.linkedin.com/company/hausfeld"
+    assert "https://www.linkedin.com/posts/hausfeld_antitrust-probe-activity-7199112233445566778" in detail["linkedin_post_url"]
+    assert detail["activity_id"] == activity_id
+    assert detail["published_at"] == "2026-03-20T12:00:00+00:00"
+    assert detail["identity_status"] == "activity_id"
+    assert detail["provenance_status"] == "verified"
+    assert detail["retrieval_provider"] == "brightdata"
+    assert detail["action"] == "CREATED"
+    assert detail["entry_id"] is not None
+
+
+def test_brightdata_probe_duplicate_detection(db_session, monkeypatch):
+    """Subsequent probe execution on the same post must detect duplicate and record DUPLICATE action."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+
+    matrix = TrackingMatrix(code="TEST-PROBE-DUP", name="Test Probe Matrix Dup", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    activity_id = "7200112233445566779"
+    mock_response_data = [{
+        "url": f"https://www.linkedin.com/posts/hausfeld_antitrust-probe2-activity-{activity_id}",
+        "id": activity_id,
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "Second controlled probe for duplicate verification.",
+        "date_posted": "2026-03-21T09:00:00Z",
+    }]
+
+    mock_client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=mock_response_data))
+    )
+
+    # First run: creates entry
+    code1, report1, _ = run_brightdata_probe(db_session, confirm_real_calls=True, client=mock_client, settings=settings)
+    assert code1 == 0
+    assert report1.entries_created == 1
+    assert report1.items_detail[0]["action"] == "CREATED"
+
+    # Second run: detects duplicate
+    code2, report2, _ = run_brightdata_probe(db_session, confirm_real_calls=True, client=mock_client, settings=settings)
+    assert code2 == 0
+    assert report2.entries_created == 0
+    assert report2.duplicates == 1
+    assert report2.items_detail[0]["action"] == "DUPLICATE"
+
+
+def test_brightdata_probe_no_fallback_on_error(db_session, monkeypatch):
+    """Probe must strictly NOT trigger Apify fallback when Bright Data encounters a recoverable server error."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token-present")
+
+    matrix = TrackingMatrix(code="TEST-PROBE-ERR", name="Test Probe Matrix Err", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Bright Data returns 500 error
+    error_client = httpx.Client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(500, text="Internal Gateway Error"))
+    )
+
+    exit_code, report, logs = run_brightdata_probe(
+        db_session, confirm_real_calls=True, client=error_client, settings=settings
+    )
+
+    assert exit_code == 0
+    assert report is not None
+    assert report.failed_jobs == 1
+    assert report.fallback_count == 0  # Fallback was strictly disabled
+    assert report.entries_created == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "FAILED"
+
+
+
 
 

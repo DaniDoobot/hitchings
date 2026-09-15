@@ -36,6 +36,7 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        self.last_http_status: Optional[int] = None
 
     @property
     def provider_name(self) -> str:
@@ -87,11 +88,15 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
                 headers=headers,
                 timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS,
             )
+            self.last_http_status = response.status_code
         except httpx.TimeoutException as exc:
+            self.last_http_status = None
             raise LinkedInTimeoutError(f"Apify request timed out for {target_url}: {exc}") from exc
         except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            self.last_http_status = None
             raise LinkedInRecoverableError(f"Apify network error for {target_url}: {exc}") from exc
         except Exception as exc:
+            self.last_http_status = None
             raise LinkedInRecoverableError(f"Apify unexpected transport error: {exc}") from exc
 
         # Authentication / Authorization errors: FAIL CLOSED
@@ -123,7 +128,14 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
         except Exception as exc:
             raise LinkedInRecoverableError(f"Apify invalid JSON response: {exc}") from exc
 
-        return self._parse_response(data, target_url, limit, entity_name, entity_id)
+        return self._parse_response(
+            data,
+            target_url,
+            limit,
+            entity_name,
+            entity_id,
+            http_status=response.status_code,
+        )
 
     def _parse_response(
         self,
@@ -132,6 +144,7 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
         limit: int,
         entity_name: Optional[str],
         entity_id: Optional[uuid.UUID],
+        http_status: Optional[int] = None,
     ) -> list[LinkedInDiscoveredPost]:
         """Parse raw Apify response dataset items into normalized LinkedInDiscoveredPost objects."""
         items: list[dict[str, Any]] = []
@@ -212,6 +225,7 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
                 "actor_id": self.settings.APIFY_LINKEDIN_ACTOR_ID,
                 "item_type": item.get("type"),
                 "actor_run_id": item.get("actorRunId"),
+                "http_status": http_status or self.last_http_status or 200,
             }
             sanitized_meta = {k: v for k, v in sanitized_meta.items() if v is not None}
 
