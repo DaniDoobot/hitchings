@@ -894,3 +894,75 @@ def test_detail_evidence_when_no_calls(client: TestClient, db_session: Session) 
     assert ev["source"] == "none"
     assert ev["summary_quotes"] == []
     assert ev["key_points"] == []
+
+
+def test_dashboard_total_active_sources_and_all_monitored_sources(
+    client: TestClient, db_session: Session
+) -> None:
+    """Verify dashboard returns dynamic total_active_sources count and includes all active sources."""
+    matrix, _ = create_matrix_and_topics(db_session, active=True)
+
+    # Create 17 active sources (including FTC and DOJ) + 1 inactive source
+    source_names = [
+        "CNMC", "EC DG COMP", "CAT", "CURIA", "Bundesverfassungsgericht",
+        "Bundeskartellamt", "CMA", "Autorite de la concurrence", "OECD",
+        "Kluwer Competition Blog", "ChillinCompetition", "Almacen de Derecho",
+        "Geradin Partners", "DMA Press Corner", "Google News",
+        "Federal Trade Commission", "DOJ Antitrust Division",
+    ]
+    created_sources = []
+    for name in source_names:
+        s = Source(
+            name=name,
+            type=SourceType.WEBSITE,
+            provider="native",
+            url=f"https://example.com/{name.lower().replace(' ', '_')}",
+            active=True,
+        )
+        db_session.add(s)
+        created_sources.append(s)
+
+    # 1 inactive source
+    inactive_src = Source(
+        name="Inactive Authority",
+        type=SourceType.WEBSITE,
+        provider="native",
+        url="https://example.com/inactive",
+        active=False,
+    )
+    db_session.add(inactive_src)
+    db_session.flush()
+
+    # Add entries for FTC and DOJ
+    ftc_source = next(s for s in created_sources if s.name == "Federal Trade Commission")
+    doj_source = next(s for s in created_sources if s.name == "DOJ Antitrust Division")
+
+    e_ftc = create_entry(db_session, ftc_source, title="FTC Action 1")
+    create_analysis(db_session, e_ftc, matrix, relevance_status="relevant", relevance_score=92)
+
+    e_doj = create_entry(db_session, doj_source, title="DOJ Action 1")
+    create_analysis(db_session, e_doj, matrix, relevance_status="relevant", relevance_score=88)
+
+    db_session.commit()
+
+    resp = client.get("/api/v1/observatory/dashboard")
+    assert resp.status_code == status.HTTP_200_OK
+    d = resp.json()
+
+    # Dynamic count: exactly 17 active sources (inactive excluded)
+    assert d["total_active_sources"] == 17
+
+    # top_sources must contain all 17 active sources, not capped at 10
+    top_sources = d["top_sources"]
+    assert len(top_sources) >= 17
+
+    source_map = {s["name"]: s for s in top_sources}
+    assert "Federal Trade Commission" in source_map
+    assert source_map["Federal Trade Commission"]["publication_count"] == 1
+    assert source_map["Federal Trade Commission"]["relevant_count"] == 1
+
+    assert "DOJ Antitrust Division" in source_map
+    assert source_map["DOJ Antitrust Division"]["publication_count"] == 1
+    assert source_map["DOJ Antitrust Division"]["relevant_count"] == 1
+
+    assert "Inactive Authority" not in source_map

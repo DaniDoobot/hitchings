@@ -328,4 +328,41 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(screen.queryByText(/GroundingValidator/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/pipeline_version/i)).not.toBeInTheDocument();
   });
+
+  it('renders dynamic total_active_sources in DashboardPage independently of top_sources length', async () => {
+    const mockDashboardWith17Sources = {
+      total_publications: 100,
+      relevant_count: 60,
+      uncertain_count: 20,
+      not_relevant_count: 20,
+      publications_last_7_days: 10,
+      publications_last_30_days: 40,
+      relevant_last_30_days: 25,
+      total_active_sources: 17,
+      top_topics: [],
+      top_sources: [
+        { source_id: 's-1', name: 'Federal Trade Commission', publication_count: 14, relevant_count: 10 },
+        { source_id: 's-2', name: 'DOJ Antitrust Division', publication_count: 5, relevant_count: 3 },
+      ],
+      latest_relevant_entries: [],
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getDashboard').mockResolvedValueOnce(mockDashboardWith17Sources);
+
+    const { DashboardPage } = await import('../pages/DashboardPage');
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Counter must display 17 fuentes activas even though top_sources only has 2 visible items
+    expect(await screen.findByText('17 fuentes activas')).toBeInTheDocument();
+    expect(screen.getByText('Federal Trade Commission')).toBeInTheDocument();
+    expect(screen.getByText('DOJ Antitrust Division')).toBeInTheDocument();
+  });
 });
+

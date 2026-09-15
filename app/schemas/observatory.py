@@ -231,6 +231,7 @@ class ObservatoryDashboard(BaseModel):
     publications_last_30_days: int
     relevant_last_30_days: int
 
+    total_active_sources: int = 0
     top_topics: list[ObservatoryTopicCount] = Field(default_factory=list)
     top_sources: list[ObservatorySourceCount] = Field(default_factory=list)
     latest_relevant_entries: list[ObservatoryLatestRelevantEntry] = Field(

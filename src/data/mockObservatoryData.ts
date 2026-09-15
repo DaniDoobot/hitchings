@@ -586,6 +586,7 @@ export const MOCK_DASHBOARD: ObservatoryDashboard = {
   publications_last_7_days: 23,
   publications_last_30_days: 40,
   relevant_last_30_days: 11,
+  total_active_sources: 17,
   top_topics: [
     { code: 'collective_actions', name: 'Acciones colectivas y representativas', count: 18 },
     { code: 'damages_actions', name: 'Acciones de daños y perjuicios', count: 16 },

@@ -621,6 +621,13 @@ def get_dashboard(db: Session) -> ObservatoryDashboard:
     entries = _load_entries_for_list_or_dashboard(db)
     hierarchy = build_topic_hierarchy(db)
 
+    active_sources = (
+        db.query(Source)
+        .filter(Source.active.is_(True))
+        .all()
+    )
+    total_active_sources = len(active_sources)
+
     now = utc_now()
     cutoff_7 = now - timedelta(days=7)
     cutoff_30 = now - timedelta(days=30)
@@ -634,7 +641,9 @@ def get_dashboard(db: Session) -> ObservatoryDashboard:
     relevant_last_30 = 0
 
     topic_counter: dict[str, tuple[str, int]] = {}
-    source_pubs: dict[uuid.UUID, tuple[str, int, int]] = {}
+    source_pubs: dict[uuid.UUID, tuple[str, int, int]] = {
+        src.id: (src.name, 0, 0) for src in active_sources
+    }
     relevant_entries: list[tuple[datetime, Entry, EntryAnalysis]] = []
 
     for entry in entries:
@@ -706,9 +715,8 @@ def get_dashboard(db: Session) -> ObservatoryDashboard:
             )
             for src_id, info in source_pubs.items()
         ],
-        key=lambda x: x.publication_count,
-        reverse=True,
-    )[:10]
+        key=lambda x: (-x.publication_count, -x.relevant_count, x.name.lower()),
+    )
 
     relevant_entries.sort(key=lambda x: x[0], reverse=True)
     latest_relevant: list[ObservatoryLatestRelevantEntry] = []
@@ -736,6 +744,7 @@ def get_dashboard(db: Session) -> ObservatoryDashboard:
         publications_last_7_days=pubs_last_7,
         publications_last_30_days=pubs_last_30,
         relevant_last_30_days=relevant_last_30,
+        total_active_sources=total_active_sources,
         top_topics=top_topics,
         top_sources=top_sources,
         latest_relevant_entries=latest_relevant,

@@ -289,14 +289,16 @@ export const DashboardPage: React.FC = () => {
               Fuentes Monitorizadas
             </h3>
             <span className="text-xs font-mono text-slate-500">
-              {dashboard?.top_sources.length || 0} fuentes activas
+              {(dashboard?.total_active_sources !== undefined
+                ? dashboard.total_active_sources
+                : dashboard?.top_sources.length) || 0} fuentes activas
             </span>
           </div>
           <p className="text-xs text-slate-500 mb-5">
             Volumen procesado e índice de relevancia detectado por fuente monitorizada.
           </p>
 
-          <div className="space-y-3">
+          <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
             {dashboard?.top_sources.map((src) => (
               <div
                 key={src.source_id}

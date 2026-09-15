@@ -118,6 +118,7 @@ export interface ObservatoryDashboard {
   publications_last_7_days: number;
   publications_last_30_days: number;
   relevant_last_30_days: number;
+  total_active_sources?: number;
   top_topics: DashboardTopTopic[];
   top_sources: DashboardTopSource[];
   latest_relevant_entries: DashboardLatestEntry[];
