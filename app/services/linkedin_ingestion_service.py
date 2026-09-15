@@ -29,6 +29,11 @@ from app.providers.linkedin.base import (
 )
 from app.providers.linkedin.brightdata import BrightDataLinkedInProvider
 from app.providers.linkedin.apify import ApifyLinkedInProvider
+from app.providers.linkedin.normalizer import (
+    extract_linkedin_activity_id,
+    normalize_linkedin_canonical_url,
+    resolve_canonical_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,14 +267,36 @@ class LinkedInIngestionService:
                         report.stopped_by_cap = True
                         break
 
+                    # Skip if no reliable author or generic placeholder or no tracked entity
+                    author_name = (post.author_name or "").strip()
+                    if (
+                        not author_name
+                        or author_name.lower() in ("linkedin author", "unknown", "author", "linkedin user")
+                        or not job.tracked_entity_id
+                    ):
+                        logger.warning(
+                            "Skipping LinkedIn post without reliable author_name or tracked_entity: url=%s, author=%r",
+                            post.linkedin_post_url,
+                            author_name,
+                        )
+                        continue
+
+                    # Resolve canonical identity & normalized URL
+                    external_id, canonical_url, activity_id, provenance_status = resolve_canonical_identity(
+                        post.provider_item_id, post.linkedin_post_url
+                    )
+
                     # Deduplication checks
-                    if self._is_duplicate(db, post, intra_run_seen_urls, intra_run_seen_ids):
+                    if self._is_duplicate(db, external_id, canonical_url, intra_run_seen_urls, intra_run_seen_ids):
                         report.duplicates += 1
                         continue
 
                     # Track in intra-run cache
-                    norm_url = self._normalize_linkedin_url(post.linkedin_post_url)
-                    intra_run_seen_urls.add(norm_url)
+                    intra_run_seen_urls.add(canonical_url)
+                    if external_id:
+                        intra_run_seen_ids.add(external_id)
+                    if activity_id:
+                        intra_run_seen_ids.add(activity_id)
                     if post.provider_item_id:
                         intra_run_seen_ids.add(post.provider_item_id)
 
@@ -279,7 +306,7 @@ class LinkedInIngestionService:
                         if post.published_at
                         else "undated"
                     )
-                    title = f"LinkedIn — {post.author_name} — {pub_date_str}"
+                    title = f"LinkedIn — {author_name} — {pub_date_str}"
 
                     # Content length limit (Section 21)
                     max_chars = self.settings.LINKEDIN_MAX_POST_CHARS
@@ -288,16 +315,29 @@ class LinkedInIngestionService:
                         clean_content = clean_content[:max_chars]
 
                     # Content hash for standard deduplication
-                    content_hash = compute_ingestion_dedupe_hash(title, post.linkedin_post_url, None)
+                    content_hash = compute_ingestion_dedupe_hash(title, canonical_url, None)
 
-                    # Metadata enrichment & Data minimization (Section 17, 21, 22)
-                    enriched_meta = dict(post.raw_metadata)
+                    # Determine author_type from tracked entity
+                    etype = str(job.entity_type).lower().strip()
+                    if etype in ("organization", "institution", "publication", "company"):
+                        author_type = "organization"
+                    elif etype == "person":
+                        author_type = "person"
+                    else:
+                        author_type = "organization"
+
+                    # Metadata enrichment & Strict Provenance (Sections 17, 21, 22)
+                    enriched_meta = dict(post.raw_metadata or {})
                     enriched_meta.update({
-                        "provider": post.provider,
-                        "provider_item_id": post.provider_item_id,
+                        "retrieval_provider": post.provider,
+                        "provider": post.provider,  # Backward compatibility
+                        "author_name": author_name,
+                        "author_type": author_type,
+                        "author_profile_url": post.author_profile_url,
                         "tracked_entity_id": str(job.tracked_entity_id),
                         "tracked_entity_name": job.entity_name,
-                        "author_profile_url": post.author_profile_url,
+                        "linkedin_activity_id": activity_id,
+                        "provenance_status": provenance_status,
                         "engagement": post.engagement,
                         "fallback_used": used_fallback_for_job,
                     })
@@ -306,13 +346,13 @@ class LinkedInIngestionService:
 
                     entry = Entry(
                         source_id=source.id,
-                        external_id=post.provider_item_id,
-                        url=post.linkedin_post_url,
-                        canonical_url=post.linkedin_post_url,
+                        external_id=external_id,
+                        url=canonical_url,
+                        canonical_url=canonical_url,
                         title=title,
                         content=clean_content if clean_content else None,
                         excerpt=clean_content[:300] if clean_content else None,
-                        author=post.author_name,
+                        author=author_name,
                         published_at=post.published_at,
                         captured_at=datetime.now(timezone.utc),
                         content_type="social_post",
@@ -398,32 +438,38 @@ class LinkedInIngestionService:
     def _is_duplicate(
         self,
         db: Session,
-        post: LinkedInDiscoveredPost,
+        external_id: str,
+        canonical_url: str,
         seen_urls: set[str],
         seen_ids: set[str],
     ) -> bool:
-        """Cross-provider deduplication check (Section 18 & 19)."""
-        norm_url = self._normalize_linkedin_url(post.linkedin_post_url)
-        if norm_url in seen_urls:
+        """Cross-provider deduplication check in strict priority:
+        1. In-memory external_id or canonical_url
+        2. Database check by external_id (e.g. urn:li:activity:{id})
+        3. Database check by canonical_url or raw url
+        """
+        if external_id and external_id in seen_ids:
             return True
 
-        if post.provider_item_id and post.provider_item_id in seen_ids:
+        if canonical_url and canonical_url in seen_urls:
             return True
 
-        # Check in database
-        existing_url = db.execute(
-            select(Entry.id).where(
-                (Entry.url == post.linkedin_post_url) | (Entry.canonical_url == post.linkedin_post_url)
-            )
-        ).scalar_one_or_none()
-        if existing_url:
-            return True
-
-        if post.provider_item_id:
+        # 1. Check in database by external_id
+        if external_id:
             existing_ext = db.execute(
-                select(Entry.id).where(Entry.external_id == post.provider_item_id)
+                select(Entry.id).where(Entry.external_id == external_id)
             ).scalar_one_or_none()
             if existing_ext:
+                return True
+
+        # 2. Check in database by canonical_url or raw url
+        if canonical_url:
+            existing_url = db.execute(
+                select(Entry.id).where(
+                    (Entry.canonical_url == canonical_url) | (Entry.url == canonical_url)
+                )
+            ).scalar_one_or_none()
+            if existing_url:
                 return True
 
         return False
@@ -431,12 +477,7 @@ class LinkedInIngestionService:
     @staticmethod
     def _normalize_linkedin_url(url: str) -> str:
         """Strip trailing slash, query tracking parameters, and protocol differences."""
-        if not url:
-            return ""
-        clean = url.split("?")[0].split("#")[0].strip().rstrip("/")
-        # Normalize http -> https
-        clean = re.sub(r"^http://", "https://", clean)
-        return clean.lower()
+        return normalize_linkedin_canonical_url(url)
 
     @staticmethod
     def _record_provider_usage(

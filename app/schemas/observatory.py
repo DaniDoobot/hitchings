@@ -92,6 +92,7 @@ class ObservatoryEntryListItem(BaseModel):
     title: Optional[str]
     source: ObservatorySourceRef
     author: Optional[str] = None
+    author_type: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]
@@ -117,6 +118,7 @@ class ObservatoryEntryDetail(BaseModel):
     title: Optional[str]
     source: ObservatorySourceRef
     author: Optional[str] = None
+    author_type: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]

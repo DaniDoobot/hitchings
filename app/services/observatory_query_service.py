@@ -227,11 +227,13 @@ def _build_list_item(
     hierarchy: TopicHierarchy,
 ) -> ObservatoryEntryListItem:
     canonical_topics, primary = _canonicalize(analysis, hierarchy)
+    author_type = (entry.raw_metadata or {}).get("author_type") if entry.raw_metadata else None
     return ObservatoryEntryListItem(
         entry_id=entry.id,
         title=entry.title,
         source=ObservatorySourceRef(id=entry.source.id, name=entry.source.name),
         author=entry.author,
+        author_type=author_type,
         published_at=entry.published_at,
         url=entry.url,
         content_type=entry.content_type,
@@ -254,11 +256,13 @@ def _build_detail(
 ) -> ObservatoryEntryDetail:
     canonical_topics, primary = _canonicalize(analysis, hierarchy)
     evidence = _extract_evidence(analysis)
+    author_type = (entry.raw_metadata or {}).get("author_type") if entry.raw_metadata else None
     return ObservatoryEntryDetail(
         entry_id=entry.id,
         title=entry.title,
         source=ObservatorySourceRef(id=entry.source.id, name=entry.source.name),
         author=entry.author,
+        author_type=author_type,
         published_at=entry.published_at,
         url=entry.url,
         content_type=entry.content_type,

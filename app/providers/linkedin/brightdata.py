@@ -141,7 +141,8 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
 
             post_id = str(item.get("id") or item.get("post_id") or "")
             text = item.get("post_text") or item.get("text") or ""
-            author = item.get("author") or item.get("user_id") or entity_name or "LinkedIn Author"
+            raw_author = item.get("author") or item.get("user_id")
+            author = str(raw_author).strip() if raw_author else ""
             author_profile_url = item.get("use_url") or target_url
 
             # Parse publication timestamp safely

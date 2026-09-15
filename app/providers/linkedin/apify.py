@@ -163,18 +163,17 @@ class ApifyLinkedInProvider(BaseLinkedInProvider):
                 author = (
                     author_val.get("name")
                     or author_val.get("publicIdentifier")
-                    or entity_name
-                    or "LinkedIn Author"
-                )
+                    or ""
+                ).strip()
                 author_profile_url = author_val.get("linkedinUrl") or target_url
             else:
-                author = str(
+                raw_str = (
                     author_val
                     or item.get("authorName")
                     or item.get("authorFullName")
-                    or entity_name
-                    or "LinkedIn Author"
+                    or ""
                 )
+                author = str(raw_str).strip()
                 author_profile_url = item.get("authorProfileUrl") or item.get("authorUrl") or target_url
 
             # Publication timestamp (supports harvestapi postedAt dict and ISO strings)

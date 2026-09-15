@@ -364,5 +364,72 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(screen.getByText('Federal Trade Commission')).toBeInTheDocument();
     expect(screen.getByText('DOJ Antitrust Division')).toBeInTheDocument();
   });
+
+  it('renders LinkedIn · {author_name} with person/org icon and original post link without exposing retrieval provider', async () => {
+    const mockLinkedInEntry = {
+      entry_id: 'li-entry-123',
+      title: 'LinkedIn — Garrigues — 2026-03-15',
+      source: { id: 'source-li', name: 'LinkedIn' },
+      author: 'Garrigues',
+      author_type: 'organization',
+      published_at: '2026-03-15T12:00:00Z',
+      url: 'https://www.linkedin.com/posts/garrigues_competition-update-activity-7123456789',
+      content_type: 'post',
+      relevance: { status: 'relevant' as const, score: 90 },
+      summary: 'Análisis de novedades en competencia.',
+      canonical_topics: [{ code: 'merger_control', name: 'Control de concentraciones' }],
+      canonical_primary_topic: { code: 'merger_control', name: 'Control de concentraciones' },
+      key_points: ['Punto 1', 'Punto 2'],
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntries').mockResolvedValueOnce({
+      items: [mockLinkedInEntry],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+    vi.spyOn(apiModule.observatoryApi, 'getSources').mockResolvedValueOnce([]);
+    vi.spyOn(apiModule.observatoryApi, 'getTopics').mockResolvedValueOnce([]);
+
+    const { ObservatoryPage } = await import('../pages/ObservatoryPage');
+
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/observatorio']}>
+        <Routes>
+          <Route path="/observatorio" element={<ObservatoryPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('LinkedIn · Garrigues')).toBeInTheDocument();
+    // Must NOT show technical retrieval provider
+    expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
+
+    unmount();
+
+    // Now test EntryDetailPage
+    const mockDetail = {
+      ...mockLinkedInEntry,
+      evidence: null,
+    };
+    vi.spyOn(apiModule.observatoryApi, 'getEntry').mockResolvedValueOnce(mockDetail);
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio/li-entry-123']}>
+        <Routes>
+          <Route path="/observatorio/:entryId" element={<EntryDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText('LinkedIn · Garrigues')).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Acceder a la publicación original/i });
+    expect(link).toHaveAttribute('href', 'https://www.linkedin.com/posts/garrigues_competition-update-activity-7123456789');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
+  });
 });
+
 

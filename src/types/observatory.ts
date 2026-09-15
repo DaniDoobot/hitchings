@@ -44,6 +44,7 @@ export interface ObservatoryEntryListItem {
   entry_id: string;
   title?: string | null;
   author?: string | null;
+  author_type?: string | null;
   source: ObservatorySourceRef;
   published_at?: string | null;
   url: string;
@@ -59,6 +60,7 @@ export interface ObservatoryEntryDetail {
   entry_id: string;
   title?: string | null;
   author?: string | null;
+  author_type?: string | null;
   source: ObservatorySourceRef;
   published_at?: string | null;
   url: string;

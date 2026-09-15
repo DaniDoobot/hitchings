@@ -48,11 +48,28 @@ CLOSED & IMPLEMENTED
 - Scope guard fail-closed: exclusión automática de causas USAO/no-antitrust.
 - Identidad canónica: `doj_atr:node:{node_id}` o `doj_atr:{year}:{month}:{slug}`
 
+## LinkedIn Discovery Hardening (Bloque 9C)
+
+HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
+- Discovery status: `LINKEDIN_DISCOVERY_ENABLED=false` (sin llamadas reales ni consumo de créditos).
+- Normalizador canónico (`app/providers/linkedin/normalizer.py`):
+  - Extracción de Activity ID numérico de longitud arbitraria (`urn:li:activity:...`, `/feed/update/...`, `/posts/...-activity-...`).
+  - Fallback determinista `linkedin:post:{sha256}` con trazado `provenance_status="fallback"`.
+  - Normalización de `canonical_url` (stripping de querystrings/tracking, fragmentos y trailing slashes).
+- Gating de autoría fail-closed: posts con autores vacíos o genéricos ("LinkedIn Author", "Unknown") o sin entidad trackeada son descartados sin persistir.
+- Desacoplamiento estricto de procedencia:
+  - Autor editorial = Persona u organización (`author_name`).
+  - Proveedor técnico = Bright Data / Apify (`retrieval_provider`, nunca visible al usuario).
+  - Origen / Source = LinkedIn.
+- Deduplicación cross-provider: orden estricto `external_id -> canonical_url -> fallback`.
+- UI portal (`ObservatoryPage` y `EntryDetailPage`):
+  - Cabecera: `LinkedIn · {author_name}` acompañado de icono contextual (`Building2` para organización, `User` para persona).
+  - Enlace seguro directo al post original en LinkedIn.
+  - Ni Bright Data ni Apify se muestran en ningún lugar de la interfaz.
+
 ## Próximo paso exacto
 
-1. En producción (Dokploy):
-   - Redeploy SOLO Compose con el commit final (NO tocar PostgreSQL).
-   - Verificar variables de entorno del contenedor `scheduler`: `ANALYSIS_PROVIDER=gemini` y `GEMINI_API_KEY`.
+1. Prueba controlada de LinkedIn Discovery en staging o local con mock/fixture validado antes de activar credenciales reales.
 
 ## Invariantes
 

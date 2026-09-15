@@ -678,3 +678,167 @@ def test_cnmc_incorrect_url_rejected_and_canonical_validated(db_session: Session
     assert cnmc_pilot["linkedin_url_verification_method"] == "public_linkedin_page_identity_and_official_domain"
     assert cnmc_pilot["linkedin_url_verified_at"] is not None
 
+
+def test_normalizer_extract_activity_id_and_canonical_url():
+    """Verify normalizer extracts activity IDs of various lengths and normalizes URLs."""
+    from app.providers.linkedin.normalizer import (
+        extract_linkedin_activity_id,
+        normalize_linkedin_canonical_url,
+        resolve_canonical_identity,
+    )
+
+    # 1. Non-19 digit ID / varying lengths
+    assert extract_linkedin_activity_id("urn:li:activity:7123456789") == "7123456789"
+    assert extract_linkedin_activity_id("urn:li:activity:12345") == "12345"
+    assert extract_linkedin_activity_id("https://www.linkedin.com/feed/update/urn:li:activity:98765432101234567890/") == "98765432101234567890"
+    assert extract_linkedin_activity_id("https://www.linkedin.com/posts/acme_update-activity-7123456789-abcd") == "7123456789"
+    assert extract_linkedin_activity_id("urn:li:share:555444333") == "555444333"
+
+    # 2. URL normalization (strip tracking query params, fragments, trailing slashes)
+    dirty_url = "https://www.linkedin.com/posts/lawfirm_antitrust-activity-7123456789?utm_source=share&utm_medium=member_desktop#comments"
+    clean_url = normalize_linkedin_canonical_url(dirty_url)
+    assert clean_url == "https://www.linkedin.com/posts/lawfirm_antitrust-activity-7123456789"
+
+    # 3. Canonical identity resolution with activity ID
+    ext_id, canon_url, act_id, status = resolve_canonical_identity(dirty_url)
+    assert ext_id == "urn:li:activity:7123456789"
+    assert canon_url == "https://www.linkedin.com/posts/lawfirm_antitrust-activity-7123456789"
+    assert act_id == "7123456789"
+    assert status == "verified"
+
+    # 4. Fallback identity when activity ID cannot be extracted
+    generic_url = "https://www.linkedin.com/pulse/some-article-slug?trk=pulse-article"
+    f_ext_id, f_canon_url, f_act_id, f_status = resolve_canonical_identity(generic_url)
+    assert f_ext_id.startswith("linkedin:post:")
+    assert f_canon_url == "https://www.linkedin.com/pulse/some-article-slug"
+    assert f_act_id is None
+    assert f_status == "fallback"
+
+
+def test_cross_provider_dedupe_brightdata_and_apify_different_urls(db_session: Session, monkeypatch):
+    """Verify that the same post coming in different URL formats from Bright Data and Apify deduplicates to 1 Entry."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "apify-token")
+
+    matrix = TrackingMatrix(code="TEST-CROSS-DEDUPE", name="Test Dedupe", status="active")
+    entity = TrackedEntity(
+        display_name="Cuatrecasas",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/cuatrecasas"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    service = LinkedInIngestionService()
+
+    # Bright Data returns post with /posts/ slug URL
+    bd_post = [{
+        "url": "https://www.linkedin.com/posts/cuatrecasas_antitrust-bulletin-activity-7299881122334455667?utm_source=li",
+        "id": "7299881122334455667",
+        "author": "Cuatrecasas",
+        "use_url": "https://www.linkedin.com/company/cuatrecasas",
+        "post_text": "Publicación sobre nuevo reglamento de concentraciones en la UE.",
+        "date_posted": "2026-03-15T12:00:00Z",
+        "account_type": "Organization",
+    }]
+    client_bd = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bd_post)))
+    report1 = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client_bd)
+    assert report1.entries_created == 1
+
+    entry1 = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:7299881122334455667")).scalar_one()
+    assert entry1.author == "Cuatrecasas"
+    assert entry1.raw_metadata["author_type"] == "organization"
+    assert entry1.raw_metadata["retrieval_provider"] == "brightdata"
+    assert entry1.raw_metadata["provenance_status"] == "verified"
+    assert entry1.raw_metadata["linkedin_activity_id"] == "7299881122334455667"
+    assert "?" not in entry1.url
+
+    # Apify returns SAME post but with /feed/update/... URL format and different query params
+    apify_post = [{
+        "id": "7299881122334455667",
+        "linkedinUrl": "https://www.linkedin.com/feed/update/urn:li:activity:7299881122334455667/?view=true",
+        "content": "Publicación sobre nuevo reglamento de concentraciones en la UE.",
+        "author": {
+            "name": "Cuatrecasas",
+            "linkedinUrl": "https://www.linkedin.com/company/cuatrecasas",
+        },
+        "postedAt": {"date": "2026-03-15T12:00:00Z"},
+        "type": "post",
+    }]
+    client_apify = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=apify_post)))
+    service_apify = LinkedInIngestionService(primary_provider=ApifyLinkedInProvider())
+    report2 = service_apify.execute_discovery(db=db_session, confirm_real_calls=True, client=client_apify)
+
+    # Cross-provider deduplication succeeds via external_id = urn:li:activity:7299881122334455667
+    assert report2.entries_created == 0
+    assert report2.duplicates == 1
+
+    # Exactly 1 entry in DB
+    total = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:7299881122334455667")).scalars().all()
+    assert len(total) == 1
+
+
+def test_missing_or_generic_author_fails_closed(db_session: Session, monkeypatch):
+    """Verify that posts with missing or generic author names are skipped (fail-closed)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "bd-token")
+
+    matrix = TrackingMatrix(code="TEST-AUTHOR-FAIL", name="Test Author", status="active")
+    entity = TrackedEntity(
+        display_name="Uría Menéndez",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/uria-menendez"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    posts_with_bad_authors = [
+        {
+            "url": "https://www.linkedin.com/posts/activity-111111111",
+            "id": "111111111",
+            "author": "",  # Empty
+            "post_text": "Post with empty author name.",
+            "date_posted": "2026-03-15T10:00:00Z",
+        },
+        {
+            "url": "https://www.linkedin.com/posts/activity-222222222",
+            "id": "222222222",
+            "author": "LinkedIn Author",  # Generic placeholder
+            "post_text": "Post with generic author name.",
+            "date_posted": "2026-03-15T11:00:00Z",
+        },
+        {
+            "url": "https://www.linkedin.com/posts/activity-333333333",
+            "id": "333333333",
+            "author": "Unknown",  # Generic placeholder
+            "post_text": "Post with unknown author name.",
+            "date_posted": "2026-03-15T12:00:00Z",
+        },
+        {
+            "url": "https://www.linkedin.com/posts/activity-444444444",
+            "id": "444444444",
+            "author": "Uría Menéndez",  # Valid
+            "post_text": "Valid post with legitimate author.",
+            "date_posted": "2026-03-15T13:00:00Z",
+        },
+    ]
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=posts_with_bad_authors)))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=client)
+
+    # 3 bad posts skipped, 1 valid created
+    assert report.entries_created == 1
+    assert report.duplicates == 0
+
+    valid_entry = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:444444444")).scalar_one()
+    assert valid_entry.author == "Uría Menéndez"
+    assert valid_entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert "brightdata" not in valid_entry.author.lower()
+
+
