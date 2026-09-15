@@ -1,9 +1,10 @@
 """Bright Data LinkedIn discovery provider using Web Scraper / Dataset API (Bloque 9C)."""
 
 import logging
+import time
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import httpx
 
 from app.core.config import get_settings
@@ -62,13 +63,51 @@ def build_discovery_payload(
 class BrightDataLinkedInProvider(BaseLinkedInProvider):
     """Primary provider for LinkedIn post discovery using Bright Data's Web Scraper API."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        poll_interval: Optional[float] = None,
+        max_poll_attempts: Optional[int] = None,
+        poll_timeout: Optional[float] = None,
+        backoff_factor: Optional[float] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> None:
         self.settings = get_settings()
         self.last_http_status: Optional[int] = None
+        self.poll_interval = (
+            poll_interval
+            if poll_interval is not None
+            else getattr(self.settings, "BRIGHTDATA_POLL_INTERVAL_SECONDS", 2.0)
+        )
+        self.max_poll_attempts = (
+            max_poll_attempts
+            if max_poll_attempts is not None
+            else getattr(self.settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 30)
+        )
+        self.poll_timeout = (
+            poll_timeout
+            if poll_timeout is not None
+            else getattr(self.settings, "BRIGHTDATA_POLL_TIMEOUT_SECONDS", 120.0)
+        )
+        self.backoff_factor = (
+            backoff_factor
+            if backoff_factor is not None
+            else getattr(self.settings, "BRIGHTDATA_POLL_BACKOFF_FACTOR", 1.5)
+        )
+        self._sleep_fn = sleep_fn or time.sleep
 
     @property
     def provider_name(self) -> str:
         return "brightdata"
+
+    @staticmethod
+    def _resolve_base_api_url(endpoint: str) -> str:
+        """Derive base dataset v3 URL from configured endpoint."""
+        clean = endpoint.rstrip("/")
+        if clean.endswith("/scrape"):
+            return clean[:-7]
+        if clean.endswith("/trigger"):
+            return clean[:-8]
+        return clean
 
     def discover_posts(
         self,
@@ -158,14 +197,134 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         except Exception as exc:
             raise LinkedInRecoverableError(f"Bright Data invalid JSON response: {exc}") from exc
 
+        # Check if response initiated an asynchronous snapshot
+        snapshot_id: Optional[str] = None
+        if isinstance(data, dict) and "snapshot_id" in data and data["snapshot_id"]:
+            snapshot_id = str(data["snapshot_id"]).strip()
+
+        if snapshot_id:
+            logger.info("Bright Data snapshot created: snapshot_id=%s for target_url=%s", snapshot_id, target_url)
+            data = self._poll_and_download_snapshot(
+                snapshot_id=snapshot_id,
+                client=client,
+                headers=headers,
+                target_url=target_url,
+            )
+
         return self._parse_response(
             data,
             target_url,
             limit,
             entity_name,
             entity_id,
-            http_status=response.status_code,
+            http_status=self.last_http_status or response.status_code,
         )
+
+    def _poll_and_download_snapshot(
+        self,
+        snapshot_id: str,
+        client: httpx.Client,
+        headers: dict[str, str],
+        target_url: str,
+    ) -> Any:
+        """Poll progress endpoint until snapshot is ready, then download JSON data."""
+        base_url = self._resolve_base_api_url(self.settings.BRIGHTDATA_LINKEDIN_ENDPOINT)
+        progress_url = f"{base_url}/progress/{snapshot_id}"
+        snapshot_url = f"{base_url}/snapshot/{snapshot_id}"
+
+        poll_start = time.time()
+        current_interval = self.poll_interval
+        max_interval = getattr(self.settings, "BRIGHTDATA_POLL_MAX_INTERVAL_SECONDS", 10.0)
+        snapshot_ready = False
+
+        for attempt in range(1, self.max_poll_attempts + 1):
+            elapsed = time.time() - poll_start
+            if elapsed > self.poll_timeout:
+                raise LinkedInTimeoutError(
+                    f"Bright Data polling timed out after {elapsed:.1f}s ({attempt - 1} attempts) for snapshot_id={snapshot_id}"
+                )
+
+            logger.info(
+                "Bright Data polling snapshot_id=%s (attempt %d/%d, elapsed %.1fs)",
+                snapshot_id,
+                attempt,
+                self.max_poll_attempts,
+                elapsed,
+            )
+
+            try:
+                prog_resp = client.get(
+                    progress_url,
+                    headers=headers,
+                    timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS,
+                )
+                self.last_http_status = prog_resp.status_code
+            except httpx.TimeoutException as exc:
+                logger.warning("Bright Data progress poll request timed out on attempt %d: %s", attempt, exc)
+            except Exception as exc:
+                logger.warning("Bright Data progress poll request error on attempt %d: %s", attempt, exc)
+            else:
+                if prog_resp.status_code in (401, 403):
+                    raise LinkedInAuthError(
+                        f"Bright Data authentication error during poll (HTTP {prog_resp.status_code}). Check API token."
+                    )
+                if prog_resp.status_code == 429:
+                    raise LinkedInQuotaExceededError("Bright Data rate limit exceeded during poll (HTTP 429).")
+                if prog_resp.status_code == 200:
+                    try:
+                        prog_json = prog_resp.json()
+                    except Exception:
+                        prog_json = {}
+                    status = str(prog_json.get("status") or "").strip().lower()
+                    logger.info("Bright Data snapshot_id=%s current status: %s", snapshot_id, status)
+                    if status in ("ready", "completed", "done"):
+                        snapshot_ready = True
+                        break
+                    elif status in ("failed", "error"):
+                        raise LinkedInRecoverableError(f"Bright Data snapshot {snapshot_id} failed with status: {status}")
+                elif prog_resp.status_code >= 500:
+                    logger.warning("Bright Data progress poll returned server error HTTP %d", prog_resp.status_code)
+                elif prog_resp.status_code >= 400:
+                    raise LinkedInRecoverableError(
+                        f"Bright Data progress poll failed (HTTP {prog_resp.status_code}): {prog_resp.text[:200]}"
+                    )
+
+            self._sleep_fn(current_interval)
+            current_interval = min(current_interval * self.backoff_factor, max_interval)
+
+        if not snapshot_ready:
+            raise LinkedInTimeoutError(
+                f"Bright Data snapshot_id={snapshot_id} did not complete within {self.max_poll_attempts} attempts."
+            )
+
+        logger.info("Bright Data downloading snapshot: snapshot_id=%s", snapshot_id)
+        try:
+            snap_resp = client.get(
+                snapshot_url,
+                params={"format": "json"},
+                headers=headers,
+                timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS,
+            )
+            self.last_http_status = snap_resp.status_code
+        except httpx.TimeoutException as exc:
+            raise LinkedInTimeoutError(f"Bright Data snapshot download timed out: {exc}") from exc
+        except Exception as exc:
+            raise LinkedInRecoverableError(f"Bright Data snapshot download error: {exc}") from exc
+
+        if snap_resp.status_code in (401, 403):
+            raise LinkedInAuthError(f"Bright Data auth error downloading snapshot (HTTP {snap_resp.status_code}).")
+        if snap_resp.status_code == 429:
+            raise LinkedInQuotaExceededError("Bright Data rate limit exceeded downloading snapshot (HTTP 429).")
+        if snap_resp.status_code >= 400:
+            raise LinkedInRecoverableError(
+                f"Bright Data snapshot download returned HTTP {snap_resp.status_code}: {snap_resp.text[:200]}"
+            )
+
+        logger.info("Bright Data snapshot download completed: snapshot_id=%s", snapshot_id)
+        try:
+            return snap_resp.json()
+        except Exception as exc:
+            raise LinkedInRecoverableError(f"Bright Data invalid snapshot JSON: {exc}") from exc
 
     def _parse_response(
         self,

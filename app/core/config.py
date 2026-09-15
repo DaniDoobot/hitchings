@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/scrape"
     BRIGHTDATA_LINKEDIN_DATASET_ID: str = "gd_lyy3tktm25m4avu764"
     BRIGHTDATA_COST_PER_RECORD_USD: Optional[float] = None
+    BRIGHTDATA_POLL_INTERVAL_SECONDS: float = 2.0
+    BRIGHTDATA_POLL_MAX_ATTEMPTS: int = 30
+    BRIGHTDATA_POLL_TIMEOUT_SECONDS: float = 120.0
+    BRIGHTDATA_POLL_BACKOFF_FACTOR: float = 1.5
+    BRIGHTDATA_POLL_MAX_INTERVAL_SECONDS: float = 10.0
 
     # Apify (Alternative/fallback social scraping - Free-First policy)
     APIFY_ENABLED: bool = False

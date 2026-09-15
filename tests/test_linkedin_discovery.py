@@ -1479,6 +1479,192 @@ def test_brightdata_probe_no_fallback_on_error(db_session, monkeypatch):
     assert report.items_detail[0]["action"] == "FAILED"
 
 
+# ==============================================================================
+# 9. BRIGHT DATA ASYNC SNAPSHOT DISCOVERY FLOW TESTS
+# ==============================================================================
+
+def test_brightdata_async_snapshot_flow_success(monkeypatch, caplog):
+    """Verify Bright Data async flow: POST creates snapshot -> poll running -> poll ready -> download snapshot."""
+    import logging
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "gd_lyy3tktm25m4avu764")
+
+    poll_calls = []
+    download_calls = []
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST" and "scrape" in url_str:
+            return httpx.Response(200, json={"snapshot_id": "sd_mu34g4n42ptmtxyidh", "status": "running"})
+        elif request.method == "GET" and "progress/sd_mu34g4n42ptmtxyidh" in url_str:
+            poll_calls.append(url_str)
+            if len(poll_calls) == 1:
+                return httpx.Response(200, json={"status": "running"})
+            return httpx.Response(200, json={"status": "ready"})
+        elif request.method == "GET" and "snapshot/sd_mu34g4n42ptmtxyidh" in url_str:
+            download_calls.append(url_str)
+            assert "format=json" in url_str
+            return httpx.Response(200, json=MOCK_BRIGHTDATA_POSTS)
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=5, poll_timeout=5.0)
+
+    with caplog.at_level(logging.INFO):
+        posts = provider.discover_posts(
+            target_url="https://www.linkedin.com/company/hausfeld",
+            client=client,
+            limit=5,
+            entity_name="Hausfeld",
+        )
+
+    assert len(poll_calls) == 2
+    assert len(download_calls) == 1
+    assert len(posts) == 2
+    assert posts[0].provider_item_id == "7123456789"
+    assert posts[0].author_name == "Hausfeld"
+
+    # Verify clear structured logs
+    log_text = caplog.text
+    assert "Bright Data snapshot created: snapshot_id=sd_mu34g4n42ptmtxyidh" in log_text
+    assert "Bright Data snapshot_id=sd_mu34g4n42ptmtxyidh current status: running" in log_text
+    assert "Bright Data snapshot_id=sd_mu34g4n42ptmtxyidh current status: ready" in log_text
+    assert "Bright Data snapshot download completed: snapshot_id=sd_mu34g4n42ptmtxyidh" in log_text
+
+
+def test_brightdata_async_snapshot_person_url_flow(monkeypatch):
+    """Verify Bright Data async flow works seamlessly for personal profile URLs."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+
+    captured_post = {}
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST":
+            captured_post["url"] = url_str
+            captured_post["body"] = json.loads(request.read().decode())
+            return httpx.Response(200, json={"snapshot_id": "sd_person_999", "status": "running"})
+        elif "progress/sd_person_999" in url_str:
+            return httpx.Response(200, json={"status": "completed"})
+        elif "snapshot/sd_person_999" in url_str:
+            return httpx.Response(200, json=MOCK_BRIGHTDATA_POSTS[:1])
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=5)
+
+    posts = provider.discover_posts(
+        target_url="https://www.linkedin.com/in/alex-hitchings",
+        client=client,
+        limit=5,
+        entity_name="Alex Hitchings",
+        entity_type="person",
+    )
+
+    assert "type=discover_new" in captured_post["url"]
+    assert "discover_by=profile_url" in captured_post["url"]
+    assert captured_post["body"][0]["only_authored_posts"] is True
+    assert len(posts) == 1
+    assert posts[0].provider_item_id == "7123456789"
+
+
+def test_brightdata_async_snapshot_polling_timeout(monkeypatch):
+    """Verify Bright Data raises LinkedInTimeoutError if polling exceeds max_attempts."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST":
+            return httpx.Response(200, json={"snapshot_id": "sd_stuck_123", "status": "running"})
+        elif "progress/sd_stuck_123" in url_str:
+            return httpx.Response(200, json={"status": "running"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=3, poll_timeout=5.0)
+
+    with pytest.raises(LinkedInTimeoutError) as exc_info:
+        provider.discover_posts("https://www.linkedin.com/company/hausfeld", client=client)
+
+    assert "sd_stuck_123" in str(exc_info.value)
+    assert "did not complete within 3 attempts" in str(exc_info.value)
+
+
+def test_brightdata_async_snapshot_failed_status(monkeypatch):
+    """Verify Bright Data raises LinkedInRecoverableError if snapshot progress reports failed/error."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST":
+            return httpx.Response(200, json={"snapshot_id": "sd_fail_123"})
+        elif "progress/sd_fail_123" in url_str:
+            return httpx.Response(200, json={"status": "failed"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=3)
+
+    with pytest.raises(LinkedInRecoverableError) as exc_info:
+        provider.discover_posts("https://www.linkedin.com/company/hausfeld", client=client)
+
+    assert "sd_fail_123 failed with status: failed" in str(exc_info.value)
+
+
+def test_brightdata_async_snapshot_dedupe_and_provenance(db_session, monkeypatch):
+    """Verify full ingestion with async snapshot produces verified provenance and exact deduplication."""
+    from scripts.ingest_linkedin import run_brightdata_probe
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-secret")
+
+    matrix = TrackingMatrix(code="TEST-PROBE-ASYNC", name="Test Async Probe Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST":
+            return httpx.Response(200, json={"snapshot_id": "sd_async_dedupe_123"})
+        elif "progress/sd_async_dedupe_123" in url_str:
+            return httpx.Response(200, json={"status": "ready"})
+        elif "snapshot/sd_async_dedupe_123" in url_str:
+            return httpx.Response(200, json=MOCK_BRIGHTDATA_POSTS[:1])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+
+    # Fast polling for test
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 5)
+
+    # 1. Run 1: Creates entry
+    code1, report1, _ = run_brightdata_probe(db_session, confirm_real_calls=True, client=mock_client, settings=settings)
+    assert code1 == 0
+    assert report1.entries_created == 1
+    assert report1.items_detail[0]["action"] == "CREATED"
+    assert report1.items_detail[0]["provenance_status"] == "verified"
+    assert report1.items_detail[0]["identity_status"] == "activity_id"
+    assert report1.items_detail[0]["retrieval_provider"] == "brightdata"
+
+    # 2. Run 2: Exact duplicate detected
+    code2, report2, _ = run_brightdata_probe(db_session, confirm_real_calls=True, client=mock_client, settings=settings)
+    assert code2 == 0
+    assert report2.entries_created == 0
+    assert report2.duplicates == 1
+    assert report2.items_detail[0]["action"] == "DUPLICATE"
+
+
+
 
 
 
