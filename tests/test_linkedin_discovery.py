@@ -99,6 +99,7 @@ def test_brightdata_provider_success(monkeypatch):
 
     # 1. Verify request format
     assert "mock_dataset_123" in captured_request["url"]
+    assert "/trigger" in captured_request["url"]
     assert "type=discover_new" in captured_request["url"]
     assert "discover_by=company_url" in captured_request["url"]
     assert captured_request["headers"]["authorization"] == "Bearer mock-token-xyz"
@@ -163,6 +164,7 @@ def test_brightdata_provider_person_url_success(monkeypatch):
     )
 
     assert "mock_dataset_123" in captured_request["url"]
+    assert "/trigger" in captured_request["url"]
     assert "type=discover_new" in captured_request["url"]
     assert "discover_by=profile_url" in captured_request["url"]
     assert captured_request["body"] == [{"url": "https://www.linkedin.com/in/alex-hitchings", "only_authored_posts": True}]
@@ -1490,12 +1492,14 @@ def test_brightdata_async_snapshot_flow_success(monkeypatch, caplog):
     monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
     monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "gd_lyy3tktm25m4avu764")
 
+    post_calls = []
     poll_calls = []
     download_calls = []
 
     def mock_transport_handler(request: httpx.Request):
         url_str = str(request.url)
-        if request.method == "POST" and "scrape" in url_str:
+        if request.method == "POST" and "trigger" in url_str:
+            post_calls.append(url_str)
             return httpx.Response(200, json={"snapshot_id": "sd_mu34g4n42ptmtxyidh", "status": "running"})
         elif request.method == "GET" and "progress/sd_mu34g4n42ptmtxyidh" in url_str:
             poll_calls.append(url_str)
@@ -1519,6 +1523,8 @@ def test_brightdata_async_snapshot_flow_success(monkeypatch, caplog):
             entity_name="Hausfeld",
         )
 
+    assert len(post_calls) == 1
+    assert "/trigger" in post_calls[0]
     assert len(poll_calls) == 2
     assert len(download_calls) == 1
     assert len(posts) == 2
@@ -1563,6 +1569,7 @@ def test_brightdata_async_snapshot_person_url_flow(monkeypatch):
         entity_type="person",
     )
 
+    assert "/trigger" in captured_post["url"]
     assert "type=discover_new" in captured_post["url"]
     assert "discover_by=profile_url" in captured_post["url"]
     assert captured_post["body"][0]["only_authored_posts"] is True

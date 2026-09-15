@@ -125,7 +125,8 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
                 "Bright Data API token is not configured (BRIGHTDATA_API_TOKEN is empty). Fail-closed."
             )
 
-        endpoint = self.settings.BRIGHTDATA_LINKEDIN_ENDPOINT
+        base_url = self._resolve_base_api_url(self.settings.BRIGHTDATA_LINKEDIN_ENDPOINT)
+        endpoint = f"{base_url}/trigger"
         dataset_id = self.settings.BRIGHTDATA_LINKEDIN_DATASET_ID
         discover_by = resolve_discover_by(target_url, entity_type)
 

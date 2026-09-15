@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     BRIGHTDATA_MONTHLY_LIMIT: int = 5000
     BRIGHTDATA_SOFT_LIMIT: int = 4500
     BRIGHTDATA_ALLOW_PAID_USAGE: bool = False
-    BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/scrape"
+    BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/trigger"
     BRIGHTDATA_LINKEDIN_DATASET_ID: str = "gd_lyy3tktm25m4avu764"
     BRIGHTDATA_COST_PER_RECORD_USD: Optional[float] = None
     BRIGHTDATA_POLL_INTERVAL_SECONDS: float = 2.0
