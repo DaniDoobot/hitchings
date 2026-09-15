@@ -78,22 +78,22 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
   - Validado de extremo a extremo sin llamadas HTTP externas: TrackedEntity -> Planner -> Mock Provider -> Normalizer (`external_id=urn:li:activity:{id}`) -> Provenance (`identity_status=activity_id`, `provenance_status=verified`) -> Metadata (sin legacy `provider`, solo `retrieval_provider`) -> Entry DB -> Dedupe cruzado contra simulación Apify -> API & UI contract (`LinkedIn · Hausfeld`).
   - Pruebas automatizadas: 25/25 en pytest backend, 47/47 en vitest frontend.
 
-- Pipeline Operativo LinkedIn Discovery (Transición completada desde Sonda):
-  - Flujo asíncrono Bright Data validado en producción: `POST /datasets/v3/trigger` -> polling `GET /datasets/v3/progress/{snapshot_id}` -> descarga `GET /datasets/v3/snapshot/{snapshot_id}?format=json` (snapshot real `sd_mu34g4n42ptmtxyidh` validado con 1 post, external_id `urn:li:activity:7503008038128119808`).
-  - Soporte completo y verificado para organizaciones (`/company/`, `discover_by=company_url`) y personas (`/in/`, `discover_by=profile_url`, `only_authored_posts: true`, `author_type=person`).
-  - Límites seguros configurables en entorno (`LINKEDIN_DISCOVERY_MAX_ENTITIES=1`, `LINKEDIN_DISCOVERY_MAX_POSTS_PER_ENTITY=1`).
-  - Seguimiento de costes con `BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD` (ej. 0.0025) y fallback automático a `BRIGHTDATA_COST_PER_RECORD_USD`.
-  - Desacoplamiento de Hausfeld: `LinkedInDiscoveryPlanner` selecciona deterministamente entidades activas con prioridad institucional (`institution`: 90, `organization`: 80, `person`: 70, resto: 50).
-  - Procedencia estricta fail-closed: exclusión automática de entidades sin URL y posts con autor mismatch.
-  - CLI `scripts/ingest_linkedin.py` adaptado para ejecución batch estándar (`--confirm-real-calls`, `--max-entities`, `--max-posts`, `--entity`), con generación estructurada de `LINKEDIN DISCOVERY REPORT` con resumen, consumo de proveedor y desglose `Por entidad:`.
-  - Flag `--probe` conservado para pruebas quirúrgicas controladas de Hausfeld.
-  - Scheduler globalmente inactivo (`LINKEDIN_DISCOVERY_ENABLED=false` por defecto).
-  - Cobertura de tests: 44/44 en `tests/test_linkedin_discovery.py`, 47/47 en Vitest frontend.
+- Pipeline Operativo LinkedIn Discovery & Validación Multiorigen (Fases 1-4):
+  - Flujo asíncrono Bright Data validado en producción: `POST /datasets/v3/trigger` -> polling `GET /datasets/v3/progress/{snapshot_id}` -> descarga `GET /datasets/v3/snapshot/{snapshot_id}?format=json`.
+  - Soporte completo para organizaciones (`/company/`) y personas (`/in/`, `only_authored_posts: true`, `author_type=person`).
+  - Fase 1 (Batch CLI & Override manual seguro): CLI `scripts/ingest_linkedin.py` permite `--confirm-real-calls` con `LINKEDIN_DISCOVERY_ENABLED=false` mediante `allow_manual=True`. Métrica `provenance_rejected` agregada y reportada por entidad y en resumen.
+  - Fase 2 (Diferenciación de Origen en Modelo, API y LLM):
+    - Modelo `Entry`: propiedades `@property is_linkedin -> bool` y `@property source_origin_category -> str` ('institutional', 'linkedin', 'expert_analysis', 'other').
+    - Esquemas API (`ObservatorySourceRef`, `ObservatoryEntryListItem`, `ObservatoryEntryDetail`): expuestos `type`, `category`, `is_linkedin` y `source_origin_category`.
+    - Prompts Gemini (`_build_triage_prompt` y `_build_deep_prompt`): inyección explícita de `Origen: LinkedIn (organization/person)` / `Institucional` y `Autor` en los bloques `[DOCUMENTO]`.
+  - Fase 3 (Punto de integración en Scheduler): `WeeklyRefreshService` preserva `LINKEDIN_DISCOVERY_ENABLED=false` estricto y mapea automáticamente nuevas publicaciones a `detail.new_entry_ids` para análisis incremental cuando sea activado.
+  - Fase 4 (UI Enriquecida del Observatorio): `ObservatoryPage` y `EntryDetailPage` presentan claramente el origen LinkedIn, autor, iconos diferenciados (`Building2` / `User`) y badge `Organización` / `Persona`, manteniendo compatibilidad con tests y sin exponer proveedores técnicos (`brightdata`, `apify`).
+  - Cobertura de tests: 47/47 en `tests/test_linkedin_discovery.py`, 12/12 en `tests/test_weekly_refresh.py`, 47/47 en Vitest frontend.
 
 ## Próximo paso exacto
 
-1. Ejecución de prueba batch controlada en entorno de pruebas/producción cuando se autorice:
-   `python -m scripts.ingest_linkedin --confirm-real-calls --max-entities 1 --max-posts 1`
+1. Ejecución de la prueba batch controlada de las 4 entidades verificadas en el contenedor backend de producción:
+   `docker exec -it <backend_container> python -m scripts.ingest_linkedin --confirm-real-calls --max-entities=4 --max-posts=2`
 
 ## Invariantes
 

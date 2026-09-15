@@ -2000,7 +2000,174 @@ def test_cli_batch_run_output_formatting(db_session: Session, monkeypatch, capsy
     assert "Posts: 1" in captured_real
     assert "Created: 1" in captured_real
     assert "Duplicates: 0" in captured_real
+    assert "Provenance rejected: 0" in captured_real
     assert "Errors: 0" in captured_real
+
+
+def test_manual_override_with_discovery_disabled(db_session, monkeypatch):
+    """Verify allow_manual=True permits batch execution even when LINKEDIN_DISCOVERY_ENABLED=False."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", False)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "mock_ds")
+
+    matrix = TrackingMatrix(code="TEST-OVERRIDE", name="Test Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    post_data = [{
+        "url": "https://www.linkedin.com/posts/hausfeld_override-test-activity-7200998877",
+        "id": "7200998877",
+        "author": "Hausfeld",
+        "use_url": "https://www.linkedin.com/company/hausfeld",
+        "post_text": "Manual override test.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+    mock_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=post_data)))
+
+    service = LinkedInIngestionService()
+
+    # 1. Without allow_manual -> Aborted
+    rep_blocked = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        client=mock_client,
+        allow_manual=False,
+    )
+    assert len(rep_blocked.errors) == 1
+    assert "LinkedIn discovery is disabled in settings." in rep_blocked.errors[0]
+    assert rep_blocked.entries_created == 0
+
+    # 2. With allow_manual=True -> Successfully executes
+    rep_ok = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        client=mock_client,
+        allow_manual=True,
+    )
+    assert len(rep_ok.errors) == 0
+    assert rep_ok.entries_created == 1
+    assert rep_ok.provenance_rejected == 0
+
+
+def test_provenance_rejection_tracking(db_session, monkeypatch):
+    """Verify incoherent author_profile_url increments provenance_rejected and reflects in per_entity."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "mock_ds")
+
+    matrix = TrackingMatrix(code="TEST-PROV-REJ", name="Test Matrix 2", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld Prov",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    # Author profile URL does NOT match entity URL
+    post_data = [{
+        "url": "https://www.linkedin.com/posts/imposter_fake-post-activity-7200991122",
+        "id": "7200991122",
+        "author": "Imposter Law",
+        "use_url": "https://www.linkedin.com/company/imposter-law",
+        "post_text": "Fake post not from Hausfeld.",
+        "date_posted": "2026-03-15T10:00:00Z",
+    }]
+    mock_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=post_data)))
+
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert report.posts_seen == 1
+    assert report.entries_created == 0
+    assert report.provenance_rejected == 1
+    assert report.per_entity[0]["provenance_rejected"] == 1
+
+
+def test_entry_origin_properties_and_observatory_query(db_session):
+    """Verify is_linkedin and source_origin_category on Entry and in Observatory query service."""
+    from app.services.observatory_query_service import _build_list_item, _build_detail
+    from app.services.topic_canonicalization_service import TopicHierarchy
+
+    src_li = Source(
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        category="social_media",
+        active=True,
+    )
+    src_inst = Source(
+        name="CNMC",
+        type=SourceType.INSTITUTIONAL,
+        category="official_authority",
+        active=True,
+    )
+    db_session.add_all([src_li, src_inst])
+    db_session.commit()
+
+    e_li = Entry(
+        source_id=src_li.id,
+        url="https://www.linkedin.com/posts/hausfeld_test-activity-7123",
+        canonical_url="https://www.linkedin.com/posts/hausfeld_test-activity-7123",
+        content_type="social_post",
+        author="Hausfeld",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "author_type": "organization",
+        },
+    )
+    e_inst = Entry(
+        source_id=src_inst.id,
+        url="https://www.cnmc.es/resolucion-123",
+        content_type="article",
+        author="CNMC",
+    )
+    db_session.add_all([e_li, e_inst])
+    db_session.commit()
+
+    # Verify model properties
+    assert e_li.is_linkedin is True
+    assert e_li.source_origin_category == "linkedin"
+    assert e_inst.is_linkedin is False
+    assert e_inst.source_origin_category == "institutional"
+
+    # Verify query service mapping
+    analysis = EntryAnalysis(
+        entry_id=e_li.id,
+        status="completed",
+        relevance_status="relevant",
+        relevance_score=85,
+        confidence=0.9,
+        topics=[],
+        key_points=["Key point 1"],
+    )
+    hierarchy = TopicHierarchy([])
+
+    item = _build_list_item(e_li, analysis, hierarchy)
+    assert item.is_linkedin is True
+    assert item.source_origin_category == "linkedin"
+    assert item.source.name == "LinkedIn"
+    assert item.source.type == "linkedin"
+    assert item.source.category == "social_media"
+
+    detail = _build_detail(e_li, analysis, hierarchy)
+    assert detail.is_linkedin is True
+    assert detail.source_origin_category == "linkedin"
+
 
 
 

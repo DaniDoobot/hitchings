@@ -3,6 +3,8 @@ export type RelevanceStatus = 'relevant' | 'uncertain' | 'not_relevant';
 export interface ObservatorySourceRef {
   id: string;
   name: string;
+  type?: string | null;
+  category?: string | null;
 }
 
 export interface ObservatoryTopicItem {
@@ -45,6 +47,8 @@ export interface ObservatoryEntryListItem {
   title?: string | null;
   author?: string | null;
   author_type?: string | null;
+  is_linkedin?: boolean;
+  source_origin_category?: string | null;
   source: ObservatorySourceRef;
   published_at?: string | null;
   url: string;
@@ -61,6 +65,8 @@ export interface ObservatoryEntryDetail {
   title?: string | null;
   author?: string | null;
   author_type?: string | null;
+  is_linkedin?: boolean;
+  source_origin_category?: string | null;
   source: ObservatorySourceRef;
   published_at?: string | null;
   url: string;

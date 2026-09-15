@@ -29,6 +29,8 @@ class ObservatorySourceRef(BaseModel):
 
     id: uuid.UUID
     name: str
+    type: Optional[str] = None
+    category: Optional[str] = None
 
 
 class ObservatoryTopicItem(BaseModel):
@@ -93,6 +95,8 @@ class ObservatoryEntryListItem(BaseModel):
     source: ObservatorySourceRef
     author: Optional[str] = None
     author_type: Optional[str] = None
+    is_linkedin: bool = False
+    source_origin_category: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]
@@ -119,6 +123,8 @@ class ObservatoryEntryDetail(BaseModel):
     source: ObservatorySourceRef
     author: Optional[str] = None
     author_type: Optional[str] = None
+    is_linkedin: bool = False
+    source_origin_category: Optional[str] = None
     published_at: Optional[datetime]
     url: str
     content_type: Optional[str]

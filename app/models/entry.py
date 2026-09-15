@@ -77,5 +77,34 @@ class Entry(Base):
         order_by="desc(EntryAnalysis.created_at)",
     )
 
+    @property
+    def is_linkedin(self) -> bool:
+        """Return True if entry originates from LinkedIn."""
+        if self.content_type == "social_post":
+            raw = self.raw_metadata or {}
+            if raw.get("origin_source") == "linkedin" or raw.get("retrieval_provider") in ("brightdata", "apify"):
+                return True
+        if self.url and "linkedin.com" in self.url:
+            return True
+        if self.source:
+            stype = str(getattr(self.source, "type", "")).lower()
+            if "linkedin" in stype:
+                return True
+        return False
+
+    @property
+    def source_origin_category(self) -> str:
+        """Categorize origin into: 'institutional', 'linkedin', 'expert_analysis', or 'other'."""
+        if self.is_linkedin:
+            return "linkedin"
+        if self.source:
+            stype = str(getattr(self.source, "type", "")).lower()
+            scat = str(getattr(self.source, "category", "")).lower()
+            if "institutional" in stype or "official" in scat or "authority" in scat or "regulator" in scat:
+                return "institutional"
+            if "blog" in stype or "expert" in scat or "analysis" in scat:
+                return "expert_analysis"
+        return "other"
+
     def __repr__(self) -> str:
         return f"<Entry id={self.id} source_id={self.source_id} title='{self.title[:30] if self.title else 'No Title'}'>"

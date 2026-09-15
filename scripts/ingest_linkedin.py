@@ -415,12 +415,11 @@ def main() -> None:
         if not args.confirm_real_calls:
             print("\n[DRY RUN] No real external calls or database entry writes were executed.")
             print("To execute real discovery, use: python -m scripts.ingest_linkedin --confirm-real-calls")
-            print("Ensure LINKEDIN_DISCOVERY_ENABLED=true and valid provider tokens are configured.")
+            print("Ensure valid provider tokens are configured.")
             return
 
         if not settings.LINKEDIN_DISCOVERY_ENABLED:
-            print("\n[BLOCKED] LINKEDIN_DISCOVERY_ENABLED=false in settings. Execution aborted.")
-            return
+            print("\n[MANUAL OVERRIDE] LINKEDIN_DISCOVERY_ENABLED is false; proceeding under explicit manual confirmation (--confirm-real-calls).")
 
         if not has_brightdata_token and not has_apify_token:
             print("\n[SKIPPED] Real execution skipped: provider credentials not configured.")
@@ -434,6 +433,7 @@ def main() -> None:
             target_entity_id=target_uuid,
             max_entities=args.max_entities,
             max_posts_per_entity=args.max_posts,
+            allow_manual=True,
         )
 
         cost_str = (
@@ -451,6 +451,7 @@ def main() -> None:
         print(f"Posts discovered: {report.posts_seen}")
         print(f"Entries created: {report.entries_created}")
         print(f"Duplicates: {report.duplicates}")
+        print(f"Provenance rejected: {report.provenance_rejected}")
         print(f"Failed: {report.failed_jobs}")
         print()
         print("Provider Consumption:")
@@ -466,7 +467,9 @@ def main() -> None:
                 print(f"Posts: {pe['posts']}")
                 print(f"Created: {pe['created']}")
                 print(f"Duplicates: {pe['duplicates']}")
+                print(f"Provenance rejected: {pe.get('provenance_rejected', 0)}")
                 print(f"Errors: {pe['errors']}")
+                print("-" * 30)
         else:
             print("  Ninguna entidad ejecutada.")
         print("=" * 48)

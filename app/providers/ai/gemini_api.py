@@ -250,6 +250,15 @@ class GeminiAPIProvider(BaseAIProvider):
                     "Formula tus justificaciones con el nivel de certeza permitido por la fuente.\n"
                 )
 
+        # Determine origin and author context
+        origin_label = "Web / Editorial"
+        if getattr(entry, "is_linkedin", False):
+            author_type = (entry.raw_metadata or {}).get("author_type") or "organization"
+            origin_label = f"LinkedIn ({author_type})"
+        elif getattr(entry, "source_origin_category", "") == "institutional":
+            origin_label = "Institucional"
+        author_label = entry.author or "(desconocido)"
+
         user_text = (
             f"[MATRIZ HITCHINGS]\n"
             f"Nombre: {snapshot.get('name', '')}\n"
@@ -260,6 +269,8 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Códigos permitidos: [{topic_codes_list}]\n\n"
             f"[DOCUMENTO A ANALIZAR]\n"
             f"Fuente: {entry.source.name if entry.source else 'Desconocida'}\n"
+            f"Origen: {origin_label}\n"
+            f"Autor: {author_label}\n"
             f"Título: {title_text}\n"
             f"Fecha de publicación: {published_at_str}\n"
             f"Tipo de contenido: {content_type}\n"
@@ -318,6 +329,15 @@ class GeminiAPIProvider(BaseAIProvider):
                     "Formula tus afirmaciones con el nivel de certeza permitido por la fuente (ej. 'El resumen oficial indica...').\n"
                 )
 
+        # Determine origin and author context
+        origin_label = "Web / Editorial"
+        if getattr(entry, "is_linkedin", False):
+            author_type = (entry.raw_metadata or {}).get("author_type") or "organization"
+            origin_label = f"LinkedIn ({author_type})"
+        elif getattr(entry, "source_origin_category", "") == "institutional":
+            origin_label = "Institucional"
+        author_label = entry.author or "(desconocido)"
+
         user_text = (
             f"[CLASIFICACIÓN DE TRIAGE]\n"
             f"Relevancia: {relevance_score}/100\n"
@@ -326,6 +346,8 @@ class GeminiAPIProvider(BaseAIProvider):
             f"Motivo de relevancia: {triage_reason}\n\n"
             f"[DOCUMENTO]\n"
             f"Fuente: {entry.source.name if entry.source else 'Desconocida'}\n"
+            f"Origen: {origin_label}\n"
+            f"Autor: {author_label}\n"
             f"Título: {title_text}\n"
             f"Fecha de publicación: {published_at_str}\n"
             f"URL: {entry.url or '(sin URL)'}\n"

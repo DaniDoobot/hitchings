@@ -103,15 +103,20 @@ export const EntryDetailPage: React.FC = () => {
         {/* Source metadata & relevance badge */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-3 mb-4">
           <div className="flex items-center gap-2 flex-wrap">
-            {entry.source.name === 'LinkedIn' ? (
-              <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-1 rounded border border-navy-100 flex items-center gap-1.5">
-                {entry.author_type === 'organization' ? (
-                  <Building2 className="w-3.5 h-3.5 text-navy-600 shrink-0" />
-                ) : (
-                  <User className="w-3.5 h-3.5 text-navy-600 shrink-0" />
-                )}
-                <span>LinkedIn · {entry.author || 'Desconocido'}</span>
-              </span>
+            {entry.source.name === 'LinkedIn' || entry.is_linkedin ? (
+              <>
+                <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-1 rounded border border-navy-100 flex items-center gap-1.5">
+                  {entry.author_type === 'organization' ? (
+                    <Building2 className="w-3.5 h-3.5 text-navy-600 shrink-0" />
+                  ) : (
+                    <User className="w-3.5 h-3.5 text-navy-600 shrink-0" />
+                  )}
+                  <span>LinkedIn · {entry.author || 'Desconocido'}</span>
+                </span>
+                <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded border border-slate-200">
+                  {entry.author_type === 'person' ? 'Persona' : 'Organización'}
+                </span>
+              </>
             ) : (
               <>
                 <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-1 rounded border border-navy-100 flex items-center gap-1.5">

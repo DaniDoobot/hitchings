@@ -294,6 +294,12 @@ class WeeklyRefreshService:
                 detail.duplicates = report_li.duplicates
                 detail.errors.extend(report_li.errors)
                 detail.status = "failed" if report_li.failed_jobs > 0 and report_li.entries_created == 0 else "success"
+                # Connect created LinkedIn entries to incremental analysis
+                for item in report_li.items_detail:
+                    if item.get("action") == "CREATED" and item.get("entry_id"):
+                        eid_str = str(item["entry_id"])
+                        if eid_str not in detail.new_entry_ids:
+                            detail.new_entry_ids.append(eid_str)
 
             # 2. GOOGLE NEWS
             elif source.type == SourceType.GOOGLE_NEWS:

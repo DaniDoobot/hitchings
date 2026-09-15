@@ -60,6 +60,7 @@ class LinkedInIngestionReport:
     stopped_by_cap: bool = False
     estimated_provider_cost: Optional[float] = None
     provider_records_fetched: int = 0
+    provenance_rejected: int = 0
     errors: list[str] = field(default_factory=list)
     items_detail: list[dict[str, Any]] = field(default_factory=list)
     per_entity: list[dict[str, Any]] = field(default_factory=list)
@@ -121,6 +122,7 @@ class LinkedInIngestionService:
         allow_probe: bool = False,
         disable_fallback: bool = False,
         max_entities: Optional[int] = None,
+        allow_manual: bool = False,
     ) -> LinkedInIngestionReport:
         """Execute discovery workflow for verified LinkedIn tracked entities."""
         report = LinkedInIngestionReport(
@@ -144,7 +146,7 @@ class LinkedInIngestionService:
             logger.info("LinkedIn discovery dry-run complete. %d jobs planned.", len(planned_jobs))
             return report
 
-        if not self.settings.LINKEDIN_DISCOVERY_ENABLED and not allow_probe:
+        if not self.settings.LINKEDIN_DISCOVERY_ENABLED and not allow_probe and not allow_manual:
             logger.warning(
                 "LINKEDIN_DISCOVERY_ENABLED=false. Cannot execute real calls. Aborting."
             )
@@ -206,6 +208,7 @@ class LinkedInIngestionService:
                 report.entities_executed += 1
                 job_created_start = report.entries_created
                 job_duplicates_start = report.duplicates
+                job_provenance_rejected_start = report.provenance_rejected
                 posts: list[LinkedInDiscoveredPost] = []
                 used_fallback_for_job = False
                 fallback_reason: Optional[str] = None
@@ -235,6 +238,7 @@ class LinkedInIngestionService:
                         "posts": 0,
                         "created": 0,
                         "duplicates": 0,
+                        "provenance_rejected": 0,
                         "errors": 1,
                     })
                     report.items_detail.append({
@@ -421,6 +425,7 @@ class LinkedInIngestionService:
                             post.linkedin_post_url,
                             author_name,
                         )
+                        report.provenance_rejected += 1
                         report.items_detail.append({
                             "entity_name": job.entity_name,
                             "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
@@ -446,6 +451,7 @@ class LinkedInIngestionService:
                             job.linkedin_url,
                             job.entity_name,
                         )
+                        report.provenance_rejected += 1
                         report.items_detail.append({
                             "entity_name": job.entity_name,
                             "http_status": post.raw_metadata.get("http_status", getattr(self.primary, "last_http_status", 200)),
@@ -533,6 +539,8 @@ class LinkedInIngestionService:
                     # Ensure legacy 'provider' key is NOT written to new entries (Requirement 2)
                     enriched_meta.pop("provider", None)
                     enriched_meta.update({
+                        "origin_source": "linkedin",
+                        "source_origin_category": "linkedin",
                         "retrieval_provider": post.provider,
                         "identity_status": identity_status,
                         "provenance_status": provenance_status,
@@ -585,6 +593,7 @@ class LinkedInIngestionService:
 
                 job_created = report.entries_created - job_created_start
                 job_duplicates = report.duplicates - job_duplicates_start
+                job_provenance_rejected = report.provenance_rejected - job_provenance_rejected_start
                 job_posts = len(posts)
                 used_prov = self.fallback.provider_name if used_fallback_for_job else self.primary.provider_name
                 report.per_entity.append({
@@ -593,6 +602,7 @@ class LinkedInIngestionService:
                     "posts": job_posts,
                     "created": job_created,
                     "duplicates": job_duplicates,
+                    "provenance_rejected": job_provenance_rejected,
                     "errors": 0,
                 })
 
