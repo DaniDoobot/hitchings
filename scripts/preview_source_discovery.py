@@ -62,6 +62,12 @@ from app.providers.extractors.ftc import (
     FTC_SOURCE_NAME,
     FTC_BASE_URL,
 )
+from app.providers.extractors.doj_antitrust import (
+    DOJAntitrustExtractor,
+    DOJAntitrustDiscoveryMetrics,
+    DOJ_ATR_SOURCE_NAME,
+    DOJ_ATR_BASE_URL,
+)
 from app.providers.extractors.european_commission_dma import EuropeanCommissionDMAExtractor
 from app.providers.extractors.oecd_competition import (
     OECDCompetitionExtractor,
@@ -96,6 +102,7 @@ TARGET_SOURCE_NAMES = [
     CMA_SOURCE_NAME,
     ADLC_SOURCE_NAME,
     FTC_SOURCE_NAME,
+    DOJ_ATR_SOURCE_NAME,
 ]
 
 
@@ -627,6 +634,63 @@ class ReadOnlyDeduplicationInspector:
         return ReadOnlyDeduplicationResult(is_duplicate=False)
 
     @staticmethod
+    def check_doj_item(
+        db: Session,
+        source_id: uuid.UUID,
+        raw: RawEntryData,
+    ) -> ReadOnlyDeduplicationResult:
+        """Evaluate DOJ Antitrust candidate against database in read-only mode."""
+        c_hash = compute_content_hash(raw.title, raw.url, raw.excerpt)
+
+        # 1. External ID check
+        if raw.external_id:
+            existing_ext = db.execute(
+                select(Entry).where(
+                    Entry.source_id == source_id,
+                    Entry.external_id == raw.external_id,
+                ).limit(1)
+            ).scalar_one_or_none()
+            if existing_ext:
+                return ReadOnlyDeduplicationResult(
+                    is_duplicate=True,
+                    duplicate_reason="external_id",
+                    matched_entry_id=str(existing_ext.id),
+                    matched_title=existing_ext.title,
+                )
+
+        # 2. URL check
+        existing_url = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                or_(Entry.url == raw.url, Entry.canonical_url == raw.url),
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_url:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="url",
+                matched_entry_id=str(existing_url.id),
+                matched_title=existing_url.title,
+            )
+
+        # 3. Content hash check
+        existing_hash = db.execute(
+            select(Entry).where(
+                Entry.source_id == source_id,
+                Entry.content_hash == c_hash,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if existing_hash:
+            return ReadOnlyDeduplicationResult(
+                is_duplicate=True,
+                duplicate_reason="content_hash",
+                matched_entry_id=str(existing_hash.id),
+                matched_title=existing_hash.title,
+            )
+
+        return ReadOnlyDeduplicationResult(is_duplicate=False)
+
+    @staticmethod
     def check_geradin_item(
 
         db: Session,
@@ -750,6 +814,7 @@ class SourcePreviewSummary(BaseModel):
     cma_metrics: Optional[dict[str, Any]] = None
     adlc_metrics: Optional[dict[str, Any]] = None
     ftc_metrics: Optional[dict[str, Any]] = None
+    doj_metrics: Optional[dict[str, Any]] = None
     new_items: list[PreviewCandidateItem] = Field(default_factory=list)
 
 
@@ -905,6 +970,19 @@ class SourceDiscoveryPreviewService:
                     lookback_days=lookback_days,
                     async_client=async_client,
                 )
+            elif (
+                source.name == DOJ_ATR_SOURCE_NAME
+                or "antitrust division" in source.name.lower()
+                or "doj atr" in source.name.lower()
+                or "doj antitrust" in source.name.lower()
+                or source.name.strip().lower() in ("doj", "doj_atr", "doj-atr")
+            ):
+                summary = await self._preview_doj_async(
+                    source=source,
+                    cutoff_date=cutoff_date,
+                    lookback_days=lookback_days,
+                    async_client=async_client,
+                )
             else:
                 logger.warning("Unrecognized target source: %s", source.name)
                 continue
@@ -993,6 +1071,8 @@ class SourceDiscoveryPreviewService:
                     elif normalized_filter in ("adlc", "autorite_concurrence", "autorite", "france") and "autorit" not in name.lower():
                         continue
                     elif normalized_filter in ("ftc", "federal_trade_commission", "federal trade commission", "ftc_competition", "bureau_of_competition") and "ftc" not in name.lower() and "federal trade commission" not in name.lower():
+                        continue
+                    elif normalized_filter in ("doj", "doj atr", "doj antitrust", "antitrust division", "doj_atr", "doj-atr", "department of justice") and "antitrust division" not in name.lower() and "doj" not in name.lower():
                         continue
 
             db_source = self.db.execute(
@@ -1092,6 +1172,17 @@ class SourceDiscoveryPreviewService:
                 provider="native",
                 url=FTC_BASE_URL,
                 config=dict(DEFAULT_FTC_CONFIG),
+                active=True,
+            )
+        elif name == DOJ_ATR_SOURCE_NAME:
+            from app.providers.extractors.doj_antitrust import DEFAULT_DOJ_ATR_CONFIG
+            return Source(
+                id=uuid.uuid4(),
+                name=DOJ_ATR_SOURCE_NAME,
+                type=SourceType.INSTITUTIONAL,
+                provider="native",
+                url=DOJ_ATR_BASE_URL,
+                config=dict(DEFAULT_DOJ_ATR_CONFIG),
                 active=True,
             )
         else:
@@ -2203,6 +2294,127 @@ class SourceDiscoveryPreviewService:
             if should_close:
                 await client.aclose()
 
+    # --------------------------------------------------------------------------
+    # 7. DOJ ANTITRUST DIVISION PREVIEW
+    # --------------------------------------------------------------------------
+    async def _preview_doj_async(
+        self,
+        source: Source,
+        cutoff_date: Any,
+        lookback_days: int = 90,
+        async_client: Optional[httpx.AsyncClient] = None,
+    ) -> SourcePreviewSummary:
+        """Asynchronously preview DOJ Antitrust Division discovery without mutating DB."""
+        summary = SourcePreviewSummary(source_name=source.name)
+        extractor = DOJAntitrustExtractor()
+
+        client = async_client
+        should_close = False
+        if client is None:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; HITCHINGS/0.1; +https://github.com/hitchings)"}
+            client = httpx.AsyncClient(timeout=25.0, headers=headers, follow_redirects=True)
+            should_close = True
+
+        try:
+            raw_entries = await extractor.extract(client=client, source=source, lookback_days=lookback_days)
+            metrics = extractor.last_metrics
+            summary.discovered_total = metrics.doj_feed_items_total
+            summary.doj_metrics = metrics.to_dict()
+
+            for raw in raw_entries:
+                pub_dt = raw.published_at
+                if not pub_dt:
+                    continue
+                pub_date = pub_dt.date()
+                if pub_date > self.current_date:
+                    summary.excluded_future += 1
+                    continue
+                if pub_date < cutoff_date:
+                    continue
+
+                summary.inside_lookback += 1
+
+                # Deduplicate against database in read-only mode
+                dedupe = ReadOnlyDeduplicationInspector.check_doj_item(
+                    db=self.db,
+                    source_id=source.id,
+                    raw=raw,
+                )
+                if dedupe.is_duplicate:
+                    summary.duplicates += 1
+                    continue
+
+                # Item is NEW
+                summary.new_candidates += 1
+                detached_source = Source(
+                    id=source.id,
+                    name=source.name,
+                    type=source.type,
+                )
+                transient_entry = Entry(
+                    id=uuid.uuid4(),
+                    source_id=source.id,
+                    source=detached_source,
+                    external_id=raw.external_id,
+                    url=raw.url,
+                    canonical_url=raw.url,
+                    title=raw.title,
+                    content=raw.content,
+                    excerpt=raw.excerpt,
+                    author=raw.author,
+                    published_at=raw.published_at,
+                    captured_at=self.now,
+                    language=raw.language or "en",
+                    content_type=raw.content_type or "press_release",
+                    raw_metadata=raw.raw_metadata or {},
+                )
+
+                suff_res = SourceSufficiencyService.assess(transient_entry)
+                suff_level = suff_res.level.value
+
+                if suff_level == SourceSufficiencyLevel.FULL.value:
+                    summary.full_count += 1
+                elif suff_level == SourceSufficiencyLevel.PARTIAL.value:
+                    summary.partial_count += 1
+                else:
+                    summary.insufficient_count += 1
+
+                planner = IncrementalAnalysisPlanner(self.db)
+                cand_eval = planner.evaluate_entry(transient_entry)
+                eligible = (cand_eval.reason == "eligible")
+                if eligible:
+                    summary.eligible_for_analysis += 1
+
+                content_len = len(raw.content or "")
+                summary.new_candidate_chars += content_len
+                if eligible:
+                    summary.eligible_input_chars += content_len
+                summary.estimated_input_chars += content_len
+
+                pub_str = raw.published_at.strftime("%Y-%m-%d") if raw.published_at else "Unknown"
+                meta = raw.raw_metadata or {}
+                summary.new_items.append(
+                    PreviewCandidateItem(
+                        date=pub_str,
+                        source_name=source.name,
+                        title=raw.title,
+                        url=raw.url,
+                        is_duplicate=False,
+                        sufficiency=suff_level,
+                        content_chars=content_len,
+                        eligible_for_analysis=eligible,
+                        case_type=meta.get("action_type") or "unknown",
+                        content_type=raw.content_type,
+                        event_note=meta.get("node_id") or meta.get("guid"),
+                        event_nature="doj_antitrust",
+                    )
+                )
+
+            return summary
+
+        finally:
+            if should_close:
+                await client.aclose()
 
 
 # ==============================================================================
@@ -2296,6 +2508,18 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
             print(f"  ftc_legal_library_items     : {fm.get('ftc_legal_library_items', 0)}")
             print(f"  ftc_duplicate_channels      : {fm.get('ftc_duplicate_channels', 0)}")
             print(f"  ftc_undated_skipped         : {fm.get('ftc_undated_skipped', 0)}")
+        if summary.doj_metrics:
+            dm = summary.doj_metrics
+            print("  --- DOJ ANTITRUST SPECIFIC METRICS ---")
+            print(f"  doj_feed_items_total        : {dm.get('doj_feed_items_total', 0)}")
+            print(f"  doj_inside_lookback         : {dm.get('doj_inside_lookback', 0)}")
+            print(f"  doj_antitrust_items         : {dm.get('doj_antitrust_items', 0)}")
+            print(f"  doj_non_antitrust_skipped   : {dm.get('doj_non_antitrust_skipped', 0)}")
+            print(f"  doj_detail_pages_fetched    : {dm.get('doj_detail_pages_fetched', 0)}")
+            print(f"  doj_pdf_links_found         : {dm.get('doj_pdf_links_found', 0)}")
+            print(f"  doj_pdfs_downloaded         : {dm.get('doj_pdfs_downloaded', 0)}")
+            print(f"  doj_pdfs_skipped            : {dm.get('doj_pdfs_skipped', 0)}")
+            print(f"  doj_undated_skipped         : {dm.get('doj_undated_skipped', 0)}")
 
     print("\n" + "=" * 95)
     print("  TOTAL GLOBAL")
@@ -2342,6 +2566,8 @@ def print_preview_report(report: GlobalPreviewReport) -> None:
                 source_abbrev = "ADLC (France)"
             elif "ftc" in item.source_name.lower() or "federal trade commission" in item.source_name.lower():
                 source_abbrev = "FTC (US)"
+            elif "antitrust division" in item.source_name.lower() or "doj" in item.source_name.lower():
+                source_abbrev = "DOJ ATR (US)"
             else:
                 source_abbrev = item.source_name[:22]
             elig_str = "SÍ" if item.eligible_for_analysis else "NO"
@@ -2369,7 +2595,22 @@ def main() -> int:
         "--source",
         type=str,
         default=None,
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc", "autorite_concurrence", "ftc", "federal_trade_commission"],
+        choices=[
+            "geradin",
+            "dma",
+            "oecd",
+            "bundeskartellamt",
+            "bkart",
+            "cma",
+            "adlc",
+            "autorite_concurrence",
+            "ftc",
+            "federal_trade_commission",
+            "doj",
+            "doj_atr",
+            "doj_antitrust",
+            "antitrust_division",
+        ],
         help="Limit preview to a specific source (default: all target sources)",
     )
 

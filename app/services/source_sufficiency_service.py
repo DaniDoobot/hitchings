@@ -335,6 +335,45 @@ class SourceSufficiencyService:
                     ),
                 )
 
+        # 8. DOJ Antitrust Division
+        if "antitrust division" in source_name or "doj atr" in source_name or "doj antitrust" in source_name or source_name in ("doj", "doj_atr"):
+            if content_chars >= 1500:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.FULL,
+                    reason="Comunicado oficial, demanda o resolución íntegra de la Antitrust Division del DOJ.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "doj_press_release_html",
+                        full_text_available=True,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            elif content_chars >= 300:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.PARTIAL,
+                    reason="Sumario o extracto oficial parcial de la Antitrust Division del DOJ.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "doj_press_release_html",
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=True,
+                    ),
+                )
+            else:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.INSUFFICIENT,
+                    reason="Contenido de la Antitrust Division insuficiente para análisis (< 300 caracteres).",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source,
+                        full_text_available=False,
+                        pdf_available=pdf_avail,
+                        substantive_content=False,
+                    ),
+                )
+
         # Fallback for generic sources
         if content_chars >= 1500:
 

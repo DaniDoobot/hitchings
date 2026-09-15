@@ -18,6 +18,12 @@ from app.providers.extractors.ftc import (
     FTC_SOURCE_NAME,
     FTC_BASE_URL,
 )
+from app.providers.extractors.doj_antitrust import (
+    DOJAntitrustExtractor,
+    DOJAntitrustDiscoveryMetrics,
+    DOJ_ATR_SOURCE_NAME,
+    DOJ_ATR_BASE_URL,
+)
 
 __all__ = [
     "CNMCNewsExtractor",
@@ -34,6 +40,10 @@ __all__ = [
     "FTCDiscoveryMetrics",
     "FTC_SOURCE_NAME",
     "FTC_BASE_URL",
+    "DOJAntitrustExtractor",
+    "DOJAntitrustDiscoveryMetrics",
+    "DOJ_ATR_SOURCE_NAME",
+    "DOJ_ATR_BASE_URL",
 ]
 
 

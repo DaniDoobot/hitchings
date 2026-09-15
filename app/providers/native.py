@@ -141,6 +141,17 @@ class NativeProvider(BaseSourceProvider):
             from app.providers.extractors.ftc import FTCCompetitionExtractor
             return await _run_with_extractor(FTCCompetitionExtractor())
 
+        # 9. Department of Justice - Antitrust Division (DOJ ATR) adapter
+        if (
+            ("justice.gov" in url_lower and ("atr" in url_lower or "376" in url_lower or "antitrust" in url_lower))
+            or "antitrust division" in s_name
+            or "doj atr" in s_name
+            or "doj antitrust" in s_name
+            or s_name in ("doj", "doj_atr", "doj-atr")
+        ):
+            from app.providers.extractors.doj_antitrust import DOJAntitrustExtractor
+            return await _run_with_extractor(DOJAntitrustExtractor())
+
 
         if source.type == SourceType.RSS:
             return await self._fetch_rss(source)
@@ -219,6 +230,18 @@ class NativeProvider(BaseSourceProvider):
         if "ftc.gov" in source.url.lower() or "federal trade commission" in (source.name or "").lower() or (source.name or "").strip().lower() == "ftc":
             from app.providers.extractors.ftc import FTCCompetitionExtractor
             extractor = FTCCompetitionExtractor()
+            headers = {"User-Agent": USER_AGENT}
+            async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
+                return await extractor.extract(client, source)
+
+        # Specific website adapter dispatch: DOJ Antitrust
+        if (
+            ("justice.gov" in source.url.lower() and ("atr" in source.url.lower() or "376" in source.url.lower() or "antitrust" in source.url.lower()))
+            or "antitrust division" in (source.name or "").lower()
+            or (source.name or "").strip().lower() in ("doj", "doj_atr", "doj-atr", "doj antitrust")
+        ):
+            from app.providers.extractors.doj_antitrust import DOJAntitrustExtractor
+            extractor = DOJAntitrustExtractor()
             headers = {"User-Agent": USER_AGENT}
             async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, headers=headers, follow_redirects=True) as client:
                 return await extractor.extract(client, source)

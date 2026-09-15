@@ -1,7 +1,7 @@
 # HITCHINGS — Current Project Status
 
 Fecha:
-2026-09-14
+2026-09-15
 
 ## Estado Observatorio
 
@@ -19,89 +19,44 @@ DOJ Antitrust Division.
 
 ## FTC
 
-Bloque 17A:
-INTEGRATE
+CLOSED
+- 16 entries en 90d
+- 14 completed
+- 1 PARTIAL no analizada
+- 1 INSUFFICIENT no analizada
+- 0 pending
+- 0 failed-only
+- 0 new candidates
 
-Bloque 17B:
-implementado.
-
-Commit base FTC:
-1e3af6d
-
-Source producción:
-Federal Trade Commission - Bureau of Competition
-
-Source ID:
+Source ID producción:
 e9671e46-94a5-49eb-ba0a-db96d35ffc24
 
-FTC source ya está seeded en producción.
+## DOJ Antitrust Division (Source 17/17)
 
-IMPORTANTE:
-NO volver a ejecutar seed salvo que sea necesario/idempotente.
-
-No existen todavía Entries FTC creadas mediante backfill.
-
-No se ha ejecutado Gemini para FTC.
-
-## Incidencia encontrada
-
-Los previews de 14/30/90 días fallaron inicialmente con:
-
-SET TRANSACTION ISOLATION LEVEL must be called before any query
-
-Causa:
-La Session ejecutaba operaciones previas o autobegin implícito antes de configurar
-el aislamiento en PostgreSQL, lo que provocaba que el motor rechazara
-`SET TRANSACTION ISOLATION LEVEL`.
-
-Commit que lo corrige:
-`eda208e` (fix: initialize read-only preview transaction safely)
-
-La solución configura de forma idiomática `execution_options`
-(`isolation_level="REPEATABLE READ"`, `postgresql_readonly=True`) a nivel de Engine
-y Connection, haciendo que la transacción nazca directamente como `REPEATABLE READ, READ ONLY`
-sin emitir sentencias SQL frágiles.
-
-Nota sobre el commit `eda208e`:
-Incluye adicionalmente una mejora de inyección de sesión opcional en `scripts/seed_source_cma.py`
-y `tests/test_cma_milestones.py` (`seed_cma_source(db=...)`), permitiendo que la suite de CMA
-se ejecute en local fuera de Docker contra SQLite sin intentar resolver el host `db:5432`.
-Cero impacto en producción.
+IMPLEMENTED
+- Extractor nativo: `app/providers/extractors/doj_antitrust.py`
+- RSS feed: `https://www.justice.gov/news/rss?field_component=376&type=press_release`
+- Seeder idempotente: `scripts/seed_source_doj_antitrust.py`
+- Scope guard fail-closed: exclusión automática de causas USAO/no-antitrust.
+- Identidad canónica: `doj_atr:node:{node_id}` o `doj_atr:{year}:{month}:{slug}`
+- Previews locales validados (strict read-only, 0 Gemini, 0 DB mutations):
+  - 14d: 1 new candidate (1 FULL, 1 eligible)
+  - 30d: 4 new candidates (4 FULL, 4 eligible)
+  - 90d: 13 new candidates (12 FULL, 1 PARTIAL, 12 eligible, 1 USAO excluido)
+- Tests: 9 passed (`tests/test_doj_antitrust_extractor.py`)
 
 ## Próximo paso exacto
 
-1. En el ordenador de oficina:
-   git fetch
-   git pull origin main
-
-2. Recrear entorno local si hace falta.
-   NO versionar .env ni secretos.
-
-3. Desplegar SOLO HITCHINGS Compose con el HEAD final.
-   NO tocar/reiniciar PostgreSQL.
-
-4. Ejecutar en backend producción:
-
-```bash
-python -m scripts.preview_source_discovery \
-  --source ftc \
-  --lookback-days 14
-
-python -m scripts.preview_source_discovery \
-  --source ftc \
-  --lookback-days 30
-
-python -m scripts.preview_source_discovery \
-  --source ftc \
-  --lookback-days 90
-```
-
-5. Revisar resultados ANTES de cualquier backfill.
-
-6. Elegir una ventana cuyo new_candidates sea exactamente 1
-   para la primera sonda real FTC.
-
-7. NO ejecutar backfill FTC hasta revisar esos previews.
+1. En producción (Dokploy):
+   - Redeploy SOLO Compose con el commit final (NO tocar PostgreSQL).
+   - Ejecutar seed idempotente:
+     `python -m scripts.seed_source_doj_antitrust`
+   - Ejecutar previews read-only en backend producción:
+     `python -m scripts.preview_source_discovery --source doj --lookback-days 14`
+     `python -m scripts.preview_source_discovery --source doj --lookback-days 30`
+     `python -m scripts.preview_source_discovery --source doj --lookback-days 90`
+2. Revisar resultados de los 3 previews.
+3. Primera sonda controlada de 1 candidato (`--lookback-days 14 --max-new-entries 1`).
 
 ## Invariantes
 

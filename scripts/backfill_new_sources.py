@@ -120,9 +120,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--source",
-        choices=["geradin", "dma", "oecd", "bundeskartellamt", "bkart", "cma", "adlc", "ftc"],
+        choices=[
+            "geradin",
+            "dma",
+            "oecd",
+            "bundeskartellamt",
+            "bkart",
+            "cma",
+            "adlc",
+            "ftc",
+            "doj",
+            "doj_atr",
+            "doj_antitrust",
+            "antitrust_division",
+        ],
         default=None,
-        help="Optional single source filter: 'geradin', 'dma', 'oecd', 'bundeskartellamt', 'cma', 'adlc', or 'ftc' (default: all).",
+        help="Optional single source filter: 'geradin', 'dma', 'oecd', 'bundeskartellamt', 'cma', 'adlc', 'ftc', or 'doj' (default: all).",
 
     )
     parser.add_argument(

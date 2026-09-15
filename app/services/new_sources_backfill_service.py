@@ -59,6 +59,7 @@ from scripts.preview_source_discovery import (
     CMA_SOURCE_NAME,
     ADLC_SOURCE_NAME,
     FTC_SOURCE_NAME,
+    DOJ_ATR_SOURCE_NAME,
     DMA_SOURCE_NAME,
     GERADIN_SOURCE_NAME,
     OECD_SOURCE_NAME,
@@ -255,6 +256,12 @@ class NewSourcesBackfillService:
                             )
                         elif source.name == FTC_SOURCE_NAME or "ftc" in source.name.lower() or "federal trade commission" in source.name.lower():
                             dedup = ReadOnlyDeduplicationInspector.check_ftc_item(
+                                db=db,
+                                source_id=source.id,
+                                raw=raw,
+                            )
+                        elif source.name == DOJ_ATR_SOURCE_NAME or "antitrust division" in source.name.lower() or "doj" in source.name.lower():
+                            dedup = ReadOnlyDeduplicationInspector.check_doj_item(
                                 db=db,
                                 source_id=source.id,
                                 raw=raw,
@@ -832,6 +839,7 @@ class NewSourcesBackfillService:
             CMA_SOURCE_NAME,
             ADLC_SOURCE_NAME,
             FTC_SOURCE_NAME,
+            DOJ_ATR_SOURCE_NAME,
         ]
         resolved: list[Source] = []
 
@@ -858,6 +866,9 @@ class NewSourcesBackfillService:
                         continue
                 elif norm_filter in {"ftc", "federal trade commission", "ftc competition", "bureau of competition"}:
                     if name != FTC_SOURCE_NAME:
+                        continue
+                elif norm_filter in {"doj", "doj atr", "doj antitrust", "antitrust division", "doj_atr", "doj-atr"}:
+                    if name != DOJ_ATR_SOURCE_NAME:
                         continue
                 else:
                     if norm_filter not in name.lower():
