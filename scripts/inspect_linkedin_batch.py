@@ -8,7 +8,7 @@ from sqlalchemy import select, desc
 from app.db.session import SessionLocal
 from app.models.entry import Entry
 from app.models.analysis import AnalysisPromptVersion
-from app.providers.ai.gemini_api import GeminiApiProvider
+from app.providers.ai.gemini_api import GeminiAPIProvider
 
 
 def inspect_batch():
@@ -107,7 +107,7 @@ def inspect_batch():
             "exclusion_instructions": "Excluir nombramientos comerciales.",
             "topics": [{"code": "CARTEL_DAMAGES", "name": "Danos por Carteles"}],
         }
-        gemini = GeminiApiProvider()
+        gemini = GeminiAPIProvider()
         sys_text, user_text, in_chars = gemini._build_triage_prompt(
             prompt_version=dummy_prompt_version,
             entry=first_entry,
