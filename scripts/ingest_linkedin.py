@@ -313,6 +313,8 @@ def main() -> None:
             print(f"Entries Created        : {report.entries_created}")
             print(f"Duplicates             : {report.duplicates}")
             print(f"Failed Jobs            : {report.failed_jobs}")
+            print(f"Timed Out Snapshots    : {report.timed_out_snapshots}")
+            print(f"Provider Errors        : {report.provider_errors}")
 
             if report.items_detail:
                 for idx, itm in enumerate(report.items_detail, 1):
@@ -453,6 +455,8 @@ def main() -> None:
         print(f"Duplicates: {report.duplicates}")
         print(f"Provenance rejected: {report.provenance_rejected}")
         print(f"Failed: {report.failed_jobs}")
+        print(f"  - Timed out snapshots: {report.timed_out_snapshots}")
+        print(f"  - Provider errors: {report.provider_errors}")
         print()
         print("Provider Consumption:")
         print(f"  {consumption} records fetched")
@@ -469,6 +473,8 @@ def main() -> None:
                 print(f"Duplicates: {pe['duplicates']}")
                 print(f"Provenance rejected: {pe.get('provenance_rejected', 0)}")
                 print(f"Errors: {pe['errors']}")
+                print(f"Timed out snapshots: {pe.get('timed_out_snapshots', 0)}")
+                print(f"Provider errors: {pe.get('provider_errors', 0)}")
                 print("-" * 30)
         else:
             print("  Ninguna entidad ejecutada.")

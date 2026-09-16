@@ -56,6 +56,11 @@ class LinkedInTimeoutError(LinkedInRecoverableError):
     pass
 
 
+class LinkedInSnapshotTimeoutError(LinkedInTimeoutError):
+    """Snapshot polling timed out after trigger was accepted by provider."""
+    pass
+
+
 class LinkedInQuotaExceededError(LinkedInRecoverableError):
     """Provider quota or rate limit exceeded (HTTP 429)."""
     pass

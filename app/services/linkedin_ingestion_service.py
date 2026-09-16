@@ -26,6 +26,7 @@ from app.providers.linkedin.base import (
     LinkedInDiscoveredPost,
     LinkedInAuthError,
     LinkedInRecoverableError,
+    LinkedInSnapshotTimeoutError,
 )
 from app.providers.linkedin.brightdata import BrightDataLinkedInProvider
 from app.providers.linkedin.apify import ApifyLinkedInProvider
@@ -56,6 +57,8 @@ class LinkedInIngestionReport:
     entries_created: int = 0
     duplicates: int = 0
     failed_jobs: int = 0
+    timed_out_snapshots: int = 0
+    provider_errors: int = 0
     fallback_count: int = 0
     stopped_by_cap: bool = False
     estimated_provider_cost: Optional[float] = None
@@ -231,6 +234,7 @@ class LinkedInIngestionService:
                         auth_err,
                     )
                     report.failed_jobs += 1
+                    report.provider_errors += 1
                     report.errors.append(f"Auth error on {job.entity_name}: {auth_err}")
                     report.per_entity.append({
                         "entity": job.entity_name,
@@ -240,6 +244,8 @@ class LinkedInIngestionService:
                         "duplicates": 0,
                         "provenance_rejected": 0,
                         "errors": 1,
+                        "timed_out_snapshots": 0,
+                        "provider_errors": 1,
                     })
                     report.items_detail.append({
                         "entity_name": job.entity_name,
@@ -259,6 +265,110 @@ class LinkedInIngestionService:
                         "error": str(auth_err),
                     })
                     continue
+                except LinkedInSnapshotTimeoutError as snap_err:
+                    logger.warning(
+                        "Primary provider snapshot timed out for '%s' (%s). Checking fallback eligibility...",
+                        job.entity_name,
+                        snap_err,
+                    )
+                    fallback_reason = str(snap_err)
+
+                    if not disable_fallback and self.settings.apify_token:
+                        try:
+                            posts = self.fallback.discover_posts(
+                                target_url=job.linkedin_url,
+                                client=client,
+                                limit=max_posts_eff,
+                                entity_name=job.entity_name,
+                                entity_id=job.tracked_entity_id,
+                            )
+                            used_fallback_for_job = True
+                            report.fallback_count += 1
+                            provider_items_used[self.fallback.provider_name] += len(posts)
+                            logger.info(
+                                "Fallback '%s' succeeded for '%s' (%d posts).",
+                                self.fallback.provider_name,
+                                job.entity_name,
+                                len(posts),
+                            )
+                        except Exception as fb_err:
+                            logger.error(
+                                "Fallback '%s' also failed for '%s': %s",
+                                self.fallback.provider_name,
+                                job.entity_name,
+                                fb_err,
+                            )
+                            report.failed_jobs += 1
+                            report.timed_out_snapshots += 1
+                            report.errors.append(f"Job failed on {job.entity_name}: snapshot timeout and fallback failed: {fb_err}")
+                            report.per_entity.append({
+                                "entity": job.entity_name,
+                                "provider": self.fallback.provider_name,
+                                "posts": 0,
+                                "created": 0,
+                                "duplicates": 0,
+                                "provenance_rejected": 0,
+                                "errors": 1,
+                                "timed_out_snapshots": 1,
+                                "provider_errors": 0,
+                            })
+                            report.items_detail.append({
+                                "entity_name": job.entity_name,
+                                "http_status": getattr(self.fallback, "last_http_status", None) or "ERROR",
+                                "records_returned": 0,
+                                "author_name": None,
+                                "author_profile_url": None,
+                                "linkedin_post_url": None,
+                                "activity_id": None,
+                                "published_at": None,
+                                "identity_status": None,
+                                "provenance_status": None,
+                                "retrieval_provider": self.fallback.provider_name,
+                                "action": "FAILED",
+                                "entry_id": None,
+                                "external_id": None,
+                                "error": f"Snapshot timeout; Fallback failed: {fb_err}",
+                            })
+                            continue
+                    else:
+                        reason_msg = "fallback disabled" if disable_fallback else "fallback token not configured"
+                        logger.error(
+                            "Snapshot timed out and %s. Skipping '%s'.",
+                            reason_msg,
+                            job.entity_name,
+                        )
+                        report.failed_jobs += 1
+                        report.timed_out_snapshots += 1
+                        report.errors.append(f"Job failed on {job.entity_name}: {snap_err} ({reason_msg})")
+                        report.per_entity.append({
+                            "entity": job.entity_name,
+                            "provider": self.primary.provider_name,
+                            "posts": 0,
+                            "created": 0,
+                            "duplicates": 0,
+                            "provenance_rejected": 0,
+                            "errors": 1,
+                            "timed_out_snapshots": 1,
+                            "provider_errors": 0,
+                        })
+                        report.items_detail.append({
+                            "entity_name": job.entity_name,
+                            "http_status": getattr(self.primary, "last_http_status", None) or 200,
+                            "records_returned": 0,
+                            "author_name": None,
+                            "author_profile_url": None,
+                            "linkedin_post_url": None,
+                            "activity_id": None,
+                            "published_at": None,
+                            "identity_status": None,
+                            "provenance_status": None,
+                            "retrieval_provider": self.primary.provider_name,
+                            "action": "TIMED_OUT_SNAPSHOT",
+                            "entry_id": None,
+                            "external_id": None,
+                            "error": f"{snap_err} ({reason_msg})",
+                        })
+                        continue
                 except LinkedInRecoverableError as rec_err:
                     logger.warning(
                         "Primary provider failed for '%s' (%s). Checking fallback eligibility...",
@@ -294,6 +404,7 @@ class LinkedInIngestionService:
                                 fb_err,
                             )
                             report.failed_jobs += 1
+                            report.provider_errors += 1
                             report.errors.append(f"Job failed on {job.entity_name}: {fb_err}")
                             report.per_entity.append({
                                 "entity": job.entity_name,
@@ -301,7 +412,10 @@ class LinkedInIngestionService:
                                 "posts": 0,
                                 "created": 0,
                                 "duplicates": 0,
+                                "provenance_rejected": 0,
                                 "errors": 1,
+                                "timed_out_snapshots": 0,
+                                "provider_errors": 1,
                             })
                             report.items_detail.append({
                                 "entity_name": job.entity_name,
@@ -329,6 +443,7 @@ class LinkedInIngestionService:
                             job.entity_name,
                         )
                         report.failed_jobs += 1
+                        report.provider_errors += 1
                         report.errors.append(f"Job failed on {job.entity_name}: {rec_err} ({reason_msg})")
                         report.per_entity.append({
                             "entity": job.entity_name,
@@ -336,7 +451,10 @@ class LinkedInIngestionService:
                             "posts": 0,
                             "created": 0,
                             "duplicates": 0,
+                            "provenance_rejected": 0,
                             "errors": 1,
+                            "timed_out_snapshots": 0,
+                            "provider_errors": 1,
                         })
                         report.items_detail.append({
                             "entity_name": job.entity_name,
@@ -359,6 +477,7 @@ class LinkedInIngestionService:
                 except Exception as unk_err:
                     logger.error("Unexpected error for '%s': %s", job.entity_name, unk_err)
                     report.failed_jobs += 1
+                    report.provider_errors += 1
                     report.errors.append(f"Unexpected error on {job.entity_name}: {unk_err}")
                     report.per_entity.append({
                         "entity": job.entity_name,
@@ -366,7 +485,10 @@ class LinkedInIngestionService:
                         "posts": 0,
                         "created": 0,
                         "duplicates": 0,
+                        "provenance_rejected": 0,
                         "errors": 1,
+                        "timed_out_snapshots": 0,
+                        "provider_errors": 1,
                     })
                     report.items_detail.append({
                         "entity_name": job.entity_name,
@@ -612,6 +734,8 @@ class LinkedInIngestionService:
                     "duplicates": job_duplicates,
                     "provenance_rejected": job_provenance_rejected,
                     "errors": 0,
+                    "timed_out_snapshots": 0,
+                    "provider_errors": 0,
                 })
 
             # 5. Record ProviderUsage (Section 13)
@@ -657,6 +781,8 @@ class LinkedInIngestionService:
                 "entries_created": report.entries_created,
                 "duplicates": report.duplicates,
                 "failed_jobs": report.failed_jobs,
+                "timed_out_snapshots": report.timed_out_snapshots,
+                "provider_errors": report.provider_errors,
                 "fallback_count": report.fallback_count,
                 "stopped_by_cap": report.stopped_by_cap,
                 "provider_records_fetched": report.provider_records_fetched,

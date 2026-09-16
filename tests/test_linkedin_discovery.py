@@ -20,6 +20,7 @@ from app.providers.linkedin.base import (
     LinkedInAuthError,
     LinkedInRecoverableError,
     LinkedInTimeoutError,
+    LinkedInSnapshotTimeoutError,
     LinkedInQuotaExceededError,
 )
 from app.providers.linkedin.brightdata import (
@@ -2167,6 +2168,159 @@ def test_entry_origin_properties_and_observatory_query(db_session):
     detail = _build_detail(e_li, analysis, hierarchy)
     assert detail.is_linkedin is True
     assert detail.source_origin_category == "linkedin"
+
+
+# ==============================================================================
+# 11. RESILIENCE & REPORT CLASSIFICATION TESTS
+# ==============================================================================
+
+def test_brightdata_async_snapshot_ready_after_150_seconds(monkeypatch):
+    """Verify snapshot becoming ready after 150s is valid and succeeds under 300s timeout."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_TIMEOUT_SECONDS", 300.0)
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 40)
+
+    # Simulated clock: starts at t=0.0
+    simulated_time = [0.0]
+
+    def mock_time():
+        return simulated_time[0]
+
+    monkeypatch.setattr("time.time", mock_time)
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST" and "trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": "sd_150s_ready", "status": "running"})
+        elif "progress/sd_150s_ready" in url_str:
+            if simulated_time[0] >= 150.0:
+                return httpx.Response(200, json={"status": "ready"})
+            return httpx.Response(200, json={"status": "running"})
+        elif "snapshot/sd_150s_ready" in url_str:
+            return httpx.Response(200, json=MOCK_BRIGHTDATA_POSTS[:1])
+        return httpx.Response(404)
+
+    def advance_time(seconds):
+        simulated_time[0] += 50.0
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(sleep_fn=advance_time)
+
+    assert provider.poll_timeout == 300.0
+    assert provider.max_poll_attempts == 40
+
+    posts = provider.discover_posts(
+        target_url="https://www.linkedin.com/company/hausfeld",
+        client=client,
+        limit=5,
+        entity_name="Hausfeld",
+    )
+
+    assert len(posts) == 1
+    assert posts[0].provider_item_id == "7123456789"
+    assert simulated_time[0] >= 150.0
+
+
+def test_brightdata_async_snapshot_timeout_after_300_seconds_classified_as_timed_out_snapshot(
+    db_session: Session, monkeypatch
+):
+    """Verify timeout after 300s raises LinkedInSnapshotTimeoutError and is classified as timed_out_snapshots, NOT provider_errors."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_TIMEOUT_SECONDS", 300.0)
+    monkeypatch.setattr(settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 40)
+
+    matrix = TrackingMatrix(code="TEST-TIMEOUT-300", name="Test Timeout 300s Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    simulated_time = [0.0]
+
+    def mock_time():
+        return simulated_time[0]
+
+    monkeypatch.setattr("time.time", mock_time)
+
+    def mock_transport_handler(request: httpx.Request):
+        url_str = str(request.url)
+        if request.method == "POST" and "trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": "sd_timeout_300", "status": "running"})
+        elif "progress/sd_timeout_300" in url_str:
+            return httpx.Response(200, json={"status": "running"})
+        return httpx.Response(404)
+
+    def advance_time_past_300(seconds):
+        simulated_time[0] += 305.0
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    provider = BrightDataLinkedInProvider(sleep_fn=advance_time_past_300)
+
+    service = LinkedInIngestionService(primary_provider=provider)
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=True,
+    )
+
+    # Classification assertions:
+    assert report.timed_out_snapshots == 1
+    assert report.provider_errors == 0
+    assert report.failed_jobs == 1
+    assert report.entries_created == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "TIMED_OUT_SNAPSHOT"
+    assert "sd_timeout_300" in report.items_detail[0]["error"]
+    assert report.per_entity[0]["timed_out_snapshots"] == 1
+    assert report.per_entity[0]["provider_errors"] == 0
+
+
+def test_brightdata_provider_error_classified_as_provider_error(db_session: Session, monkeypatch):
+    """Verify HTTP 500 server error is classified as provider_errors, NOT timed_out_snapshots."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-xyz")
+
+    matrix = TrackingMatrix(code="TEST-PROV-ERR", name="Test Provider Error Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Hausfeld",
+        entity_type="organization",
+        active=True,
+        metadata_={"linkedin_url": "https://www.linkedin.com/company/hausfeld"},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    def mock_transport_handler(request: httpx.Request):
+        return httpx.Response(500, text="Internal Server Error")
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport_handler))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=True,
+    )
+
+    assert report.provider_errors == 1
+    assert report.timed_out_snapshots == 0
+    assert report.failed_jobs == 1
+    assert report.entries_created == 0
+    assert report.items_detail[0]["action"] == "FAILED"
+    assert report.per_entity[0]["provider_errors"] == 1
+    assert report.per_entity[0]["timed_out_snapshots"] == 0
+
 
 
 

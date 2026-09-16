@@ -14,6 +14,7 @@ from app.providers.linkedin.base import (
     LinkedInAuthError,
     LinkedInRecoverableError,
     LinkedInTimeoutError,
+    LinkedInSnapshotTimeoutError,
     LinkedInQuotaExceededError,
 )
 
@@ -81,12 +82,12 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         self.max_poll_attempts = (
             max_poll_attempts
             if max_poll_attempts is not None
-            else getattr(self.settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 30)
+            else getattr(self.settings, "BRIGHTDATA_POLL_MAX_ATTEMPTS", 40)
         )
         self.poll_timeout = (
             poll_timeout
             if poll_timeout is not None
-            else getattr(self.settings, "BRIGHTDATA_POLL_TIMEOUT_SECONDS", 120.0)
+            else getattr(self.settings, "BRIGHTDATA_POLL_TIMEOUT_SECONDS", 300.0)
         )
         self.backoff_factor = (
             backoff_factor
@@ -241,7 +242,7 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         for attempt in range(1, self.max_poll_attempts + 1):
             elapsed = time.time() - poll_start
             if elapsed > self.poll_timeout:
-                raise LinkedInTimeoutError(
+                raise LinkedInSnapshotTimeoutError(
                     f"Bright Data polling timed out after {elapsed:.1f}s ({attempt - 1} attempts) for snapshot_id={snapshot_id}"
                 )
 
@@ -294,7 +295,7 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
             current_interval = min(current_interval * self.backoff_factor, max_interval)
 
         if not snapshot_ready:
-            raise LinkedInTimeoutError(
+            raise LinkedInSnapshotTimeoutError(
                 f"Bright Data snapshot_id={snapshot_id} did not complete within {self.max_poll_attempts} attempts."
             )
 
