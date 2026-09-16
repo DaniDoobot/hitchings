@@ -288,12 +288,22 @@ class WeeklyRefreshService:
                 report_li = self.linkedin_service.execute_discovery(
                     db=db,
                     confirm_real_calls=confirm_real_calls,
+                    max_entities=getattr(self.settings, "LINKEDIN_MAX_ENTITIES_PER_RUN", None),
+                    max_posts_per_entity=getattr(self.settings, "LINKEDIN_MAX_POSTS_PER_ENTITY", None),
+                    max_concurrent=getattr(self.settings, "LINKEDIN_MAX_CONCURRENT_JOBS", None),
                 )
                 detail.found = report_li.posts_seen
                 detail.new_entries = report_li.entries_created
                 detail.duplicates = report_li.duplicates
                 detail.errors.extend(report_li.errors)
-                detail.status = "failed" if report_li.failed_jobs > 0 and report_li.entries_created == 0 else "success"
+                # Status logic: hard fail only if provider_errors > 0 and no entries created;
+                # timeouts are partial, not full failure
+                if report_li.provider_errors > 0 and report_li.entries_created == 0:
+                    detail.status = "failed"
+                elif report_li.timed_out_snapshots > 0 and report_li.entries_created == 0:
+                    detail.status = "partial"
+                else:
+                    detail.status = "success"
                 # Connect created LinkedIn entries to incremental analysis
                 for item in report_li.items_detail:
                     if item.get("action") == "CREATED" and item.get("entry_id"):
@@ -380,7 +390,10 @@ class WeeklyRefreshService:
                     )
                     .all()
                 )
-                detail.new_entry_ids = [str(r[0]) for r in new_entries_query]
+                for r in new_entries_query:
+                    r_str = str(r[0])
+                    if r_str not in detail.new_entry_ids:
+                        detail.new_entry_ids.append(r_str)
 
         except Exception as exc:
             logger.error("[WeeklyRefresh] Error processing source '%s': %s", source.name, exc, exc_info=True)

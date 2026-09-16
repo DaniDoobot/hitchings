@@ -259,6 +259,12 @@ def main() -> None:
         default=None,
         help="Maximum posts per entity (overrides config default).",
     )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=None,
+        help="Maximum entities discovered in parallel (default: LINKEDIN_MAX_CONCURRENT_JOBS from config).",
+    )
 
     args = parser.parse_args()
     settings = get_settings()
@@ -427,6 +433,9 @@ def main() -> None:
             print("\n[SKIPPED] Real execution skipped: provider credentials not configured.")
             return
 
+        import time
+        t_start = time.perf_counter()
+
         # Execute discovery
         print("\n[EXECUTION] Starting real LinkedIn discovery run...")
         report = service.execute_discovery(
@@ -436,7 +445,11 @@ def main() -> None:
             max_entities=args.max_entities,
             max_posts_per_entity=args.max_posts,
             allow_manual=True,
+            max_concurrent=args.max_concurrent,
         )
+
+        t_elapsed = time.perf_counter() - t_start
+        effective_exec_time = report.execution_time_seconds or round(t_elapsed, 2)
 
         cost_str = (
             f"${report.estimated_provider_cost:.4f} USD"
@@ -445,18 +458,20 @@ def main() -> None:
         )
         consumption = report.provider_records_fetched if report.provider_records_fetched else report.posts_seen
 
-        print("\n" + "=" * 48)
+        print("\n" + "=" * 56)
         print("LINKEDIN DISCOVERY REPORT")
-        print("=" * 48)
+        print("=" * 56)
+        print(f"Execution time: {effective_exec_time}s")
+        print(f"Execution mode: {report.execution_mode}")
         print(f"Entities planned: {report.entities_planned}")
         print(f"Entities executed: {report.entities_executed}")
         print(f"Posts discovered: {report.posts_seen}")
         print(f"Entries created: {report.entries_created}")
         print(f"Duplicates: {report.duplicates}")
         print(f"Provenance rejected: {report.provenance_rejected}")
+        print(f"Timed out snapshots: {report.timed_out_snapshots}")
+        print(f"Provider errors: {report.provider_errors}")
         print(f"Failed: {report.failed_jobs}")
-        print(f"  - Timed out snapshots: {report.timed_out_snapshots}")
-        print(f"  - Provider errors: {report.provider_errors}")
         print()
         print("Provider Consumption:")
         print(f"  {consumption} records fetched")
@@ -464,21 +479,29 @@ def main() -> None:
         print(f"  {cost_str}")
         print()
         print("Por entidad:")
+        print("-" * 56)
         if report.per_entity:
             for pe in report.per_entity:
+                # Infer status from per-entity counters
+                if pe.get("timed_out_snapshots", 0) > 0:
+                    status = "timeout"
+                elif pe.get("provider_errors", 0) > 0 or pe.get("errors", 0) > 0:
+                    status = "error"
+                else:
+                    status = "completed"
                 print(f"Entity: {pe['entity']}")
-                print(f"Provider: {pe['provider']}")
+                print(f"Status: {status}")
+                print(f"Provider: {pe.get('provider', 'brightdata')}")
                 print(f"Posts: {pe['posts']}")
                 print(f"Created: {pe['created']}")
                 print(f"Duplicates: {pe['duplicates']}")
                 print(f"Provenance rejected: {pe.get('provenance_rejected', 0)}")
-                print(f"Errors: {pe['errors']}")
-                print(f"Timed out snapshots: {pe.get('timed_out_snapshots', 0)}")
-                print(f"Provider errors: {pe.get('provider_errors', 0)}")
-                print("-" * 30)
+                print(f"Timeout: {pe.get('timed_out_snapshots', 0)}")
+                print(f"Errors: {pe.get('provider_errors', pe.get('errors', 0))}")
+                print("-" * 56)
         else:
             print("  Ninguna entidad ejecutada.")
-        print("=" * 48)
+        print("=" * 56)
 
         if report.items_detail:
             print("\nDetalle de publicaciones procesadas:")

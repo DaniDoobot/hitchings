@@ -140,6 +140,7 @@ class Settings(BaseSettings):
     LINKEDIN_MAX_NEW_ENTRIES_PER_RUN: int = 25
     LINKEDIN_TIMEOUT_SECONDS: float = 60.0
     LINKEDIN_MAX_POST_CHARS: int = 50_000
+    LINKEDIN_MAX_CONCURRENT_JOBS: int = 3  # Maximum number of entity jobs executed in parallel
 
     # Incremental Analysis (Bloque 9D - Post-Ingestion Analysis Orchestration)
     INCREMENTAL_ANALYSIS_MAX_ESTIMATED_COST_USD: float = 0.50

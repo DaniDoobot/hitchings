@@ -2771,3 +2771,355 @@ def test_analyze_linkedin_batch_uses_real_settings_gemini_api_key(db_session: Se
 
 
 
+
+# ============================================================
+# Section 14 — Concurrent Job Execution
+# ============================================================
+
+
+def _make_mock_post(entity_name: str, entity_url: str, idx: int = 1) -> LinkedInDiscoveredPost:
+    """Helper: create a minimal valid LinkedInDiscoveredPost for a given entity."""
+    import re
+    slug = re.sub(r"[^a-zA-Z0-9]", "", entity_name).lower()
+    unique_num = f"{abs(hash(entity_name)) % 10000:04d}{idx:04d}"
+    activity_id = f"urn:li:activity:{unique_num}"
+    post_url = f"https://www.linkedin.com/posts/{slug}_update-{unique_num}-activity-{unique_num}"
+    return LinkedInDiscoveredPost(
+        linkedin_post_url=post_url,
+        provider_item_id=activity_id,
+        text=f"Post {idx} from {entity_name} about competition law and enforcement.",
+        author_name=entity_name,
+        author_profile_url=entity_url,
+        published_at=datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc),
+        provider="brightdata",
+        engagement={"likes": 10, "comments": 2, "shares": 1},
+        raw_metadata={"http_status": 200},
+    )
+
+
+def _seed_entity_with_linkedin(
+    db: Session,
+    name: str,
+    linkedin_url: str,
+    matrix_id: uuid.UUID = None,
+) -> TrackedEntity:
+    """Seed a TrackedEntity with LinkedIn URL for use in concurrency tests."""
+    entity = TrackedEntity(
+        id=uuid.uuid4(),
+        display_name=name,
+        entity_type="organization",
+        metadata_={"linkedin_url": linkedin_url, "linkedin_entity_type": "organization"},
+    )
+    db.add(entity)
+    db.flush()
+    return entity
+
+
+def test_concurrent_jobs_all_succeed(db_session: Session) -> None:
+    """3 entities run concurrently, all succeed → report counters reflect all 3."""
+    from unittest.mock import MagicMock, patch
+    from app.core.config import Settings
+
+    matrix = TrackingMatrix(code="HITCH", name="HITCHINGS", status="active")
+    db_session.add(matrix)
+    db_session.flush()
+
+    entities = [
+        _seed_entity_with_linkedin(db_session, "EntityA", "https://www.linkedin.com/company/entity-a", matrix.id),
+        _seed_entity_with_linkedin(db_session, "EntityB", "https://www.linkedin.com/company/entity-b", matrix.id),
+        _seed_entity_with_linkedin(db_session, "EntityC", "https://www.linkedin.com/company/entity-c", matrix.id),
+    ]
+    db_session.commit()
+
+    # Build mock discover_posts that returns one post per entity
+    def mock_discover(target_url, client, limit, entity_name, entity_id):
+        # Map URL to entity name
+        for ent in entities:
+            if ent.metadata_["linkedin_url"] == target_url:
+                return [_make_mock_post(ent.display_name, target_url, idx=1)]
+        return []
+
+    mock_primary = MagicMock()
+    mock_primary.provider_name = "brightdata"
+    mock_primary.discover_posts = mock_discover
+
+    mock_fallback = MagicMock()
+    mock_fallback.provider_name = "apify"
+
+    mock_planner = MagicMock()
+    mock_planner.plan_jobs.return_value = [
+        LinkedInDiscoveryJob(
+            job_id=f"job-{ent.id}",
+            tracked_entity_id=ent.id,
+            entity_name=ent.display_name,
+            linkedin_url=ent.metadata_["linkedin_url"],
+            entity_type="organization",
+            provider="brightdata",
+            priority=1,
+        )
+        for ent in entities
+    ]
+
+    settings_override = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,
+        LINKEDIN_MAX_CONCURRENT_JOBS=3,
+        LINKEDIN_MAX_POSTS_PER_ENTITY=2,
+        LINKEDIN_MAX_NEW_ENTRIES_PER_RUN=50,
+    )
+
+    service = LinkedInIngestionService(
+        planner=mock_planner,
+        primary_provider=mock_primary,
+        fallback_provider=mock_fallback,
+    )
+    service.settings = settings_override
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        allow_manual=True,
+        max_concurrent=3,
+    )
+
+    assert report.entities_executed == 3
+    assert report.posts_seen == 3
+    assert report.entries_created == 3
+    assert report.failed_jobs == 0
+    assert report.timed_out_snapshots == 0
+    assert report.execution_mode == "concurrent_3"
+    assert len(report.per_entity) == 3
+
+
+def test_concurrent_jobs_one_timeout_others_continue(db_session: Session) -> None:
+    """Hausfeld: OK, CNMC: snapshot timeout, ESKARIAM: OK → 2 created, 1 timed_out."""
+    from unittest.mock import MagicMock
+    from app.core.config import Settings
+
+    matrix = TrackingMatrix(code="HITCH2", name="HITCHINGS-2", status="active")
+    db_session.add(matrix)
+    db_session.flush()
+
+    hausfeld = _seed_entity_with_linkedin(db_session, "Hausfeld", "https://www.linkedin.com/company/hausfeld", matrix.id)
+    cnmc = _seed_entity_with_linkedin(db_session, "CNMC", "https://www.linkedin.com/company/cnmc", matrix.id)
+    eskariam = _seed_entity_with_linkedin(db_session, "ESKARIAM", "https://www.linkedin.com/company/eskariam", matrix.id)
+    db_session.commit()
+
+    timeout_url = cnmc.metadata_["linkedin_url"]
+
+    def mock_discover(target_url, client, limit, entity_name, entity_id):
+        if target_url == timeout_url:
+            raise LinkedInSnapshotTimeoutError("Snapshot timed out after 300s")
+        for ent in [hausfeld, eskariam]:
+            if ent.metadata_["linkedin_url"] == target_url:
+                return [_make_mock_post(ent.display_name, target_url, idx=1)]
+        return []
+
+    mock_primary = MagicMock()
+    mock_primary.provider_name = "brightdata"
+    mock_primary.discover_posts = mock_discover
+
+    mock_fallback = MagicMock()
+    mock_fallback.provider_name = "apify"
+
+    mock_planner = MagicMock()
+    mock_planner.plan_jobs.return_value = [
+        LinkedInDiscoveryJob(
+            job_id=f"job-{ent.id}",
+            tracked_entity_id=ent.id,
+            entity_name=ent.display_name,
+            linkedin_url=ent.metadata_["linkedin_url"],
+            entity_type="organization",
+            provider="brightdata",
+            priority=1,
+        )
+        for ent in [hausfeld, cnmc, eskariam]
+    ]
+
+    settings_override = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,
+        LINKEDIN_MAX_CONCURRENT_JOBS=3,
+        LINKEDIN_MAX_POSTS_PER_ENTITY=2,
+        LINKEDIN_MAX_NEW_ENTRIES_PER_RUN=50,
+        APIFY_API_TOKEN="",  # No fallback
+    )
+
+    service = LinkedInIngestionService(
+        planner=mock_planner,
+        primary_provider=mock_primary,
+        fallback_provider=mock_fallback,
+    )
+    service.settings = settings_override
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        allow_manual=True,
+        max_concurrent=3,
+        disable_fallback=True,
+    )
+
+    assert report.entities_executed == 3, f"Expected 3, got {report.entities_executed}"
+    assert report.entries_created == 2, f"Expected 2 entries, got {report.entries_created}"
+    assert report.timed_out_snapshots == 1, f"Expected 1 timeout, got {report.timed_out_snapshots}"
+    assert report.failed_jobs == 1
+    assert report.execution_mode == "concurrent_3"
+    # Timeout for CNMC must not cancel Hausfeld or ESKARIAM
+    created_entities = {
+        item["entity_name"] for item in report.items_detail if item.get("action") == "CREATED"
+    }
+    assert "Hausfeld" in created_entities
+    assert "ESKARIAM" in created_entities
+    assert "CNMC" not in created_entities
+
+
+def test_concurrent_jobs_semaphore_limits_parallelism(db_session: Session) -> None:
+    """With max_concurrent=1 and 2 jobs, runs are sequential even if called with concurrent mode."""
+    from unittest.mock import MagicMock
+    from app.core.config import Settings
+
+    matrix = TrackingMatrix(code="HITCH3", name="HITCHINGS-3", status="active")
+    db_session.add(matrix)
+    db_session.flush()
+
+    ent1 = _seed_entity_with_linkedin(db_session, "SequA", "https://www.linkedin.com/company/sequ-a", matrix.id)
+    ent2 = _seed_entity_with_linkedin(db_session, "SequB", "https://www.linkedin.com/company/sequ-b", matrix.id)
+    db_session.commit()
+
+    call_log: list[str] = []
+
+    def mock_discover(target_url, client, limit, entity_name, entity_id):
+        call_log.append(entity_name)
+        for ent in [ent1, ent2]:
+            if ent.metadata_["linkedin_url"] == target_url:
+                return [_make_mock_post(ent.display_name, target_url, idx=1)]
+        return []
+
+    mock_primary = MagicMock()
+    mock_primary.provider_name = "brightdata"
+    mock_primary.discover_posts = mock_discover
+
+    mock_fallback = MagicMock()
+    mock_fallback.provider_name = "apify"
+
+    mock_planner = MagicMock()
+    mock_planner.plan_jobs.return_value = [
+        LinkedInDiscoveryJob(
+            job_id=f"job-{ent.id}",
+            tracked_entity_id=ent.id,
+            entity_name=ent.display_name,
+            linkedin_url=ent.metadata_["linkedin_url"],
+            entity_type="organization",
+            provider="brightdata",
+            priority=1,
+        )
+        for ent in [ent1, ent2]
+    ]
+
+    settings_override = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,
+        LINKEDIN_MAX_CONCURRENT_JOBS=1,
+        LINKEDIN_MAX_POSTS_PER_ENTITY=2,
+        LINKEDIN_MAX_NEW_ENTRIES_PER_RUN=50,
+    )
+
+    service = LinkedInIngestionService(
+        planner=mock_planner,
+        primary_provider=mock_primary,
+        fallback_provider=mock_fallback,
+    )
+    service.settings = settings_override
+
+    # max_concurrent=1 → use_concurrent = False → sequential path
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        allow_manual=True,
+        max_concurrent=1,
+    )
+
+    assert report.entities_executed == 2
+    assert report.entries_created == 2
+    assert report.execution_mode == "sequential"
+    # Both entities should have been called
+    assert set(call_log) == {"SequA", "SequB"}
+
+
+def test_concurrent_report_counters_are_correct(db_session: Session) -> None:
+    """Report counters are correctly merged from 3 concurrent jobs without double-counting."""
+    from unittest.mock import MagicMock
+    from app.core.config import Settings
+
+    matrix = TrackingMatrix(code="HITCH4", name="HITCHINGS-4", status="active")
+    db_session.add(matrix)
+    db_session.flush()
+
+    entities = [
+        _seed_entity_with_linkedin(db_session, f"MergeEnt{i}", f"https://www.linkedin.com/company/merge-ent-{i}", matrix.id)
+        for i in range(1, 4)
+    ]
+    db_session.commit()
+
+    def mock_discover(target_url, client, limit, entity_name, entity_id):
+        # Each entity returns 2 posts
+        for idx, ent in enumerate(entities):
+            if ent.metadata_["linkedin_url"] == target_url:
+                return [
+                    _make_mock_post(ent.display_name, target_url, idx=idx * 10 + 1),
+                    _make_mock_post(ent.display_name, target_url, idx=idx * 10 + 2),
+                ]
+        return []
+
+    mock_primary = MagicMock()
+    mock_primary.provider_name = "brightdata"
+    mock_primary.discover_posts = mock_discover
+
+    mock_fallback = MagicMock()
+    mock_fallback.provider_name = "apify"
+
+    mock_planner = MagicMock()
+    mock_planner.plan_jobs.return_value = [
+        LinkedInDiscoveryJob(
+            job_id=f"job-{ent.id}",
+            tracked_entity_id=ent.id,
+            entity_name=ent.display_name,
+            linkedin_url=ent.metadata_["linkedin_url"],
+            entity_type="organization",
+            provider="brightdata",
+            priority=1,
+        )
+        for ent in entities
+    ]
+
+    settings_override = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,
+        LINKEDIN_MAX_CONCURRENT_JOBS=3,
+        LINKEDIN_MAX_POSTS_PER_ENTITY=5,
+        LINKEDIN_MAX_NEW_ENTRIES_PER_RUN=50,
+    )
+
+    service = LinkedInIngestionService(
+        planner=mock_planner,
+        primary_provider=mock_primary,
+        fallback_provider=mock_fallback,
+    )
+    service.settings = settings_override
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        allow_manual=True,
+        max_concurrent=3,
+    )
+
+    # 3 entities × 2 posts each = 6 posts_seen, 6 entries_created (no duplicates in this test)
+    assert report.posts_seen == 6, f"Expected 6 posts_seen, got {report.posts_seen}"
+    assert report.entries_created == 6, f"Expected 6 entries_created, got {report.entries_created}"
+    assert report.duplicates == 0
+    assert report.failed_jobs == 0
+    assert report.entities_executed == 3
+    assert len(report.per_entity) == 3
+    # Sum of per_entity created must equal report total
+    total_created_per_entity = sum(pe["created"] for pe in report.per_entity)
+    assert total_created_per_entity == report.entries_created, (
+        f"Per-entity sum {total_created_per_entity} != report.entries_created {report.entries_created}"
+    )

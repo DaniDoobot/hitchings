@@ -633,3 +633,99 @@ def test_sufficiency_gating_full_analyzed_partial_insufficient_skipped(
     assert plan_passed.eligible_count == 1
     assert plan_passed.candidates[0].entry_id == entry_full.id
 
+
+def test_weekly_refresh_linkedin_disabled_by_default(
+    db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
+):
+    """When default settings are used, LINKEDIN_DISCOVERY_ENABLED is False and LinkedIn source is skipped."""
+    settings = Settings()
+    assert settings.LINKEDIN_DISCOVERY_ENABLED is False
+
+    service = WeeklyRefreshService(settings=settings)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=["LinkedIn Test"],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.sources_skipped == 1
+    assert report.per_source[0].status == "skipped"
+    assert "provider_not_configured" in report.per_source[0].errors
+
+
+def test_weekly_refresh_linkedin_creates_entries_and_passes_to_analysis(
+    db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
+):
+    """When LINKEDIN_DISCOVERY_ENABLED is True, discovery runs and created entries pass to incremental analysis."""
+    linkedin_source = test_sources["linkedin"]
+
+    created_entry_id = uuid.uuid4()
+    mock_li_report = LinkedInIngestionReport(
+        run_id=uuid.uuid4(),
+        primary_provider="brightdata",
+        fallback_provider="apify",
+        posts_seen=5,
+        entries_created=1,
+        duplicates=4,
+        items_detail=[
+            {
+                "action": "CREATED",
+                "entry_id": str(created_entry_id),
+                "entity_name": "Hausfeld",
+            }
+        ],
+    )
+
+    mock_li_service = MagicMock()
+    mock_li_service.execute_discovery.return_value = mock_li_report
+
+    mock_analysis_svc = MagicMock()
+    from app.services.incremental_analysis_service import IncrementalAnalysisReport
+    mock_analysis_svc.execute_incremental_run.return_value = IncrementalAnalysisReport(
+        run_id="test-li-incremental",
+        completed=1,
+        failed=0,
+        skipped_budget=0,
+    )
+
+    settings = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=True,
+        BRIGHTDATA_API_TOKEN="token-xyz",
+        LINKEDIN_MAX_CONCURRENT_JOBS=3,
+        LINKEDIN_MAX_ENTITIES_PER_RUN=5,
+        LINKEDIN_MAX_POSTS_PER_ENTITY=2,
+    )
+
+    service = WeeklyRefreshService(
+        settings=settings,
+        linkedin_service=mock_li_service,
+        incremental_analysis_service=mock_analysis_svc,
+    )
+
+    # Mock _analyze_new_entries or verify it receives created_entry_id
+    with patch.object(service, "_analyze_new_entries", wraps=service._analyze_new_entries) as spy_analyze:
+        report = service.run_weekly_refresh(
+            db=db_session,
+            confirm_real_calls=True,
+            sources_filter=["LinkedIn Test"],
+        )
+
+        mock_li_service.execute_discovery.assert_called_once_with(
+            db=db_session,
+            confirm_real_calls=True,
+            max_entities=5,
+            max_posts_per_entity=2,
+            max_concurrent=3,
+        )
+
+        assert report.sources_attempted == 1
+        assert report.per_source[0].status == "success"
+        assert report.per_source[0].new_entries == 1
+        assert str(created_entry_id) in report.per_source[0].new_entry_ids
+
+        spy_analyze.assert_called_once()
+        called_entry_ids = spy_analyze.call_args[1]["entry_ids"]
+        assert created_entry_id in called_entry_ids
+
+
