@@ -2701,9 +2701,73 @@ def test_analyze_linkedin_batch_entity_filter(db_session: Session):
 
 
 
+# ============================================================
+# Section 13 — analyze_linkedin_batch: real Settings attribute
+# ============================================================
 
 
+def test_analyze_linkedin_batch_uses_real_settings_gemini_api_key(db_session: Session) -> None:
+    """Verify that run_linkedin_analysis_batch reads cfg.GEMINI_API_KEY (uppercase),
+    which is the actual attribute defined in Settings, not the non-existent
+    lowercase alias 'gemini_api_key' that caused AttributeError in production."""
+    from app.core.config import Settings
+    from scripts.analyze_linkedin_batch import run_linkedin_analysis_batch
+    import asyncio
 
+    # Confirm the attribute exists on instances with its canonical uppercase name
+    assert hasattr(Settings(), "GEMINI_API_KEY"), (
+        "Settings must expose GEMINI_API_KEY as an uppercase attribute"
+    )
+    # Confirm the incorrectly-cased alias does NOT exist (documents the regression)
+    assert not hasattr(Settings(), "gemini_api_key"), (
+        "Settings must NOT have 'gemini_api_key' — access must use GEMINI_API_KEY"
+    )
+
+    # Seed matrix + prompts using the same helpers as Section 12
+    matrix = setup_analysis_matrix_and_topics(db_session)
+
+    # Seed: one LinkedIn source + entry (no completed analysis)
+    source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    db_session.add(source)
+    db_session.flush()
+
+    entry = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/s13-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/s13-{uuid.uuid4()}",
+        title="Test entry S13",
+        content="Contenido suficiente para análisis de prueba de regresión.",
+        author="Test Author S13",
+        content_type="social_post",
+        raw_metadata={"origin_source": "linkedin", "tracked_entity_name": "Test S13"},
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+    # Build settings with empty GEMINI_API_KEY
+    settings_no_key = Settings(GEMINI_API_KEY="")
+
+    # The function is async; run via asyncio.run
+    async def _run() -> None:
+        await run_linkedin_analysis_batch(
+            db=db_session,
+            provider=None,           # forces the provider-init path
+            entity_name=None,
+            limit=1,
+            dry_run=False,
+            settings=settings_no_key,
+        )
+
+    # Must raise RuntimeError with the GEMINI_API_KEY message,
+    # NOT AttributeError from a bad attribute access (regression guard)
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY no está configurada"):
+        asyncio.run(_run())
 
 
 

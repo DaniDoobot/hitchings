@@ -202,7 +202,7 @@ async def run_linkedin_analysis_batch(
     # 5. MODO REAL: Inicializar proveedor y pipeline
     ai_provider = provider
     if ai_provider is None:
-        if not cfg.gemini_api_key:
+        if not cfg.GEMINI_API_KEY:
             raise RuntimeError(
                 "GEMINI_API_KEY no está configurada. No se pueden realizar llamadas reales a Gemini."
             )
