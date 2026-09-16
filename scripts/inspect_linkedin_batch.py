@@ -7,6 +7,7 @@ Uso en el contenedor de producción:
 from sqlalchemy import select, desc
 from app.db.session import SessionLocal
 from app.models.entry import Entry
+from app.models.tracking import TrackingMatrix
 from app.models.analysis import AnalysisPromptVersion
 from app.providers.ai.gemini_api import GeminiAPIProvider
 
@@ -89,29 +90,56 @@ def inspect_batch():
         print("SIMULACION DE ENTRADA A PROMPT GEMINI (TRIAGE)")
         print("=" * 70)
         first_entry = entries[0]
-        dummy_prompt_version = AnalysisPromptVersion(
-            id=first_entry.id,
-            prompt_type="triage",
-            version=1,
-            code="test_triage",
-            name="Test Triage",
-            active=True,
-            system_prompt="Eres un analista juridico experto en Derecho de la Competencia.",
-            user_template="",
-            input_schema={},
-            response_schema={},
-        )
-        dummy_snapshot = {
-            "name": "Matriz Hitchings v1",
-            "relevance_instructions": "Relevancia estricta sobre danos y carteles.",
-            "exclusion_instructions": "Excluir nombramientos comerciales.",
-            "topics": [{"code": "CARTEL_DAMAGES", "name": "Danos por Carteles"}],
-        }
+
+        # Cargar prompt activo de DB o fallback con esquema correcto
+        triage_prompt = db.execute(
+            select(AnalysisPromptVersion)
+            .where(
+                AnalysisPromptVersion.stage == "triage",
+                AnalysisPromptVersion.active.is_(True),
+            )
+            .order_by(desc(AnalysisPromptVersion.version))
+        ).scalars().first()
+
+        if not triage_prompt:
+            triage_prompt = AnalysisPromptVersion(
+                code="test_triage",
+                version=1,
+                stage="triage",
+                name="Test Triage",
+                system_prompt="Eres un analista juridico experto en Derecho de la Competencia.",
+                user_prompt_template="",
+                response_schema_version="v3",
+                active=True,
+            )
+
+        matrix = db.execute(
+            select(TrackingMatrix).where(TrackingMatrix.status == "active")
+        ).scalars().first()
+
+        if matrix:
+            snapshot = {
+                "name": matrix.name,
+                "relevance_instructions": matrix.relevance_instructions or "",
+                "exclusion_instructions": matrix.exclusion_instructions or "",
+                "topics": [
+                    {"code": t.code, "name": t.name}
+                    for t in (matrix.topics or [])
+                ],
+            }
+        else:
+            snapshot = {
+                "name": "Matriz Hitchings v1",
+                "relevance_instructions": "Relevancia estricta sobre danos y carteles.",
+                "exclusion_instructions": "Excluir nombramientos comerciales.",
+                "topics": [{"code": "CARTEL_DAMAGES", "name": "Danos por Carteles"}],
+            }
+
         gemini = GeminiAPIProvider()
         sys_text, user_text, in_chars = gemini._build_triage_prompt(
-            prompt_version=dummy_prompt_version,
+            prompt_version=triage_prompt,
             entry=first_entry,
-            snapshot=dummy_snapshot,
+            snapshot=snapshot,
         )
 
         doc_section = user_text[user_text.find("[DOCUMENTO A ANALIZAR]"):]
