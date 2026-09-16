@@ -439,6 +439,8 @@ class LinkedInIngestionService:
                             "provenance_status": "unverified",
                             "retrieval_provider": post.provider,
                             "action": "SKIPPED_PROVENANCE",
+                            "rejection_reason": "missing_or_unreliable_author",
+                            "content_snippet": (post.text or "").strip()[:200],
                             "entry_id": None,
                             "external_id": None,
                         })
@@ -465,6 +467,8 @@ class LinkedInIngestionService:
                             "provenance_status": "unverified",
                             "retrieval_provider": post.provider,
                             "action": "SKIPPED_PROVENANCE",
+                            "rejection_reason": f"author_profile_url_mismatch: {post.author_profile_url} != {job.linkedin_url}",
+                            "content_snippet": (post.text or "").strip()[:200],
                             "entry_id": None,
                             "external_id": None,
                         })
@@ -494,6 +498,8 @@ class LinkedInIngestionService:
                             "provenance_status": provenance_status,
                             "retrieval_provider": post.provider,
                             "action": "DUPLICATE",
+                            "rejection_reason": None,
+                            "content_snippet": (post.text or "").strip()[:200],
                             "entry_id": None,
                             "external_id": external_id,
                         })
@@ -587,6 +593,8 @@ class LinkedInIngestionService:
                         "provenance_status": provenance_status,
                         "retrieval_provider": post.provider,
                         "action": "CREATED",
+                        "rejection_reason": None,
+                        "content_snippet": clean_content[:200],
                         "entry_id": str(entry.id),
                         "external_id": external_id,
                     })

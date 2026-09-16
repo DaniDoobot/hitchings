@@ -474,6 +474,24 @@ def main() -> None:
             print("  Ninguna entidad ejecutada.")
         print("=" * 48)
 
+        if report.items_detail:
+            print("\nDetalle de publicaciones procesadas:")
+            for idx, item in enumerate(report.items_detail, 1):
+                action = item.get("action", "UNKNOWN")
+                entity = item.get("entity_name", "N/A")
+                author = item.get("author_name") or "(desconocido)"
+                url = item.get("linkedin_post_url") or "N/A"
+                print(f"\n  {idx}. [{action}] {entity} · Autor: {author}")
+                print(f"     URL: {url}")
+                if item.get("action") == "SKIPPED_PROVENANCE":
+                    print(f"     Motivo rechazo: {item.get('rejection_reason', 'unverified_provenance')}")
+                elif item.get("entry_id"):
+                    print(f"     Entry ID: {item.get('entry_id')} | ext_id: {item.get('external_id')}")
+                snippet = item.get("content_snippet")
+                if snippet:
+                    clean_snip = snippet.replace('\n', ' ')
+                    print(f"     Texto: {clean_snip[:140]}...")
+
         if report.errors:
             print(f"\nErrors ({len(report.errors)}):")
             for err in report.errors:
