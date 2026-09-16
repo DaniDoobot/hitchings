@@ -374,6 +374,45 @@ class SourceSufficiencyService:
                     ),
                 )
 
+        # 9. LinkedIn (Social Network Post)
+        if entry.is_linkedin or entry.source_origin_category == "linkedin" or "linkedin" in source_name:
+            if content_chars == 0:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.INSUFFICIENT,
+                    reason="Publicación de LinkedIn sin contenido de texto disponible.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=0,
+                        content_source=content_source or "linkedin_post",
+                        full_text_available=False,
+                        pdf_available=False,
+                        substantive_content=False,
+                    ),
+                )
+            elif content_chars >= 50:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.FULL,
+                    reason="Texto íntegro oficial de la publicación de LinkedIn disponible para análisis.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "linkedin_post",
+                        full_text_available=True,
+                        pdf_available=False,
+                        substantive_content=True,
+                    ),
+                )
+            else:
+                return SourceSufficiencyResult(
+                    level=SourceSufficiencyLevel.PARTIAL,
+                    reason="Publicación breve de LinkedIn con contenido mínimo.",
+                    signals=SourceSufficiencySignals(
+                        content_chars=content_chars,
+                        content_source=content_source or "linkedin_post",
+                        full_text_available=True,
+                        pdf_available=False,
+                        substantive_content=True,
+                    ),
+                )
+
         # Fallback for generic sources
         if content_chars >= 1500:
 

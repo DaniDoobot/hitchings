@@ -14,7 +14,7 @@ from app.models.entry import Entry
 from app.models.ingestion_run import IngestionRun, IngestionRunStatus
 from app.models.provider import ProviderUsage
 from app.models.analysis import EntryAnalysis
-from app.models.tracking import TrackingMatrix, TrackedEntity
+from app.models.tracking import TrackingMatrix, TrackedEntity, TrackingTopic
 from app.providers.linkedin.base import (
     LinkedInDiscoveredPost,
     LinkedInAuthError,
@@ -2320,6 +2320,384 @@ def test_brightdata_provider_error_classified_as_provider_error(db_session: Sess
     assert report.items_detail[0]["action"] == "FAILED"
     assert report.per_entity[0]["provider_errors"] == 1
     assert report.per_entity[0]["timed_out_snapshots"] == 0
+
+
+# ==============================================================================
+# 12. LINKEDIN ANALYSIS PIPELINE VALIDATION TESTS
+# ==============================================================================
+
+def setup_analysis_matrix_and_topics(db: Session) -> TrackingMatrix:
+    """Helper to ensure an active TrackingMatrix with valid topics exists."""
+    from scripts.seed_analysis_prompts import seed_analysis_prompts
+
+    seed_analysis_prompts(db)
+
+    matrix = db.query(TrackingMatrix).filter(TrackingMatrix.status == "active").first()
+    if not matrix:
+        matrix = TrackingMatrix(
+            code=f"TEST-LI-ANALYSIS-{uuid.uuid4().hex[:6]}",
+            name="Matriz de Seguimiento LinkedIn",
+            status="active",
+            relevance_instructions="Focus on antitrust, litigation, cartel damages, competition enforcement.",
+            exclusion_instructions="Exclude corporate promotions or unrelated law.",
+        )
+        db.add(matrix)
+        db.flush()
+
+    area = db.query(TrackingTopic).filter(TrackingTopic.matrix_id == matrix.id, TrackingTopic.parent_id.is_(None)).first()
+    if not area:
+        area = TrackingTopic(
+            matrix_id=matrix.id,
+            parent_id=None,
+            code="competencia_general",
+            name="Competencia General",
+            priority=1,
+            active=True,
+        )
+        db.add(area)
+        db.flush()
+
+    topic = db.query(TrackingTopic).filter(TrackingTopic.matrix_id == matrix.id, TrackingTopic.parent_id.is_not(None)).first()
+    if not topic:
+        topic = TrackingTopic(
+            matrix_id=matrix.id,
+            parent_id=area.id,
+            code="carteles_antidanos",
+            name="Cárteles y Daños",
+            description="Reclamaciones de daños por infracciones de cárteles",
+            keywords=["cartel", "danos", "antitrust"],
+            priority=1,
+            active=True,
+        )
+        db.add(topic)
+        db.flush()
+
+    return matrix
+
+
+def test_linkedin_entry_selection_unanalyzed_and_already_analyzed(db_session: Session):
+    """Verify that unanalyzed LinkedIn entries enter the pipeline while analyzed entries are ignored."""
+    from scripts.analyze_linkedin_batch import get_unanalyzed_linkedin_entries
+
+    matrix = setup_analysis_matrix_and_topics(db_session)
+    source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    db_session.add(source)
+    db_session.flush()
+
+    # 1. Unanalyzed LinkedIn Entry
+    entry_unanalyzed = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/hausfeld-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/hausfeld-{uuid.uuid4()}",
+        title="LinkedIn — Hausfeld — 2026-03-15",
+        content="Antitrust collective action filed against truck cartel infringers.",
+        author="Hausfeld",
+        content_type="social_post",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "tracked_entity_name": "Hausfeld",
+        },
+    )
+
+    # 2. Already analyzed LinkedIn Entry
+    entry_analyzed = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/eskariam-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/eskariam-{uuid.uuid4()}",
+        title="LinkedIn — ESKARIAM — 2026-03-15",
+        content="Resolución favorable en litigación colectiva de competencia.",
+        author="ESKARIAM",
+        content_type="social_post",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "tracked_entity_name": "ESKARIAM",
+        },
+    )
+    db_session.add_all([entry_unanalyzed, entry_analyzed])
+    db_session.flush()
+
+    # Add completed analysis to entry_analyzed
+    analysis = EntryAnalysis(
+        entry_id=entry_analyzed.id,
+        matrix_id=matrix.id,
+        pipeline_version="v6",
+        status="completed",
+        matrix_snapshot={"topics": []},
+        matrix_snapshot_hash="mock-hash",
+        relevance_score=88,
+        relevance_status="relevant",
+        summary="Resumen completado",
+    )
+    db_session.add(analysis)
+    db_session.commit()
+
+    # Act
+    candidates = get_unanalyzed_linkedin_entries(db_session)
+
+    # Assert: Only unanalyzed enters pipeline; analyzed is ignored
+    candidate_ids = [c.id for c in candidates]
+    assert entry_unanalyzed.id in candidate_ids
+    assert entry_analyzed.id not in candidate_ids
+
+
+def test_linkedin_entry_selection_maintains_separation_institucional_and_web(db_session: Session):
+    """Verify strict separation: institutional and web entries are excluded from LinkedIn pipeline."""
+    from scripts.analyze_linkedin_batch import get_unanalyzed_linkedin_entries
+
+    li_source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    inst_source = Source(
+        id=uuid.uuid4(),
+        name="CNMC - Noticias",
+        type=SourceType.RSS,
+        category="authority",
+        url="https://www.cnmc.es/rss",
+        active=True,
+    )
+    web_source = Source(
+        id=uuid.uuid4(),
+        name="Antitrust Blog",
+        type=SourceType.BLOG,
+        category="general",
+        url="https://antitrustblog.example.com/feed",
+        active=True,
+    )
+    db_session.add_all([li_source, inst_source, web_source])
+    db_session.flush()
+
+    # 1. LinkedIn Entry
+    li_entry = Entry(
+        source_id=li_source.id,
+        url=f"https://www.linkedin.com/posts/ec-competition-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/ec-competition-{uuid.uuid4()}",
+        title="LinkedIn — European Commission — 2026-03-15",
+        content="Commission sends statement of objections in digital markets probe.",
+        author="European Commission",
+        content_type="social_post",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "tracked_entity_name": "European Commission",
+        },
+    )
+
+    # 2. Institutional Entry
+    inst_entry = Entry(
+        source_id=inst_source.id,
+        url=f"https://www.cnmc.es/noticias/resolucion-{uuid.uuid4()}",
+        canonical_url=f"https://www.cnmc.es/noticias/resolucion-{uuid.uuid4()}",
+        title="CNMC sanciona cártel de transporte",
+        content="La CNMC ha impuesto sanciones millonarias por prácticas anticompetitivas.",
+        author="CNMC",
+        raw_metadata={
+            "source_origin_category": "institutional",
+        },
+    )
+
+    # 3. Web Editorial Entry
+    web_entry = Entry(
+        source_id=web_source.id,
+        url=f"https://antitrustblog.example.com/posts/{uuid.uuid4()}",
+        canonical_url=f"https://antitrustblog.example.com/posts/{uuid.uuid4()}",
+        title="Análisis del nuevo reglamento DMA",
+        content="El reglamento de mercados digitales plantea retos sustantivos.",
+        author="Legal Scholar",
+        raw_metadata={},
+    )
+    db_session.add_all([li_entry, inst_entry, web_entry])
+    db_session.commit()
+
+    # Verify origin properties
+    assert li_entry.source_origin_category == "linkedin"
+    assert inst_entry.source_origin_category == "institutional"
+    assert web_entry.source_origin_category == "expert_analysis"
+    assert inst_entry.source_origin_category != "linkedin"
+    assert web_entry.source_origin_category != "linkedin"
+
+    # Act: Retrieve pipeline candidates for LinkedIn batch
+    candidates = get_unanalyzed_linkedin_entries(db_session)
+    candidate_ids = [c.id for c in candidates]
+
+    # Assert: Exclusively LinkedIn is selected; institutional and web are excluded
+    assert li_entry.id in candidate_ids
+    assert inst_entry.id not in candidate_ids
+    assert web_entry.id not in candidate_ids
+
+
+@pytest.mark.asyncio
+async def test_analyze_linkedin_batch_dry_run(db_session: Session):
+    """Verify dry-run mode identifies candidates without calling LLMs or persisting EntryAnalysis."""
+    from scripts.analyze_linkedin_batch import run_linkedin_analysis_batch
+
+    matrix = setup_analysis_matrix_and_topics(db_session)
+    source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    entry = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/dryrun-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/dryrun-{uuid.uuid4()}",
+        title="LinkedIn — Hausfeld — 2026-03-16",
+        content="Dry run verification post for antitrust damages.",
+        author="Hausfeld",
+        content_type="social_post",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "tracked_entity_name": "Hausfeld",
+        },
+    )
+    db_session.add_all([source, entry])
+    db_session.commit()
+
+    report = await run_linkedin_analysis_batch(
+        db=db_session,
+        dry_run=True,
+    )
+
+    assert report["dry_run"] is True
+    assert report["candidates_found"] >= 1
+    assert report["analyzed_count"] == 0
+
+    # Ensure zero EntryAnalysis records were created in DB
+    analyses = db_session.query(EntryAnalysis).filter(EntryAnalysis.entry_id == entry.id).all()
+    assert len(analyses) == 0
+
+
+@pytest.mark.asyncio
+async def test_analyze_linkedin_batch_execution_mock_provider_and_idempotency(db_session: Session):
+    """Verify real pipeline execution with mock provider produces triage, deep, and is idempotent."""
+    from scripts.analyze_linkedin_batch import run_linkedin_analysis_batch
+    from app.providers.ai.mock import MockAIProvider
+
+    matrix = setup_analysis_matrix_and_topics(db_session)
+    source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    entry = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/mockexec-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/mockexec-{uuid.uuid4()}",
+        title="LinkedIn — Hausfeld — 2026-03-16",
+        content=(
+            "Hausfeld acts as co-lead counsel in landmark collective antitrust damages proceedings "
+            "regarding international truck cartel price-fixing infringements. The tribunal has issued "
+            "substantive directions on disclosure and expert economic reports."
+        ),
+        author="Hausfeld",
+        content_type="social_post",
+        raw_metadata={
+            "origin_source": "linkedin",
+            "source_origin_category": "linkedin",
+            "tracked_entity_name": "Hausfeld",
+        },
+    )
+    db_session.add_all([source, entry])
+    db_session.commit()
+
+    mock_provider = MockAIProvider()
+
+    # 1. Run 1: Real execution with mock provider
+    report1 = await run_linkedin_analysis_batch(
+        db=db_session,
+        provider=mock_provider,
+        entity_name="Hausfeld",
+        limit=1,
+        dry_run=False,
+    )
+
+    assert report1["analyzed_count"] == 1
+    assert len(report1["entries"]) == 1
+
+    entry_rep = report1["entries"][0]
+    assert entry_rep["entry_id"] == str(entry.id)
+    assert entry_rep["entity"] == "Hausfeld"
+    assert entry_rep["author"] == "Hausfeld"
+    assert entry_rep["triage"]["relevance"] in ("relevant", "uncertain", "not_relevant")
+    assert entry_rep["triage"]["category"] != "N/A"
+    assert entry_rep["deep_analysis"]["executed"] in ("sí", "no")
+    assert entry_rep["deep_analysis"]["result"] != ""
+
+    # Verify database persistence
+    db_analysis = db_session.query(EntryAnalysis).filter(EntryAnalysis.entry_id == entry.id).first()
+    assert db_analysis is not None
+    assert db_analysis.status == "completed"
+
+    # 2. Run 2: Idempotency check — the same entry is now ignored
+    report2 = await run_linkedin_analysis_batch(
+        db=db_session,
+        provider=mock_provider,
+        entity_name="Hausfeld",
+        limit=1,
+        dry_run=False,
+    )
+    assert report2["candidates_found"] == 0
+    assert report2["analyzed_count"] == 0
+
+
+def test_analyze_linkedin_batch_entity_filter(db_session: Session):
+    """Verify --entity filter selects only matching entries."""
+    from scripts.analyze_linkedin_batch import get_unanalyzed_linkedin_entries
+
+    source = Source(
+        id=uuid.uuid4(),
+        name="LinkedIn",
+        type=SourceType.LINKEDIN,
+        url="https://www.linkedin.com",
+        active=True,
+    )
+    e1 = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/hausfeld-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/hausfeld-{uuid.uuid4()}",
+        title="LinkedIn — Hausfeld — 2026-03-16",
+        content="Antitrust updates from Hausfeld.",
+        author="Hausfeld",
+        content_type="social_post",
+        raw_metadata={"source_origin_category": "linkedin", "tracked_entity_name": "Hausfeld"},
+    )
+    e2 = Entry(
+        source_id=source.id,
+        url=f"https://www.linkedin.com/posts/cnmc-{uuid.uuid4()}",
+        canonical_url=f"https://www.linkedin.com/posts/cnmc-{uuid.uuid4()}",
+        title="LinkedIn — CNMC — 2026-03-16",
+        content="Notas de prensa y comunicados de la CNMC.",
+        author="CNMC",
+        content_type="social_post",
+        raw_metadata={"source_origin_category": "linkedin", "tracked_entity_name": "CNMC"},
+    )
+    db_session.add_all([source, e1, e2])
+    db_session.commit()
+
+    hausfeld_candidates = get_unanalyzed_linkedin_entries(db_session, entity_name="Hausfeld")
+    assert len(hausfeld_candidates) == 1
+    assert hausfeld_candidates[0].author == "Hausfeld"
+
+    cnmc_candidates = get_unanalyzed_linkedin_entries(db_session, entity_name="CNMC")
+    assert len(cnmc_candidates) == 1
+    assert cnmc_candidates[0].author == "CNMC"
+
 
 
 
