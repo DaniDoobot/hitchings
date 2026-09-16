@@ -100,10 +100,11 @@ class Entry(Base):
         if self.source:
             stype = str(getattr(self.source, "type", "")).lower()
             scat = str(getattr(self.source, "category", "")).lower()
-            if "institutional" in stype or "official" in scat or "authority" in scat or "regulator" in scat:
-                return "institutional"
             if "blog" in stype or "expert" in scat or "analysis" in scat:
                 return "expert_analysis"
+            if "institutional" in stype or "official" in scat or "authority" in scat or "regulator" in scat or "website" in stype or "rss" in stype:
+                return "institutional"
+            return "institutional"
         return "other"
 
     def __repr__(self) -> str:

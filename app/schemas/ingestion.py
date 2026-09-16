@@ -82,3 +82,41 @@ class SourceStatusResponse(BaseModel):
     latest_published_at: Optional[datetime] = None
     freshness: FreshnessDetail
     last_run: Optional[IngestionRunSummary] = None
+
+
+class SourceStatusSummaryItem(BaseModel):
+    """Summary item for the list of all sources' operational status."""
+    source: str
+    source_id: uuid.UUID
+    source_type: str
+    enabled: bool
+    last_execution: Optional[datetime] = None
+    last_success: Optional[datetime] = None
+    entries_created: int = 0
+    errors: int = 0
+    status: str  # "healthy", "degraded", "disabled"
+
+
+class SourceQualityMetricsItem(BaseModel):
+    """Aggregated quality and efficiency metrics for a source."""
+    source_id: uuid.UUID
+    source_name: str
+    source_type: str
+    is_linkedin: bool = False
+    posts_captured: int = 0
+    entries_created: int = 0
+    total_analyzed: int = 0
+    relevant_count: int = 0
+    relevant_pct: float = 0.0
+    deep_analysis_count: int = 0
+    deep_analysis_pct: float = 0.0
+    avg_analysis_time_ms: Optional[float] = None
+    estimated_gemini_cost_usd: float = 0.0
+    estimated_provider_cost_usd: float = 0.0
+
+
+class SourceQualityMetricsResponse(BaseModel):
+    """Response containing quality metrics across sources."""
+    sources: list[SourceQualityMetricsItem]
+    generated_at: datetime
+

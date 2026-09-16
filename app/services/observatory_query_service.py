@@ -374,6 +374,7 @@ def list_entries(
     relevance_status: Optional[str] = None,
     min_relevance_score: Optional[int] = None,
     topic_code: Optional[str] = None,
+    origin_category: Optional[str] = None,
 ) -> ObservatoryListResponse:
     """Return paginated, filtered list of entries with current analysis.
 
@@ -456,6 +457,12 @@ def list_entries(
         # Min score filter
         if min_relevance_score is not None:
             if current.relevance_score < min_relevance_score:
+                continue
+
+        # Origin category filter (all, institutional, linkedin, expert_analysis)
+        if origin_category and origin_category.strip().lower() not in ("all", "todas"):
+            req_cat = origin_category.strip().lower()
+            if entry.source_origin_category.lower() != req_cat:
                 continue
 
         # Topic filter (expanded hierarchy)

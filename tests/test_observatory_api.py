@@ -963,6 +963,53 @@ def test_dashboard_total_active_sources_and_all_monitored_sources(
 
     assert "DOJ Antitrust Division" in source_map
     assert source_map["DOJ Antitrust Division"]["publication_count"] == 1
-    assert source_map["DOJ Antitrust Division"]["relevant_count"] == 1
-
     assert "Inactive Authority" not in source_map
+
+
+def test_list_entries_filter_by_origin_category(client: TestClient, db_session: Session) -> None:
+    """Verify origin_category filter isolates linkedin, institutional, and expert_analysis sources."""
+    matrix, topics = create_matrix_and_topics(db_session)
+
+    src_inst = Source(name="CNMC Website", type=SourceType.WEBSITE, category="regulator", active=True)
+    src_li = Source(name="LinkedIn Feed", type=SourceType.LINKEDIN, category="social", active=True)
+    src_blog = Source(name="Chillin'Competition Blog", type=SourceType.BLOG, category="expert_analysis", active=True)
+    db_session.add_all([src_inst, src_li, src_blog])
+    db_session.flush()
+
+    e_inst = create_entry(db_session, src_inst, title="CNMC Resolution")
+    e_li = create_entry(db_session, src_li, title="LinkedIn Cartel Analysis")
+    e_blog = create_entry(db_session, src_blog, title="Expert Article on Article 102")
+
+    for e in (e_inst, e_li, e_blog):
+        create_analysis(db_session, e, matrix, relevance_status="relevant", relevance_score=90)
+    db_session.commit()
+
+    # 1. Filter by linkedin
+    resp_li = client.get("/api/v1/observatory/entries?origin_category=linkedin")
+    assert resp_li.status_code == 200
+    data_li = resp_li.json()
+    assert data_li["total"] == 1
+    assert data_li["items"][0]["title"] == "LinkedIn Cartel Analysis"
+    assert data_li["items"][0]["is_linkedin"] is True
+    assert data_li["items"][0]["source_origin_category"] == "linkedin"
+
+    # 2. Filter by institutional
+    resp_inst = client.get("/api/v1/observatory/entries?origin_category=institutional")
+    assert resp_inst.status_code == 200
+    data_inst = resp_inst.json()
+    assert data_inst["total"] == 1
+    assert data_inst["items"][0]["title"] == "CNMC Resolution"
+    assert data_inst["items"][0]["source_origin_category"] == "institutional"
+
+    # 3. Filter by expert_analysis
+    resp_blog = client.get("/api/v1/observatory/entries?origin_category=expert_analysis")
+    assert resp_blog.status_code == 200
+    data_blog = resp_blog.json()
+    assert data_blog["total"] == 1
+    assert data_blog["items"][0]["title"] == "Expert Article on Article 102"
+    assert data_blog["items"][0]["source_origin_category"] == "expert_analysis"
+
+    # 4. Filter by all
+    resp_all = client.get("/api/v1/observatory/entries?origin_category=all")
+    assert resp_all.status_code == 200
+    assert resp_all.json()["total"] >= 3

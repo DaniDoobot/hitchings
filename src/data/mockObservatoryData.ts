@@ -764,6 +764,14 @@ export function filterMockEntries(params: EntriesQueryParams): ObservatoryListRe
     );
   }
 
+  // 5b. Origin category filter (all, institutional, linkedin, expert_analysis)
+  if (params.origin_category && params.origin_category !== 'all') {
+    list = list.filter(item => {
+      const origin = item.source_origin_category || (item.is_linkedin ? 'linkedin' : 'institutional');
+      return origin === params.origin_category;
+    });
+  }
+
   // 6. Dates
   if (params.date_from) {
     const fromDate = new Date(params.date_from);

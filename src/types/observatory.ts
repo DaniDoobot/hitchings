@@ -132,6 +132,8 @@ export interface ObservatoryDashboard {
   latest_relevant_entries: DashboardLatestEntry[];
 }
 
+export type OriginCategory = 'all' | 'institutional' | 'linkedin' | 'expert_analysis';
+
 export interface EntriesQueryParams {
   limit?: number;
   offset?: number;
@@ -145,4 +147,5 @@ export interface EntriesQueryParams {
   relevance_status?: RelevanceStatus;
   min_relevance_score?: number;
   topic_code?: string;
+  origin_category?: OriginCategory;
 }

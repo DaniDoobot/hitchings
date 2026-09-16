@@ -273,8 +273,11 @@ class WeeklyRefreshService:
         try:
             # 1. LINKEDIN
             if source.type == SourceType.LINKEDIN:
+                src_conf = source.config or {}
+                # Dynamic config precedence: source.config["enabled"] overrides settings if explicitly provided
+                is_enabled = src_conf.get("enabled", self.settings.LINKEDIN_DISCOVERY_ENABLED)
                 has_provider = bool(
-                    self.settings.LINKEDIN_DISCOVERY_ENABLED
+                    is_enabled
                     and (self.settings.brightdata_token or self.settings.apify_token)
                 )
                 if not has_provider:
@@ -285,12 +288,23 @@ class WeeklyRefreshService:
                     detail.duration_seconds = round((detail.finished_at - start_time).total_seconds(), 2)
                     return detail
 
+                eff_max_entities = src_conf.get("max_entities", getattr(self.settings, "LINKEDIN_MAX_ENTITIES_PER_RUN", None))
+                eff_max_posts = src_conf.get(
+                    "max_posts",
+                    src_conf.get("max_posts_per_entity", getattr(self.settings, "LINKEDIN_MAX_POSTS_PER_ENTITY", None)),
+                )
+                eff_max_concurrent = src_conf.get(
+                    "max_concurrent_jobs",
+                    src_conf.get("max_concurrent", getattr(self.settings, "LINKEDIN_MAX_CONCURRENT_JOBS", None)),
+                )
+
                 report_li = self.linkedin_service.execute_discovery(
                     db=db,
                     confirm_real_calls=confirm_real_calls,
-                    max_entities=getattr(self.settings, "LINKEDIN_MAX_ENTITIES_PER_RUN", None),
-                    max_posts_per_entity=getattr(self.settings, "LINKEDIN_MAX_POSTS_PER_ENTITY", None),
-                    max_concurrent=getattr(self.settings, "LINKEDIN_MAX_CONCURRENT_JOBS", None),
+                    max_entities=eff_max_entities,
+                    max_posts_per_entity=eff_max_posts,
+                    max_concurrent=eff_max_concurrent,
+                    allow_manual=is_enabled,
                 )
                 detail.found = report_li.posts_seen
                 detail.new_entries = report_li.entries_created

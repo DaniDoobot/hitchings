@@ -110,6 +110,9 @@ export class ObservatoryApiService {
       query.set('min_relevance_score', String(params.min_relevance_score));
     }
     if (params.topic_code) query.set('topic_code', params.topic_code);
+    if (params.origin_category && params.origin_category !== 'all') {
+      query.set('origin_category', params.origin_category);
+    }
 
     if (params.source_ids && params.source_ids.length > 0) {
       for (const sid of params.source_ids) {

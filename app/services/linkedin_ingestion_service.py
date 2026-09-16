@@ -12,7 +12,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.models.source import Source, SourceType
 from app.models.entry import Entry
 from app.models.ingestion_run import IngestionRun, IngestionRunStatus
@@ -84,8 +84,9 @@ class LinkedInIngestionService:
         planner: Optional[LinkedInDiscoveryPlanner] = None,
         primary_provider: Optional[BaseLinkedInProvider] = None,
         fallback_provider: Optional[BaseLinkedInProvider] = None,
+        settings: Optional[Settings] = None,
     ) -> None:
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
         self.planner = planner or LinkedInDiscoveryPlanner()
         self.primary = primary_provider or BrightDataLinkedInProvider()
         self.fallback = fallback_provider or ApifyLinkedInProvider()

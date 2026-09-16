@@ -504,6 +504,49 @@ describe('Observatory Data Wiring & Anti-Regression Protections', () => {
     expect(screen.queryByText(/brightdata/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/apify/i)).not.toBeInTheDocument();
   });
+
+  it('renders "Fuente LinkedIn" badge and origin category filter options', async () => {
+    const mockLinkedInEntry = {
+      entry_id: 'li-badge-test-1',
+      title: 'Post de prueba LinkedIn',
+      source: { id: 'source-li-badge', name: 'LinkedIn' },
+      is_linkedin: true,
+      source_origin_category: 'linkedin',
+      author: 'Test Author',
+      author_type: 'person',
+      published_at: '2026-03-15T10:00:00Z',
+      url: 'https://www.linkedin.com/posts/test_post',
+      content_type: 'social_post',
+      relevance: { status: 'relevant' as const, score: 90 },
+      summary: 'Resumen del post.',
+      canonical_topics: [],
+      key_points: [],
+    };
+
+    vi.spyOn(apiModule.observatoryApi, 'getEntries').mockResolvedValueOnce({
+      items: [mockLinkedInEntry],
+      total: 1,
+      limit: 20,
+      offset: 0,
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/observatorio']}>
+        <Routes>
+          <Route path="/observatorio" element={<ObservatoryPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Filter labels must exist
+    expect(await screen.findByText('Origen de la fuente')).toBeInTheDocument();
+    expect(screen.getByLabelText('Institucional')).toBeInTheDocument();
+    expect(screen.getByLabelText('LinkedIn')).toBeInTheDocument();
+    expect(screen.getByLabelText('Expert Analysis')).toBeInTheDocument();
+
+    // Badge must exist
+    expect(await screen.findByText('Fuente LinkedIn')).toBeInTheDocument();
+  });
 });
 
 

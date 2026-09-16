@@ -19,6 +19,7 @@ import {
   ObservatoryEntryListItem,
   ObservatorySourceDetail,
   ObservatoryTopicNode,
+  OriginCategory,
   RelevanceStatus,
 } from '../types/observatory';
 import { RelevanceBadge } from '../components/common/RelevanceBadge';
@@ -45,6 +46,7 @@ export const ObservatoryPage: React.FC = () => {
   const q = searchParams.get('q') || '';
   const relevanceStatus = (searchParams.get('relevance_status') as RelevanceStatus) || '';
   const minScore = searchParams.get('min_relevance_score') || '';
+  const originCategory = searchParams.get('origin_category') || '';
   const sourceId = searchParams.get('source_id') || '';
   const topicCode = searchParams.get('topic_code') || '';
   const dateFrom = searchParams.get('date_from') || '';
@@ -94,6 +96,7 @@ export const ObservatoryPage: React.FC = () => {
           q: q || undefined,
           date_from: dateFrom || undefined,
           date_to: dateTo || undefined,
+          origin_category: (originCategory && originCategory !== 'all') ? (originCategory as OriginCategory) : undefined,
           source_id: sourceId || undefined,
           relevance_status: (relevanceStatus as RelevanceStatus) || undefined,
           min_relevance_score: minScore ? parseInt(minScore, 10) : undefined,
@@ -123,6 +126,7 @@ export const ObservatoryPage: React.FC = () => {
     q,
     relevanceStatus,
     minScore,
+    originCategory,
     sourceId,
     topicCode,
     dateFrom,
@@ -178,6 +182,7 @@ export const ObservatoryPage: React.FC = () => {
   const activeFiltersCount = useMemo(() => {
     let count = 0;
     if (q) count++;
+    if (originCategory && originCategory !== 'all') count++;
     if (relevanceStatus) count++;
     if (minScore) count++;
     if (sourceId) count++;
@@ -185,7 +190,7 @@ export const ObservatoryPage: React.FC = () => {
     if (dateFrom) count++;
     if (dateTo) count++;
     return count;
-  }, [q, relevanceStatus, minScore, sourceId, topicCode, dateFrom, dateTo]);
+  }, [q, originCategory, relevanceStatus, minScore, sourceId, topicCode, dateFrom, dateTo]);
 
   // Pagination calculation
   const currentPage = Math.floor(offset / limit) + 1;
@@ -268,6 +273,13 @@ export const ObservatoryPage: React.FC = () => {
               </span>
             )}
 
+            {originCategory && originCategory !== 'all' && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 text-xs font-medium text-slate-800 border border-slate-200">
+                Origen: {originCategory === 'institutional' ? 'Institucional' : originCategory === 'linkedin' ? 'LinkedIn' : originCategory === 'expert_analysis' ? 'Expert Analysis' : originCategory}
+                <X className="w-3 h-3 cursor-pointer hover:text-red-600" onClick={() => updateFilter({ origin_category: null })} />
+              </span>
+            )}
+
             {relevanceStatus && (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 text-xs font-medium text-slate-800 border border-slate-200">
                 Estado: {relevanceStatus === 'relevant' ? 'Relevante' : relevanceStatus === 'uncertain' ? 'En revisión' : 'No relevante'}
@@ -330,6 +342,35 @@ export const ObservatoryPage: React.FC = () => {
                 Limpiar
               </button>
             )}
+          </div>
+
+          {/* Origin Category */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-2">
+              Origen de la fuente
+            </label>
+            <div className="space-y-1.5">
+              {[
+                { id: '', label: 'Todas' },
+                { id: 'institutional', label: 'Institucional' },
+                { id: 'linkedin', label: 'LinkedIn' },
+                { id: 'expert_analysis', label: 'Expert Analysis' },
+              ].map((item) => (
+                <label
+                  key={item.id}
+                  className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer hover:text-slate-900"
+                >
+                  <input
+                    type="radio"
+                    name="origin_category_desktop"
+                    checked={(originCategory || '') === item.id}
+                    onChange={() => updateFilter({ origin_category: item.id || null })}
+                    className="text-navy-900 focus:ring-navy-800"
+                  />
+                  <span>{item.label}</span>
+                </label>
+              ))}
+            </div>
           </div>
 
           {/* Relevance Status */}
@@ -497,8 +538,11 @@ export const ObservatoryPage: React.FC = () => {
                   {/* Card Header: Source & Relevance Badge */}
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-2 mb-2.5">
                     <div className="flex items-center gap-2 flex-wrap">
-                      {entry.source.name === 'LinkedIn' || entry.is_linkedin ? (
+                      {entry.source.name === 'LinkedIn' || entry.is_linkedin || entry.source_origin_category === 'linkedin' ? (
                         <>
+                          <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 flex items-center gap-1">
+                            Fuente LinkedIn
+                          </span>
                           <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-0.5 rounded border border-navy-100 flex items-center gap-1.5">
                             {entry.author_type === 'organization' ? (
                               <Building2 className="w-3.5 h-3.5 text-navy-600 shrink-0" />
@@ -694,6 +738,23 @@ export const ObservatoryPage: React.FC = () => {
                 >
                   <X className="w-5 h-5" />
                 </button>
+              </div>
+
+              {/* Origin Category */}
+              <div>
+                <label className="block text-xs font-semibold uppercase text-slate-700 mb-2">
+                  Origen de la fuente
+                </label>
+                <select
+                  value={originCategory}
+                  onChange={(e) => updateFilter({ origin_category: e.target.value || null })}
+                  className="w-full text-xs rounded border-slate-300 py-2 px-2"
+                >
+                  <option value="">Todas</option>
+                  <option value="institutional">Institucional</option>
+                  <option value="linkedin">LinkedIn</option>
+                  <option value="expert_analysis">Expert Analysis</option>
+                </select>
               </div>
 
               {/* Status */}

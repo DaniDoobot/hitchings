@@ -109,10 +109,6 @@ class IncrementalAnalysisService:
         source_id: Optional[uuid.UUID] = None,
     ) -> IncrementalAnalysisReport:
         """Execute or preview incremental analysis of eligible entries."""
-        run_id = str(uuid.uuid4())
-        started_at = datetime.now(timezone.utc)
-
-        # 1. Plan candidates
         effective_limit = (
             limit
             if limit is not None
@@ -124,7 +120,41 @@ class IncrementalAnalysisService:
             source_id=source_id,
             limit=effective_limit,
         )
+        return await self.execute_plan_async(
+            db=db,
+            plan=plan,
+            confirm_real_calls=confirm_real_calls,
+            max_estimated_cost_usd=max_estimated_cost_usd,
+        )
 
+    def execute_incremental_run(
+        self,
+        db: Session,
+        plan: IncrementalAnalysisPlan,
+        confirm_real_calls: bool = False,
+        max_estimated_cost_usd: Optional[float] = None,
+    ) -> IncrementalAnalysisReport:
+        """Synchronously execute incremental analysis over a pre-computed plan (WeeklyRefreshService)."""
+        import asyncio
+        return asyncio.run(
+            self.execute_plan_async(
+                db=db,
+                plan=plan,
+                confirm_real_calls=confirm_real_calls,
+                max_estimated_cost_usd=max_estimated_cost_usd,
+            )
+        )
+
+    async def execute_plan_async(
+        self,
+        db: Session,
+        plan: IncrementalAnalysisPlan,
+        confirm_real_calls: bool = False,
+        max_estimated_cost_usd: Optional[float] = None,
+    ) -> IncrementalAnalysisReport:
+        """Execute or preview incremental analysis over a pre-computed plan."""
+        run_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc)
         candidates = plan.candidates
         planned_count = len(candidates)
 

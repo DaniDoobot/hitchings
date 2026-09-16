@@ -717,6 +717,7 @@ def test_weekly_refresh_linkedin_creates_entries_and_passes_to_analysis(
             max_entities=5,
             max_posts_per_entity=2,
             max_concurrent=3,
+            allow_manual=True,
         )
 
         assert report.sources_attempted == 1

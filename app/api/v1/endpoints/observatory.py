@@ -81,6 +81,10 @@ def list_observatory_entries(
         None,
         description="Topic code. Automatically expands to include all child subtopics.",
     ),
+    origin_category: Optional[Literal["all", "institutional", "linkedin", "expert_analysis"]] = Query(
+        None,
+        description="Filter by source origin: all, institutional, linkedin, or expert_analysis",
+    ),
     db: Session = Depends(get_db),
 ) -> ObservatoryListResponse:
     """Retrieve observatory publications with their current validated analysis.
@@ -102,6 +106,7 @@ def list_observatory_entries(
         relevance_status=relevance_status,
         min_relevance_score=min_relevance_score,
         topic_code=topic_code,
+        origin_category=origin_category,
     )
 
 

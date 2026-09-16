@@ -1,7 +1,35 @@
 # HITCHINGS — Current Project Status
 
 Fecha:
-2026-09-15
+2026-09-16
+
+## LinkedIn Source: Operational Readiness & Production Integration (Bloque 9C/9D)
+
+ESTADO: OPERATIVO EN PRODUCCIÓN
+- **Pipeline Operativo Completo**: Discovery asíncrono con Bright Data -> Normalización y validación de procedencia fail-closed -> Deduplicación por `activity_id` / canonical URL -> Creación de Entry -> Análisis Gemini automático (Triage v7 -> Deep Analysis v7 condicional).
+- **Modos de Ejecución**:
+  1. *Automático (WeeklyRefresh)*:
+     - Integrado en `WeeklyRefreshService`.
+     - Configuración dinámica en base de datos: `Source.config` y `Source.active` gobiernan `enabled`, `max_entities`, `max_posts` y `max_concurrent_jobs` sin necesidad de reiniciar el servicio o redeployar `.env`.
+     - Límite de concurrencia: `LINKEDIN_MAX_CONCURRENT_JOBS=3` (controlado por semáforo `asyncio.Semaphore`).
+     - Análisis incremental automático integrado: tras la ingesta de LinkedIn en el refresh, las nuevas entradas se incorporan al plan incremental de análisis Gemini.
+  2. *Manual (CLI y Scripts)*:
+     - Ingesta controlada: `python -m scripts.ingest_linkedin --confirm-real-calls --max-entities=N --max-posts=M`
+     - Análisis en lote: `python -m scripts.analyze_linkedin_batch --limit=N --entity=Nombre`
+- **APIs de Monitorización y Calidad**:
+  - `GET /api/v1/sources/status`: Resumen de salud operacional por fuente (estado 'healthy'/'degraded'/'failed'/'disabled', fecha y duración del último run, `entries_created`, `duplicates_skipped`, `errors`, `timeout_snapshots`).
+  - `GET /api/v1/sources/metrics`: Métricas de calidad y rendimiento consolidadas (`posts_captured`, `entries_created`, `total_analyzed`, `relevant_count`, `relevant_pct`, `deep_analysis_count`, `deep_analysis_pct`, `avg_analysis_time_ms`, `estimated_gemini_cost_usd`, `estimated_provider_cost_usd`).
+- **Frontend Observatorio (UI)**:
+  - Filtro por origen en barra lateral de escritorio y cajón móvil: `Todas`, `Institucional`, `LinkedIn`, `Expert Analysis`.
+  - Badge `"Fuente LinkedIn"` visible en las tarjetas de publicación y cabecera de detalle para publicaciones originadas en LinkedIn.
+  - Estricto aislamiento institucional: cero exposición de términos técnicos de proveedor (`brightdata`, `apify`) en la interfaz de usuario.
+- **Evaluación del Prompt de Triage v7 (`scripts/evaluate_linkedin_triage.py`)**:
+  - Comportamiento validado: alta especificidad filtrando ruido corporativo (publicidad, felicitaciones, eventos, webinars) y preservando publicaciones con fondo jurídico sustantivo (sentencias de tribunales, cárteles, litigios de daños, DMA/competencia).
+  - Sin necesidad de modificaciones en el prompt `observatory_triage:v7`.
+- **Próximos Pasos Naturales**:
+  - Monitorización continua de métricas de coste y ratio de relevancia vía `/api/v1/sources/metrics`.
+  - Incorporación progresiva de perfiles personales de la lista de expertos conforme se verifiquen sus URLs canónicas en abierto.
+  - Ajuste fino de concurrencia según SLA del proveedor de scraping.
 
 ## Estado Observatorio
 

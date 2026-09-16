@@ -103,8 +103,11 @@ export const EntryDetailPage: React.FC = () => {
         {/* Source metadata & relevance badge */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between items-start gap-3 mb-4">
           <div className="flex items-center gap-2 flex-wrap">
-            {entry.source.name === 'LinkedIn' || entry.is_linkedin ? (
+            {entry.source.name === 'LinkedIn' || entry.is_linkedin || entry.source_origin_category === 'linkedin' ? (
               <>
+                <span className="text-xs font-semibold text-blue-700 bg-blue-50 px-2.5 py-1 rounded border border-blue-200 flex items-center gap-1">
+                  Fuente LinkedIn
+                </span>
                 <span className="text-xs font-semibold text-navy-800 bg-navy-50 px-2.5 py-1 rounded border border-navy-100 flex items-center gap-1.5">
                   {entry.author_type === 'organization' ? (
                     <Building2 className="w-3.5 h-3.5 text-navy-600 shrink-0" />
