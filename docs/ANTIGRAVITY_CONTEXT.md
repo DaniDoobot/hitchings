@@ -26,3 +26,4 @@ Mantener siempre:
 - separación de orígenes
 - no exponer proveedores técnicos en UI
 - no duplicar servicios
+- verificar salud con: python -m scripts.diagnose_observatory_health antes de cualquier intervención mayor.

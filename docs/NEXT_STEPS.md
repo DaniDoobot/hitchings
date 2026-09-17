@@ -3,32 +3,16 @@
 ## Estado actual
 
 Fecha:
-2026-09-16
+2026-09-17
 
 Último bloque completado:
-LinkedIn Source Operational Production Ready
+Operational Health Diagnostics & Telemetry Hardening
 
 Incluye:
-- Bright Data discovery
-- snapshots async
-- provenance
-- deduplicación
-- análisis Gemini
-- Weekly Refresh
-- configuración dinámica Source.config
-- API sources status
-- API sources metrics
-- filtros origen Observatorio
-
----
-
-## Último commit estable
-
-Hash commit actual:
-`fb8d78f`
-
-Mensaje commit:
-`feat(observatorio): operational linkedin source, dynamic config, status/metrics APIs, and origin filters`
+- Script de diagnóstico operacional `scripts/diagnose_observatory_health.py`
+- Detección de anomalías de pipeline y costes
+- Verificación E2E de Weekly Refresh multiorigen
+- Cobertura de tests dedicada `tests/test_observatory_health_cli.py`
 
 ---
 
@@ -37,10 +21,10 @@ Mensaje commit:
 Backend:
 `pytest tests/`
 Resultado:
-642 passed
+646 passed (regresión estándar) / 660 passed (suite total)
 
 Frontend:
-`bun run test`
+`npm test`
 Resultado:
 48 passed
 

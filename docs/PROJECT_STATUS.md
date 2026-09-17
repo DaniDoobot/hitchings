@@ -118,10 +118,23 @@ HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
   - Fase 4 (UI Enriquecida del Observatorio): `ObservatoryPage` y `EntryDetailPage` presentan claramente el origen LinkedIn, autor, iconos diferenciados (`Building2` / `User`) y badge `Organización` / `Persona`, manteniendo compatibilidad con tests y sin exponer proveedores técnicos (`brightdata`, `apify`).
   - Cobertura de tests: 47/47 en `tests/test_linkedin_discovery.py`, 12/12 en `tests/test_weekly_refresh.py`, 47/47 en Vitest frontend.
 
+## Diagnóstico Operacional del Observatorio (Operational Health Diagnostics)
+
+IMPLEMENTADO & AUDITADO
+- **Herramienta CLI de Telemetría**: `scripts/diagnose_observatory_health.py` (`python -m scripts.diagnose_observatory_health`).
+- **Métricas Inspeccionadas**:
+  - Estado y habilitación por fuente (`healthy`, `degraded`, `disabled`, `YES`/`NO`).
+  - Conversión del pipeline: `Items captured` -> `Entries created` -> `Triage analyzed` (`Relevant`, `Uncertain`, `Not relevant`) -> `Deep Analysis` -> `Failed` -> `Timed out snapshots`.
+  - Costes agregados: Gemini estimated cost, Provider estimated cost (Bright Data / Apify) con fallback explícito a `N/A — insufficient telemetry` cuando no hay datos.
+  - Tiempos de ejecución: Última ejecución global, último éxito y latencia promedio de análisis LLM.
+  - Auditoría de integridad y detección automática de anomalías (inversiones de pipeline, ratios incoherentes, números negativos).
+- **Cobertura de Pruebas**: `tests/test_observatory_health_cli.py` (4/4 tests específicos pasados; 660+ tests totales en suite backend).
+
 ## Próximo paso exacto
 
-1. Ejecución de la prueba batch controlada de las 4 entidades verificadas en el contenedor backend de producción:
-   `docker exec -it <backend_container> python -m scripts.ingest_linkedin --confirm-real-calls --max-entities=4 --max-posts=2`
+1. Ejecución manual del diagnóstico de salud en producción Dokploy:
+   `docker exec -it <backend_container> python -m scripts.diagnose_observatory_health`
+2. Revisar los resultados de las 17 fuentes institucionales y LinkedIn antes de autorizar el primer ciclo semanal completo.
 
 ## Invariantes
 
