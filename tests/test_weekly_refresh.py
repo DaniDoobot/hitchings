@@ -637,7 +637,13 @@ def test_sufficiency_gating_full_analyzed_partial_insufficient_skipped(
 def test_weekly_refresh_linkedin_disabled_by_default(
     db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
 ):
-    """When default settings are used, LINKEDIN_DISCOVERY_ENABLED is False and LinkedIn source is skipped."""
+    """With default settings (no credentials, no config["enabled"]), LinkedIn is skipped (provider_not_configured).
+
+    Activation hierarchy in effect:
+      - source.config["enabled"] absent → fallback to source.active (True for the test fixture)
+      - is_enabled=True, but brightdata_token="" and apify_token="" → has_provider=False → skipped
+    LINKEDIN_DISCOVERY_ENABLED is now irrelevant when no credentials are present.
+    """
     settings = Settings()
     assert settings.LINKEDIN_DISCOVERY_ENABLED is False
 
@@ -730,3 +736,292 @@ def test_weekly_refresh_linkedin_creates_entries_and_passes_to_analysis(
         assert created_entry_id in called_entry_ids
 
 
+# =============================================================================
+# LinkedIn activation hierarchy tests (new, covering all documented cases)
+# =============================================================================
+
+
+def _make_linkedin_source(
+    db_session: Session, *, active: bool, config: dict | None = None
+) -> Source:
+    """Helper: create a fresh LinkedIn Source with explicit active/config for isolation."""
+    src = Source(
+        name=f"LinkedIn Hierarchy Test {uuid.uuid4().hex[:6]}",
+        type=SourceType.LINKEDIN,
+        provider="external",
+        url="https://www.linkedin.com",
+        active=active,
+        config=config,
+    )
+    db_session.add(src)
+    db_session.flush()
+    return src
+
+
+def test_linkedin_source_active_false_is_never_attempted(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """Source.active=False → excluded by the outer query filter; never attempted even with token."""
+    src = _make_linkedin_source(db_session, active=False)
+    db_session.commit()
+
+    settings = Settings(BRIGHTDATA_API_TOKEN="token-bd", LINKEDIN_DISCOVERY_ENABLED=True)
+    service = WeeklyRefreshService(settings=settings)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 0
+    assert src.name not in {d.source_name for d in report.per_source}
+
+
+def test_linkedin_config_enabled_false_skipped_even_with_active_true(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """Source.active=True + Source.config["enabled"]=False → skipped (provider_not_configured).
+
+    config["enabled"]=False → is_enabled=False → has_provider=False regardless of token presence.
+    """
+    src = _make_linkedin_source(db_session, active=True, config={"enabled": False})
+    db_session.commit()
+
+    settings = Settings(BRIGHTDATA_API_TOKEN="token-bd")
+    service = WeeklyRefreshService(settings=settings)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.sources_skipped == 1
+    assert report.per_source[0].status == "skipped"
+    assert "provider_not_configured" in report.per_source[0].errors
+
+
+def test_linkedin_config_enabled_true_env_false_is_authorized(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """Source.active=True + config["enabled"]=True + LINKEDIN_DISCOVERY_ENABLED=False → executes.
+
+    KEY SCENARIO: explicit Source.config["enabled"]=True must override the env kill-switch.
+    execute_discovery must be called with allow_manual=True.
+    """
+    src = _make_linkedin_source(
+        db_session,
+        active=True,
+        config={"enabled": True, "discovery": True, "primary_provider": "brightdata"},
+    )
+    db_session.commit()
+
+    mock_li_service = MagicMock()
+    mock_li_service.execute_discovery.return_value = LinkedInIngestionReport(
+        run_id=uuid.uuid4(),
+        primary_provider="brightdata",
+        fallback_provider="apify",
+        posts_seen=2,
+        entries_created=1,
+        duplicates=1,
+    )
+
+    settings = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,  # env kill-switch is OFF
+        BRIGHTDATA_API_TOKEN="token-bd",   # but token is present
+    )
+    service = WeeklyRefreshService(settings=settings, linkedin_service=mock_li_service)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.per_source[0].status == "success"
+    mock_li_service.execute_discovery.assert_called_once()
+    call_kwargs = mock_li_service.execute_discovery.call_args[1]
+    assert call_kwargs["allow_manual"] is True
+
+
+def test_linkedin_no_config_enabled_key_falls_back_to_source_active(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """Source.active=True with NO config["enabled"] key → is_enabled=True via Source.active fallback.
+
+    Production scenario: config={"discovery": true, "primary_provider": "brightdata", ...}
+    without the "enabled" key. LINKEDIN_DISCOVERY_ENABLED=False must NOT block execution.
+    """
+    src = _make_linkedin_source(
+        db_session,
+        active=True,
+        config={"discovery": True, "primary_provider": "brightdata", "fallback_provider": "apify"},
+    )
+    db_session.commit()
+
+    mock_li_service = MagicMock()
+    mock_li_service.execute_discovery.return_value = LinkedInIngestionReport(
+        run_id=uuid.uuid4(),
+        primary_provider="brightdata",
+        fallback_provider="apify",
+        posts_seen=3,
+        entries_created=2,
+        duplicates=1,
+    )
+
+    settings = Settings(
+        LINKEDIN_DISCOVERY_ENABLED=False,  # env is off → must NOT block
+        BRIGHTDATA_API_TOKEN="token-bd",
+    )
+    service = WeeklyRefreshService(settings=settings, linkedin_service=mock_li_service)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.per_source[0].status == "success"
+    mock_li_service.execute_discovery.assert_called_once()
+
+
+def test_linkedin_brightdata_token_present_provider_valid(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """BRIGHTDATA_API_TOKEN set → provider valid → execute_discovery is invoked."""
+    src = _make_linkedin_source(db_session, active=True, config={"enabled": True})
+    db_session.commit()
+
+    mock_li_service = MagicMock()
+    mock_li_service.execute_discovery.return_value = LinkedInIngestionReport(
+        run_id=uuid.uuid4(),
+        primary_provider="brightdata",
+        fallback_provider="apify",
+        posts_seen=1,
+        entries_created=1,
+        duplicates=0,
+    )
+
+    settings = Settings(
+        BRIGHTDATA_API_TOKEN="bd-real-token",
+        BRIGHTDATA_API_KEY="",
+        APIFY_API_TOKEN="",
+        APIFY_API_KEY="",
+        LINKEDIN_DISCOVERY_ENABLED=False,
+    )
+    service = WeeklyRefreshService(settings=settings, linkedin_service=mock_li_service)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.per_source[0].status == "success"
+    mock_li_service.execute_discovery.assert_called_once()
+
+
+def test_linkedin_no_token_skipped_provider_not_configured(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """Without Bright Data AND without Apify → provider_not_configured regardless of config["enabled"]."""
+    src = _make_linkedin_source(db_session, active=True, config={"enabled": True})
+    db_session.commit()
+
+    settings = Settings(
+        BRIGHTDATA_API_TOKEN="",
+        BRIGHTDATA_API_KEY="",
+        APIFY_API_TOKEN="",
+        APIFY_API_KEY="",
+    )
+    service = WeeklyRefreshService(settings=settings)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[src.name],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.sources_skipped == 1
+    assert report.per_source[0].status == "skipped"
+    assert "provider_not_configured" in report.per_source[0].errors
+
+
+def test_linkedin_new_entry_ids_propagate_to_incremental_analysis_hierarchy(
+    db_session: Session, active_matrix: TrackingMatrix
+) -> None:
+    """LinkedIn new_entry_ids are correctly collected and passed to _analyze_new_entries."""
+    src = _make_linkedin_source(db_session, active=True, config={"enabled": True})
+    db_session.commit()
+
+    created_id_1 = uuid.uuid4()
+    created_id_2 = uuid.uuid4()
+
+    mock_li_service = MagicMock()
+    mock_li_service.execute_discovery.return_value = LinkedInIngestionReport(
+        run_id=uuid.uuid4(),
+        primary_provider="brightdata",
+        fallback_provider="apify",
+        posts_seen=5,
+        entries_created=2,
+        duplicates=3,
+        items_detail=[
+            {"action": "CREATED", "entry_id": str(created_id_1), "entity_name": "Hausfeld"},
+            {"action": "CREATED", "entry_id": str(created_id_2), "entity_name": "CNMC"},
+            {"action": "DUPLICATE", "entry_id": None, "entity_name": "Hausfeld"},
+        ],
+    )
+
+    settings = Settings(BRIGHTDATA_API_TOKEN="token-bd", LINKEDIN_DISCOVERY_ENABLED=False)
+    service = WeeklyRefreshService(settings=settings, linkedin_service=mock_li_service)
+
+    with patch.object(service, "_analyze_new_entries", return_value=(2, 0, 0)) as spy:
+        report = service.run_weekly_refresh(
+            db=db_session,
+            confirm_real_calls=True,
+            sources_filter=[src.name],
+        )
+
+    detail = report.per_source[0]
+    assert detail.status == "success"
+    assert str(created_id_1) in detail.new_entry_ids
+    assert str(created_id_2) in detail.new_entry_ids
+    spy.assert_called_once()
+    passed_ids = spy.call_args[1]["entry_ids"]
+    assert created_id_1 in passed_ids
+    assert created_id_2 in passed_ids
+
+
+def test_linkedin_activation_does_not_affect_institutional_sources(
+    db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
+) -> None:
+    """Changing LinkedIn activation logic must not alter behaviour of institutional (native) sources."""
+    source_cnmc = test_sources["cnmc"]
+    now = datetime.now(timezone.utc)
+
+    mock_ingest = MagicMock()
+    mock_ingest.ingest_source.return_value = IngestionResult(
+        ingestion_run_id=uuid.uuid4(),
+        source_id=source_cnmc.id,
+        status="success",
+        fetched=3,
+        created=2,
+        duplicates=1,
+        started_at=now,
+        finished_at=now,
+    )
+
+    settings = Settings(BRIGHTDATA_API_TOKEN="token-bd", LINKEDIN_DISCOVERY_ENABLED=False)
+    service = WeeklyRefreshService(settings=settings, ingestion_service=mock_ingest)
+    report = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=["CNMC Test"],
+    )
+
+    assert report.sources_attempted == 1
+    assert report.per_source[0].source_name == "CNMC Test"
+    assert report.per_source[0].status == "success"
+    mock_ingest.ingest_source.assert_called_once_with(
+        source_cnmc.id, db_session, lookback_days=report.lookback_days
+    )

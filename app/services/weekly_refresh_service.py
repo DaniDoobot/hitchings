@@ -274,8 +274,20 @@ class WeeklyRefreshService:
             # 1. LINKEDIN
             if source.type == SourceType.LINKEDIN:
                 src_conf = source.config or {}
-                # Dynamic config precedence: source.config["enabled"] overrides settings if explicitly provided
-                is_enabled = src_conf.get("enabled", self.settings.LINKEDIN_DISCOVERY_ENABLED)
+                # Activation hierarchy (evaluated in order, first match wins):
+                #   a) source.active=False  → already excluded by the outer query (Source.active=True filter)
+                #   b) source.config["enabled"] present → use its value (explicit DB override)
+                #   c) source.config["enabled"] absent  → fall back to source.active (canonical DB flag)
+                #   d) LINKEDIN_DISCOVERY_ENABLED (env)  → only relevant when no Source record governs the flag
+                config_enabled = src_conf.get("enabled")
+                if config_enabled is not None:
+                    # Explicit config override in Source.config takes full priority over env settings
+                    is_enabled = bool(config_enabled)
+                else:
+                    # No explicit config key: Source.active IS the activation signal
+                    is_enabled = bool(source.active)
+                # Provider check: Bright Data is the operational provider.
+                # Apify is an emergency fallback; a valid token for at least one must exist.
                 has_provider = bool(
                     is_enabled
                     and (self.settings.brightdata_token or self.settings.apify_token)
