@@ -282,7 +282,7 @@ export const DashboardPage: React.FC = () => {
         </div>
 
         {/* Top Sources (5 cols) */}
-        <div className="lg:col-span-5 bg-white rounded-lg border border-slate-200 p-6 shadow-sm">
+        <div className="lg:col-span-5 bg-white rounded-lg border border-slate-200 p-6 shadow-sm flex flex-col">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
               <Building2 className="w-4 h-4 text-navy-700" />
@@ -298,7 +298,7 @@ export const DashboardPage: React.FC = () => {
             Volumen procesado e índice de relevancia detectado por fuente monitorizada.
           </p>
 
-          <div className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
+          <div className="space-y-3 overflow-y-auto pr-1 flex-1 min-h-0">
             {dashboard?.top_sources.map((src) => (
               <div
                 key={src.source_id}
