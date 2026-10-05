@@ -117,7 +117,8 @@ class Settings(BaseSettings):
     GOOGLE_NEWS_ENABLED: bool = False
     GOOGLE_NEWS_LANGUAGES: Union[list[str], str] = ["es", "en"]
     GOOGLE_NEWS_REGION: str = "ES"
-    GOOGLE_NEWS_MAX_QUERIES_PER_RUN: int = 20
+    GOOGLE_NEWS_MAX_QUERIES_PER_RUN: int = 25
+    GOOGLE_NEWS_MAX_ENTITY_QUERIES: int = 5
     GOOGLE_NEWS_MAX_ITEMS_PER_QUERY: int = 10
     GOOGLE_NEWS_MAX_NEW_ENTRIES_PER_RUN: int = 50
     GOOGLE_NEWS_TIMEOUT_SECONDS: float = 15.0
