@@ -28,6 +28,7 @@ from app.providers.linkedin.base import (
     LinkedInAuthError,
     LinkedInRecoverableError,
     LinkedInSnapshotTimeoutError,
+    LinkedInExtractionError,
 )
 from app.providers.linkedin.brightdata import BrightDataLinkedInProvider
 from app.providers.linkedin.apify import ApifyLinkedInProvider
@@ -291,7 +292,11 @@ class LinkedInIngestionService:
             run.status = (
                 IngestionRunStatus.SUCCESS.value
                 if report.failed_jobs == 0
-                else IngestionRunStatus.PARTIAL.value
+                else (
+                    IngestionRunStatus.PARTIAL.value
+                    if (report.entries_created > 0 or report.entities_executed > report.failed_jobs)
+                    else IngestionRunStatus.FAILED.value
+                )
             )
             run.finished_at = datetime.now(timezone.utc)
             run.fetched_count = report.posts_seen
@@ -708,8 +713,9 @@ class LinkedInIngestionService:
                     "posts": 0, "created": 0, "duplicates": 0, "provenance_rejected": 0,
                     "errors": 1, "timed_out_snapshots": 0, "provider_errors": 1,
                 })
+                http_status_val = 200 if isinstance(rec_err, LinkedInExtractionError) else "ERROR"
                 items_detail.append({
-                    "entity_name": job.entity_name, "http_status": "ERROR",
+                    "entity_name": job.entity_name, "http_status": http_status_val,
                     "records_returned": 0, "author_name": None, "author_profile_url": None,
                     "linkedin_post_url": None, "activity_id": None, "published_at": None,
                     "identity_status": None, "provenance_status": None,
@@ -749,7 +755,7 @@ class LinkedInIngestionService:
                 "records_returned": 0, "author_name": None, "author_profile_url": None,
                 "linkedin_post_url": None, "activity_id": None, "published_at": None,
                 "identity_status": None, "provenance_status": None,
-                "retrieval_provider": self.primary.provider_name,
+                "retrieval_provider": self.fallback.provider_name if used_fallback_for_job else self.primary.provider_name,
                 "action": "NO_POSTS", "entry_id": None, "external_id": None,
             })
 

@@ -61,6 +61,14 @@ class LinkedInSnapshotTimeoutError(LinkedInTimeoutError):
     pass
 
 
+class LinkedInExtractionError(LinkedInRecoverableError):
+    """Extraction failure on a specific target URL (e.g. dead_page, unresolvable profile, blocked).
+
+    Eligible for fallback to alternate provider.
+    """
+    pass
+
+
 class LinkedInQuotaExceededError(LinkedInRecoverableError):
     """Provider quota or rate limit exceeded (HTTP 429)."""
     pass

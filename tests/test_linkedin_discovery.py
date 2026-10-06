@@ -22,6 +22,7 @@ from app.providers.linkedin.base import (
     LinkedInTimeoutError,
     LinkedInSnapshotTimeoutError,
     LinkedInQuotaExceededError,
+    LinkedInExtractionError,
 )
 from app.providers.linkedin.brightdata import (
     BrightDataLinkedInProvider,
@@ -3123,3 +3124,440 @@ def test_concurrent_report_counters_are_correct(db_session: Session) -> None:
     assert total_created_per_entity == report.entries_created, (
         f"Per-entity sum {total_created_per_entity} != report.entries_created {report.entries_created}"
     )
+
+
+# ==============================================================================
+# 15. EXTRACTION FAILURE & FALLBACK ROBUSTNESS TESTS (BLOQUE 9C)
+# ==============================================================================
+
+def test_brightdata_returns_valid_posts_creates_entries(db_session: Session, monkeypatch):
+    """Case 1: Bright Data returns valid posts for person (e.g. Damien Geradin) -> entries created successfully."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-damien")
+
+    matrix = TrackingMatrix(code=f"TEST-DG-{uuid.uuid4().hex[:6]}", name="Damien Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Damien Geradin",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/damien-geradin-5645601",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    activity_id = "7199998888777666555"
+    mock_response_data = [{
+        "url": f"https://www.linkedin.com/posts/damien-geradin-5645601_antitrust-digital-markets-activity-{activity_id}?ref=test",
+        "id": activity_id,
+        "author": "Damien Geradin",
+        "use_url": "https://www.linkedin.com/in/damien-geradin-5645601",
+        "post_text": "New substantive paper on EU antitrust in digital platforms and enforcement.",
+        "date_posted": "2026-03-25T10:00:00Z",
+        "account_type": "Person",
+    }]
+
+    snapshot_id = "sd_damien_valid_123"
+
+    def mock_transport(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": snapshot_id, "status": "running"})
+        elif f"/progress/{snapshot_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snapshot_id}" in url_str:
+            return httpx.Response(200, json=mock_response_data)
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=True,
+    )
+
+    assert report.entries_created == 1
+    assert report.posts_seen == 1
+    assert report.failed_jobs == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "CREATED"
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+    assert report.items_detail[0]["author_name"] == "Damien Geradin"
+
+    created_entry = db_session.execute(
+        select(Entry).where(Entry.external_id == f"urn:li:activity:{activity_id}")
+    ).scalar_one_or_none()
+    assert created_entry is not None
+    assert created_entry.author == "Damien Geradin"
+
+
+def test_brightdata_returns_clean_zero_posts_status_no_posts(db_session: Session, monkeypatch):
+    """Case 2: Bright Data returns clean snapshot READY with 0 posts (errors=0, empty list) -> action=NO_POSTS."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-empty")
+
+    matrix = TrackingMatrix(code=f"TEST-CLEAN-{uuid.uuid4().hex[:6]}", name="Clean Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Clean Profile",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/clean-zero-posts",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    snapshot_id = "sd_clean_000"
+
+    def mock_transport(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": snapshot_id, "status": "running"})
+        elif f"/progress/{snapshot_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snapshot_id}" in url_str:
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_transport))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=True,
+    )
+
+    assert report.entries_created == 0
+    assert report.posts_seen == 0
+    assert report.failed_jobs == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "NO_POSTS"
+    assert report.items_detail[0]["http_status"] == 200
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+
+
+def test_brightdata_extraction_error_detection_metadata_only_and_explicit_error(monkeypatch):
+    """Case 3: Bright Data snapshot with errors=1, dead page, or metadata-only raises LinkedInExtractionError."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-ext")
+
+    provider = BrightDataLinkedInProvider()
+
+    # 3A: Snapshot with errors=1 and metadata-only record (like Joost Fanoy / Pinar Akman in Bright Data)
+    snapshot_id = "sd_joost_err"
+    def mock_transport_metadata_only(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": snapshot_id, "status": "running"})
+        elif f"/progress/{snapshot_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snapshot_id}" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T14:00:00Z",
+                "input": {"url": "https://www.linkedin.com/in/joost-fanoy"},
+            }])
+        return httpx.Response(404)
+
+    client_a = httpx.Client(transport=httpx.MockTransport(mock_transport_metadata_only))
+    with pytest.raises(LinkedInExtractionError) as exc_info_a:
+        provider.discover_posts(
+            target_url="https://www.linkedin.com/in/joost-fanoy",
+            client=client_a,
+            entity_name="Joost Fanoy",
+        )
+    assert "unresolvable profile or dead page" in str(exc_info_a.value)
+
+    # 3B: Record with explicit error field
+    def mock_transport_explicit_err(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json=[{"error": "Profile page unavailable", "input": {"url": "..."}}])
+        return httpx.Response(404)
+
+    client_b = httpx.Client(transport=httpx.MockTransport(mock_transport_explicit_err))
+    with pytest.raises(LinkedInExtractionError) as exc_info_b:
+        provider.discover_posts(
+            target_url="https://www.linkedin.com/in/joost-fanoy",
+            client=client_b,
+            entity_name="Joost Fanoy",
+        )
+    assert "unresolvable profile or dead page" in str(exc_info_b.value)
+
+
+def test_brightdata_http_500_raises_recoverable_error(monkeypatch):
+    """Case 4: HTTP 500 / network failure raises LinkedInRecoverableError."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-500")
+
+    provider = BrightDataLinkedInProvider()
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500, text="Internal Server Error")))
+
+    with pytest.raises(LinkedInRecoverableError) as exc_info:
+        provider.discover_posts("https://www.linkedin.com/company/hausfeld", client=client)
+    assert "500" in str(exc_info.value)
+
+
+def test_brightdata_extraction_error_triggers_apify_fallback_success(db_session: Session, monkeypatch):
+    """Case 5: When Bright Data fails extraction and Apify is configured, fallback to Apify triggers automatically."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-FB-{uuid.uuid4().hex[:6]}", name="Fallback Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_snapshot_id = "sd_joost_fails_bd"
+    activity_id = "7333222111000"
+
+    apify_items = [{
+        "id": activity_id,
+        "linkedinUrl": f"https://www.linkedin.com/posts/joost-fanoy_antitrust-litigation-activity-{activity_id}",
+        "content": "Joost Fanoy analysis on distribution law and European competition regulation.",
+        "author": {
+            "name": "Joost Fanoy",
+            "linkedinUrl": "https://www.linkedin.com/in/joost-fanoy",
+        },
+        "postedAt": {"date": "2026-03-22T09:00:00Z"},
+        "engagement": {"likes": 15, "comments": 2, "shares": 3},
+        "type": "post",
+    }]
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        # Bright Data: extraction fails
+        if "brightdata.com" in url_str:
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snapshot_id, "status": "running"})
+            elif f"/progress/{bd_snapshot_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+            elif f"/snapshot/{bd_snapshot_id}" in url_str:
+                return httpx.Response(200, json=[{
+                    "timestamp": "2026-10-06T15:00:00Z",
+                    "input": {"url": "https://www.linkedin.com/in/joost-fanoy"},
+                }])
+            return httpx.Response(404)
+        # Apify: fallback succeeds
+        if "apify.com" in url_str:
+            return httpx.Response(200, json=apify_items)
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    assert report.fallback_count == 1
+    assert report.entries_created == 1
+    assert report.failed_jobs == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "CREATED"
+    assert report.items_detail[0]["retrieval_provider"] == "apify"
+
+    entry = db_session.execute(
+        select(Entry).where(Entry.external_id == f"urn:li:activity:{activity_id}")
+    ).scalar_one()
+    assert entry.raw_metadata["fallback_used"] is True
+    assert "dead page" in entry.raw_metadata.get("fallback_reason", "")
+
+
+def test_brightdata_extraction_error_controlled_without_fallback(db_session: Session, monkeypatch):
+    """Case 6: When Bright Data fails extraction and Apify is NOT configured -> controlled completion, no crash."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", None)
+
+    matrix = TrackingMatrix(code=f"TEST-NOFB-{uuid.uuid4().hex[:6]}", name="No Fallback Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_snapshot_id = "sd_joost_nofb_999"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": bd_snapshot_id, "status": "running"})
+        elif f"/progress/{bd_snapshot_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{bd_snapshot_id}" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T15:00:00Z",
+                "input": {"url": "https://www.linkedin.com/in/joost-fanoy"},
+            }])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    assert report.failed_jobs == 1
+    assert report.entries_created == 0
+    assert len(report.items_detail) == 1
+    assert report.items_detail[0]["action"] == "FAILED"
+    assert report.items_detail[0]["http_status"] == 200
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+    assert "fallback token not configured" in report.items_detail[0]["error"]
+
+
+def test_multi_entity_run_extraction_failure_does_not_block_subsequent_entity(db_session: Session, monkeypatch):
+    """Case 7: Multi-entity run: one entity failing extraction does not prevent subsequent entity from succeeding."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-multi")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", None)
+
+    matrix = TrackingMatrix(code=f"TEST-MULTI-{uuid.uuid4().hex[:6]}", name="Multi-Entity Matrix", status="active")
+    entity_fail = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    entity_ok = TrackedEntity(
+        display_name="Damien Geradin",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/damien-geradin-5645601",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity_fail, entity_ok])
+    db_session.commit()
+
+    snap_fail = "sd_joost_fail_1"
+    snap_ok = "sd_damien_ok_2"
+    dg_activity = "7999888111222"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            body = json.loads(request.read())
+            req_url = body[0]["url"]
+            if "joost-fanoy" in req_url:
+                return httpx.Response(200, json={"snapshot_id": snap_fail, "status": "running"})
+            else:
+                return httpx.Response(200, json={"snapshot_id": snap_ok, "status": "running"})
+        elif f"/progress/{snap_fail}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snap_fail}" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T15:30:00Z",
+                "input": {"url": "https://www.linkedin.com/in/joost-fanoy"},
+            }])
+        elif f"/progress/{snap_ok}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_ok}" in url_str:
+            return httpx.Response(200, json=[{
+                "url": f"https://www.linkedin.com/posts/damien-geradin-5645601_competition-enforcement-activity-{dg_activity}?ref=test",
+                "id": dg_activity,
+                "author": "Damien Geradin",
+                "use_url": "https://www.linkedin.com/in/damien-geradin-5645601",
+                "post_text": "Substantive insights on European cartel damage litigation procedures.",
+                "date_posted": "2026-03-24T11:00:00Z",
+                "account_type": "Person",
+            }])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+
+    class ExplicitTwoJobPlanner(LinkedInDiscoveryPlanner):
+        def plan_jobs(self, db, max_entities=None):
+            return [
+                LinkedInDiscoveryJob(
+                    job_id=f"job-{entity_fail.id}",
+                    tracked_entity_id=entity_fail.id,
+                    entity_name=entity_fail.display_name,
+                    linkedin_url=entity_fail.metadata_["linkedin_url"],
+                    entity_type="person",
+                    provider="brightdata",
+                    priority=100,
+                ),
+                LinkedInDiscoveryJob(
+                    job_id=f"job-{entity_ok.id}",
+                    tracked_entity_id=entity_ok.id,
+                    entity_name=entity_ok.display_name,
+                    linkedin_url=entity_ok.metadata_["linkedin_url"],
+                    entity_type="person",
+                    provider="brightdata",
+                    priority=90,
+                ),
+            ]
+
+    service = LinkedInIngestionService(planner=ExplicitTwoJobPlanner())
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        client=mock_client,
+        disable_fallback=False,
+        max_concurrent=1,
+    )
+
+    assert report.entities_executed == 2
+    assert report.failed_jobs == 1
+    assert report.entries_created == 1
+    assert len(report.items_detail) == 2
+
+    # Verify item 0 (Joost Fanoy) failed cleanly
+    assert report.items_detail[0]["entity_name"] == "Joost Fanoy"
+    assert report.items_detail[0]["action"] == "FAILED"
+
+    # Verify item 1 (Damien Geradin) succeeded and was created
+    assert report.items_detail[1]["entity_name"] == "Damien Geradin"
+    assert report.items_detail[1]["action"] == "CREATED"
+
+    # Verify IngestionRun status in database is PARTIAL (1 success, 1 failure)
+    run_record = db_session.get(IngestionRun, report.run_id)
+    assert run_record is not None
+    assert run_record.status == IngestionRunStatus.PARTIAL.value

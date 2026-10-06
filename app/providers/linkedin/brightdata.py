@@ -13,6 +13,7 @@ from app.providers.linkedin.base import (
     LinkedInDiscoveredPost,
     LinkedInAuthError,
     LinkedInRecoverableError,
+    LinkedInExtractionError,
     LinkedInTimeoutError,
     LinkedInSnapshotTimeoutError,
     LinkedInQuotaExceededError,
@@ -239,6 +240,9 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         max_interval = getattr(self.settings, "BRIGHTDATA_POLL_MAX_INTERVAL_SECONDS", 10.0)
         snapshot_ready = False
 
+        snapshot_errors = 0
+        snapshot_error_codes = []
+
         for attempt in range(1, self.max_poll_attempts + 1):
             elapsed = time.time() - poll_start
             if elapsed > self.poll_timeout:
@@ -278,6 +282,8 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
                     except Exception:
                         prog_json = {}
                     status = str(prog_json.get("status") or "").strip().lower()
+                    snapshot_errors = prog_json.get("errors", 0)
+                    snapshot_error_codes = prog_json.get("error_codes") or []
                     logger.info("Bright Data snapshot_id=%s current status: %s", snapshot_id, status)
                     if status in ("ready", "completed", "done"):
                         snapshot_ready = True
@@ -324,9 +330,40 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
 
         logger.info("Bright Data snapshot download completed: snapshot_id=%s", snapshot_id)
         try:
-            return snap_resp.json()
+            snapshot_data = snap_resp.json()
         except Exception as exc:
             raise LinkedInRecoverableError(f"Bright Data invalid snapshot JSON: {exc}") from exc
+
+        # Check for extraction failure in snapshot records
+        items: list[dict[str, Any]] = []
+        if isinstance(snapshot_data, list):
+            items = [d for d in snapshot_data if isinstance(d, dict)]
+        elif isinstance(snapshot_data, dict):
+            if "data" in snapshot_data and isinstance(snapshot_data["data"], list):
+                items = [d for d in snapshot_data["data"] if isinstance(d, dict)]
+            else:
+                items = [snapshot_data]
+
+        has_post_data = any(bool(item.get("url") or item.get("post_url")) for item in items)
+        is_metadata_only = (
+            len(items) > 0
+            and not has_post_data
+            and all(set(item.keys()).issubset({"timestamp", "input", "error", "warning"}) for item in items)
+        )
+        has_explicit_error = any(bool(item.get("error")) for item in items)
+
+        if (snapshot_errors > 0 and not has_post_data) or is_metadata_only or has_explicit_error:
+            err_codes = snapshot_error_codes or []
+            if not err_codes and has_explicit_error:
+                err_codes = [item.get("error") for item in items if item.get("error")]
+            err_msg = (
+                f"Bright Data extraction failed for {target_url}: unresolvable profile or dead page "
+                f"(errors={snapshot_errors}, error_codes={err_codes})"
+            )
+            logger.warning(err_msg)
+            raise LinkedInExtractionError(err_msg)
+
+        return snapshot_data
 
     def _parse_response(
         self,
@@ -346,6 +383,24 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
                 items = [d for d in data["data"] if isinstance(d, dict)]
             else:
                 items = [data]
+
+        # Check for extraction failure in synchronous response
+        has_post_data = any(bool(item.get("url") or item.get("post_url")) for item in items)
+        is_metadata_only = (
+            len(items) > 0
+            and not has_post_data
+            and all(set(item.keys()).issubset({"timestamp", "input", "error", "warning"}) for item in items)
+        )
+        has_explicit_error = any(bool(item.get("error")) for item in items)
+
+        if is_metadata_only or has_explicit_error:
+            err_codes = [item.get("error") for item in items if item.get("error")]
+            err_msg = (
+                f"Bright Data extraction failed for {target_url}: unresolvable profile or dead page "
+                f"(error_codes={err_codes})"
+            )
+            logger.warning(err_msg)
+            raise LinkedInExtractionError(err_msg)
 
         posts: list[LinkedInDiscoveredPost] = []
         for item in items[:limit]:
