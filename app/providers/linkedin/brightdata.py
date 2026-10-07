@@ -223,6 +223,138 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
             http_status=self.last_http_status or response.status_code,
         )
 
+    def resolve_profile_details(
+        self,
+        target_url: str,
+        client: httpx.Client,
+    ) -> Optional[dict[str, Any]]:
+        """Attempt to resolve canonical profile details using Bright Data Profile Scraper.
+
+        Used as an intelligent recovery mechanism when posts scraper returns dead_page.
+        Calls dataset gd_l1viktl72bvl7bjuj0 directly with [{"url": target_url}].
+        """
+        token = self.settings.brightdata_token
+        if not token:
+            raise LinkedInAuthError(
+                "Bright Data API token is not configured (BRIGHTDATA_API_TOKEN is empty). Fail-closed."
+            )
+
+        base_url = self._resolve_base_api_url(self.settings.BRIGHTDATA_LINKEDIN_ENDPOINT)
+        endpoint = f"{base_url}/trigger"
+        dataset_id = getattr(
+            self.settings,
+            "BRIGHTDATA_LINKEDIN_PROFILE_DATASET_ID",
+            "gd_l1viktl72bvl7bjuj0",
+        )
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "HITCHINGS/1.0",
+        }
+        params = {"dataset_id": dataset_id}
+        payload = [{"url": target_url.strip()}]
+
+        logger.info(
+            "Bright Data profile resolution dispatching target_url=%s (dataset=%s)",
+            target_url,
+            dataset_id,
+        )
+
+        try:
+            response = client.post(
+                endpoint,
+                params=params,
+                json=payload,
+                headers=headers,
+                timeout=self.settings.LINKEDIN_TIMEOUT_SECONDS,
+            )
+            self.last_http_status = response.status_code
+        except httpx.TimeoutException as exc:
+            logger.warning("Bright Data profile resolution timed out for %s: %s", target_url, exc)
+            return None
+        except httpx.RequestError as exc:
+            logger.warning("Bright Data profile resolution network error for %s: %s", target_url, exc)
+            return None
+
+        if response.status_code in (401, 403):
+            raise LinkedInAuthError(
+                f"Bright Data profile resolution auth error (HTTP {response.status_code}). Check API token."
+            )
+        if response.status_code == 429:
+            raise LinkedInQuotaExceededError("Bright Data rate limit exceeded during profile resolution (HTTP 429).")
+        if response.status_code >= 500:
+            logger.warning("Bright Data profile resolution server error (HTTP %d)", response.status_code)
+            return None
+        if response.status_code >= 400:
+            logger.warning(
+                "Bright Data profile resolution client error (HTTP %d): %s",
+                response.status_code,
+                response.text[:200],
+            )
+            return None
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            logger.warning("Bright Data profile resolution invalid JSON: %s", exc)
+            return None
+
+        snapshot_id: Optional[str] = None
+        if isinstance(data, dict) and "snapshot_id" in data and data["snapshot_id"]:
+            snapshot_id = str(data["snapshot_id"]).strip()
+
+        if snapshot_id:
+            try:
+                data = self._poll_and_download_snapshot(
+                    snapshot_id=snapshot_id,
+                    client=client,
+                    headers=headers,
+                    target_url=target_url,
+                )
+            except LinkedInAuthError:
+                raise
+            except LinkedInRecoverableError as exc:
+                logger.warning("Bright Data profile resolution snapshot poll failed for %s: %s", target_url, exc)
+                return None
+
+        items: list[dict[str, Any]] = []
+        if isinstance(data, list):
+            items = [d for d in data if isinstance(d, dict)]
+        elif isinstance(data, dict):
+            if "data" in data and isinstance(data["data"], list):
+                items = [d for d in data["data"] if isinstance(d, dict)]
+            else:
+                items = [data]
+
+        if not items:
+            return None
+
+        item = items[0]
+        # Ignore metadata-only or error-only items
+        if item.get("error") and not item.get("name"):
+            return None
+
+        raw_name = item.get("name") or item.get("full_name")
+        if not raw_name and (item.get("first_name") or item.get("last_name")):
+            raw_name = f"{item.get('first_name', '')} {item.get('last_name', '')}".strip()
+
+        raw_url = item.get("url") or item.get("profile_url")
+        if not raw_url or not raw_name:
+            return None
+
+        from app.providers.linkedin.normalizer import canonicalize_linkedin_profile_url
+
+        canon_url = canonicalize_linkedin_profile_url(str(raw_url).strip())
+        if not canon_url:
+            return None
+
+        return {
+            "url": canon_url,
+            "name": str(raw_name).strip(),
+            "raw": item,
+        }
+
     def _poll_and_download_snapshot(
         self,
         snapshot_id: str,
@@ -353,15 +485,24 @@ class BrightDataLinkedInProvider(BaseLinkedInProvider):
         has_explicit_error = any(bool(item.get("error")) for item in items)
 
         if (snapshot_errors > 0 and not has_post_data) or is_metadata_only or has_explicit_error:
-            err_codes = snapshot_error_codes or []
+            if isinstance(snapshot_error_codes, dict):
+                err_codes = list(snapshot_error_codes.keys())
+            elif isinstance(snapshot_error_codes, list):
+                err_codes = [str(c) for c in snapshot_error_codes]
+            else:
+                err_codes = []
             if not err_codes and has_explicit_error:
-                err_codes = [item.get("error") for item in items if item.get("error")]
+                err_codes = [str(item.get("error")) for item in items if item.get("error")]
             err_msg = (
                 f"Bright Data extraction failed for {target_url}: unresolvable profile or dead page "
                 f"(errors={snapshot_errors}, error_codes={err_codes})"
             )
             logger.warning(err_msg)
-            raise LinkedInExtractionError(err_msg)
+            raise LinkedInExtractionError(
+                err_msg,
+                error_codes=err_codes,
+                target_url=target_url,
+            )
 
         return snapshot_data
 

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     BRIGHTDATA_ALLOW_PAID_USAGE: bool = False
     BRIGHTDATA_LINKEDIN_ENDPOINT: str = "https://api.brightdata.com/datasets/v3/trigger"
     BRIGHTDATA_LINKEDIN_DATASET_ID: str = "gd_lyy3tktm25m4avu764"
+    BRIGHTDATA_LINKEDIN_PROFILE_DATASET_ID: str = "gd_l1viktl72bvl7bjuj0"
     BRIGHTDATA_COST_PER_RECORD_USD: Optional[float] = None
     BRIGHTDATA_LINKEDIN_POST_COST_PER_RECORD: Optional[float] = None
     BRIGHTDATA_POLL_INTERVAL_SECONDS: float = 2.0

@@ -64,9 +64,23 @@ class LinkedInSnapshotTimeoutError(LinkedInTimeoutError):
 class LinkedInExtractionError(LinkedInRecoverableError):
     """Extraction failure on a specific target URL (e.g. dead_page, unresolvable profile, blocked).
 
-    Eligible for fallback to alternate provider.
+    Eligible for fallback to alternate provider or profile URL recovery.
     """
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        error_codes: Optional[list[str]] = None,
+        target_url: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_codes = error_codes or []
+        self.target_url = target_url
+        self.is_dead_page = (
+            any("dead_page" in str(c).lower() for c in self.error_codes)
+            or ("dead page" in message.lower())
+            or ("dead_page" in message.lower())
+        )
 
 
 class LinkedInQuotaExceededError(LinkedInRecoverableError):
@@ -113,3 +127,11 @@ class BaseLinkedInProvider(ABC):
             LinkedInRecoverableError: On timeout, 5xx, network error, or rate limits.
         """
         pass
+
+    def resolve_profile_details(
+        self,
+        target_url: str,
+        client: httpx.Client,
+    ) -> Optional[dict[str, Any]]:
+        """Attempt to resolve profile details for URL recovery. Providers override if supported."""
+        return None

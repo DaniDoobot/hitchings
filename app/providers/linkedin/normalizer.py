@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Optional, Tuple
+import unicodedata
+from typing import Iterable, Optional, Tuple, Union
 
 
 # Regex patterns matching LinkedIn activity/share/post IDs across URLs and URN strings.
@@ -80,16 +81,108 @@ def normalize_linkedin_profile_url(url: Optional[str]) -> str:
     return clean
 
 
+def canonicalize_linkedin_profile_url(url: Optional[str]) -> str:
+    """Convert any raw/regional LinkedIn profile URL into canonical https://www.linkedin.com/... format."""
+    norm = normalize_linkedin_profile_url(url)
+    if not norm:
+        return ""
+    if norm.startswith("linkedin.com/"):
+        return f"https://www.{norm}"
+    return f"https://www.linkedin.com/{norm.lstrip('/')}"
+
+
+def _clean_name_tokens(name: Optional[str]) -> list[str]:
+    """Clean and normalize a personal or entity name into lowercase ASCII tokens, stripping titles."""
+    if not name or not isinstance(name, str):
+        return []
+    # Map special base Latin characters that do not decompose under NFKD (e.g. Turkish dotless i)
+    special_latin = str.maketrans({
+        "ı": "i", "İ": "i",
+        "ß": "ss",
+        "ø": "o", "Ø": "o",
+        "æ": "ae", "Æ": "ae",
+        "ł": "l", "Ł": "l",
+        "ð": "d", "Ð": "d",
+        "þ": "th", "Þ": "th",
+    })
+    trans = name.translate(special_latin)
+    # Strip diacritics / accents (e.g. Günter -> Gunter, José -> Jose)
+    normalized = unicodedata.normalize("NFKD", trans).encode("ASCII", "ignore").decode("utf-8")
+    text = normalized.lower()
+
+    # Common academic/professional titles, honorifics, and suffixes to ignore
+    titles = {
+        "dr", "prof", "professor", "mr", "mrs", "ms", "llm", "phd", "esq",
+        "abogado", "lic", "ing", "avocat", "rechtsanwalt",
+    }
+    # Strip dots so abbreviations like LL.M., Ph.D., Dr. become llm, phd, dr
+    text = text.replace(".", "")
+    # Replace non-alphanumeric with whitespace
+    text = re.sub(r"[^\w\s]", " ", text)
+    tokens = text.split()
+    return [t for t in tokens if t not in titles]
+
+
+def is_profile_name_match(expected_name: Optional[str], candidate_name: Optional[str]) -> bool:
+    """Conservative check to verify candidate profile name matches expected entity name.
+
+    Handles:
+    - Case-insensitivity and diacritic normalization (e.g. Pınar -> Pinar)
+    - Professional titles / honorifics (Dr., Prof., LL.M., PhD, etc.)
+    - Middle initials and middle names (e.g. "Thomas Funke" matches "Dr. Thomas G. Funke")
+    - Requires both first and last name alignment when multiple tokens exist.
+    """
+    if not expected_name or not candidate_name:
+        return False
+
+    exp_tokens = _clean_name_tokens(expected_name)
+    cand_tokens = _clean_name_tokens(candidate_name)
+
+    if not exp_tokens or not cand_tokens:
+        return False
+
+    # Exact token equality
+    if exp_tokens == cand_tokens:
+        return True
+
+    # Multi-token conservative matching
+    if len(exp_tokens) >= 2 and len(cand_tokens) >= 2:
+        # First name and last name must strictly match
+        if exp_tokens[0] != cand_tokens[0] or exp_tokens[-1] != cand_tokens[-1]:
+            return False
+        # All non-initial tokens in expected must be present in candidate
+        exp_significant = [t for t in exp_tokens if len(t) > 1]
+        cand_significant = set(t for t in cand_tokens if len(t) > 1)
+        return all(t in cand_significant for t in exp_significant)
+
+    # Single-token fallback: exact match required
+    return exp_tokens == cand_tokens
+
+
 def is_author_profile_coherent(
     author_profile_url: Optional[str],
-    expected_entity_url: Optional[str],
+    expected_entity_url: Union[str, Iterable[str], None],
 ) -> bool:
-    """Verify that author_profile_url matches the configured entity LinkedIn URL."""
+    """Verify that author_profile_url matches the configured entity LinkedIn URL(s).
+
+    Accepts either a single URL string or an iterable of URL strings (e.g. configured URL
+    and safely recovered canonical URL).
+    """
     norm_author = normalize_linkedin_profile_url(author_profile_url)
-    norm_expected = normalize_linkedin_profile_url(expected_entity_url)
-    if not norm_author or not norm_expected:
+    if not norm_author or expected_entity_url is None:
         return False
-    return norm_author == norm_expected
+
+    if isinstance(expected_entity_url, str):
+        candidates = [expected_entity_url]
+    else:
+        candidates = list(expected_entity_url)
+
+    for cand in candidates:
+        norm_cand = normalize_linkedin_profile_url(cand)
+        if norm_cand and norm_author == norm_cand:
+            return True
+
+    return False
 
 
 def resolve_canonical_identity(

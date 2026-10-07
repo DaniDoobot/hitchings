@@ -38,6 +38,11 @@ from app.services.linkedin_ingestion_service import (
     LinkedInIngestionService,
     LinkedInIngestionReport,
 )
+from app.providers.linkedin.normalizer import (
+    canonicalize_linkedin_profile_url,
+    is_profile_name_match,
+    is_author_profile_coherent,
+)
 
 
 # ==============================================================================
@@ -3561,3 +3566,459 @@ def test_multi_entity_run_extraction_failure_does_not_block_subsequent_entity(db
     run_record = db_session.get(IngestionRun, report.run_id)
     assert run_record is not None
     assert run_record.status == IngestionRunStatus.PARTIAL.value
+
+
+# ==============================================================================
+# 9. PROFILE RECOVERY & CANONICAL MATCHING TESTS (Bloque 9C Hardening)
+# ==============================================================================
+
+def test_canonicalize_linkedin_profile_url():
+    """Verify canonicalize_linkedin_profile_url normalizes regional, protocol, and trailing parts."""
+    assert canonicalize_linkedin_profile_url("https://id.linkedin.com/in/dr-thomas-g-funke-96297346?trk=public") == "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
+    assert canonicalize_linkedin_profile_url("http://es.linkedin.com/in/pinar-akman/") == "https://www.linkedin.com/in/pinar-akman"
+    assert canonicalize_linkedin_profile_url("linkedin.com/company/freshfields") == "https://www.linkedin.com/company/freshfields"
+    assert canonicalize_linkedin_profile_url("") == ""
+    assert canonicalize_linkedin_profile_url(None) == ""
+
+
+def test_is_profile_name_match():
+    """Verify conservative personal name matching with titles, honorifics, and accents."""
+    # Positive matches
+    assert is_profile_name_match("Thomas Funke", "Dr. Thomas G. Funke") is True
+    assert is_profile_name_match("Thomas Funke", "Thomas Funke") is True
+    assert is_profile_name_match("Thomas Funke", "Thomas Funke, LL.M.") is True
+    assert is_profile_name_match("Dr. Thomas Funke", "Dr. Thomas G. Funke") is True
+    assert is_profile_name_match("Pinar Akman", "Prof. Dr. Pınar Akman") is True
+    assert is_profile_name_match("Stefan Tuinenga", "Stefan Tuinenga, LLM") is True
+    assert is_profile_name_match("Damien Geradin", "Damien Geradin") is True
+
+    # Negative matches - different persons / mismatched surname or firstname
+    assert is_profile_name_match("Thomas Funke", "Stefan Tuinenga") is False
+    assert is_profile_name_match("Thomas Funke", "Thomas Schmidt") is False
+    assert is_profile_name_match("Thomas Funke", "Alexander Funke") is False
+    assert is_profile_name_match("Thomas Funke", "Thomas Funke-Muller") is False
+    assert is_profile_name_match("Thomas Funke", "Dr. Funke") is False  # missing first name
+    assert is_profile_name_match("Thomas Funke", None) is False
+    assert is_profile_name_match(None, "Thomas Funke") is False
+
+
+def test_brightdata_resolve_profile_details_success(monkeypatch):
+    """Verify BrightDataLinkedInProvider.resolve_profile_details calls profile dataset and returns canonical URL."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-profile")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_PROFILE_DATASET_ID", "gd_l1viktl72bvl7bjuj0")
+
+    captured_req = {}
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            captured_req["url"] = url_str
+            captured_req["body"] = json.loads(request.read())
+            return httpx.Response(200, json={"snapshot_id": "snap_prof_123", "status": "running"})
+        elif "/progress/snap_prof_123" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif "/snapshot/snap_prof_123" in url_str:
+            return httpx.Response(200, json=[{
+                "url": "https://id.linkedin.com/in/dr-thomas-g-funke-96297346",
+                "name": "Dr. Thomas G. Funke",
+                "id": "dr-thomas-g-funke-96297346",
+            }])
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=3)
+
+    result = provider.resolve_profile_details("https://www.linkedin.com/in/thomas-funke-67b14b14", client=client)
+
+    assert result is not None
+    assert result["name"] == "Dr. Thomas G. Funke"
+    assert result["url"] == "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
+    assert "dataset_id=gd_l1viktl72bvl7bjuj0" in captured_req["url"]
+    assert captured_req["body"] == [{"url": "https://www.linkedin.com/in/thomas-funke-67b14b14"}]
+
+
+def test_brightdata_resolve_profile_details_dead_page_returns_none(monkeypatch):
+    """Verify BrightDataLinkedInProvider.resolve_profile_details returns None when profile cannot be resolved."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-profile")
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": "snap_prof_dead", "status": "running"})
+        elif "/progress/snap_prof_dead" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif "/snapshot/snap_prof_dead" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T15:30:00Z",
+                "input": {"url": "https://www.linkedin.com/in/invalid-profile"},
+                "error": "dead_page",
+            }])
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    provider = BrightDataLinkedInProvider(poll_interval=0.001, max_poll_attempts=3)
+
+    result = provider.resolve_profile_details("https://www.linkedin.com/in/invalid-profile", client=client)
+    assert result is None
+
+
+def test_linkedin_discovery_profile_recovery_workflow_success(db_session: Session, monkeypatch):
+    """Full workflow: Posts scraper gets dead_page -> Profile scraper resolves distinct canonical URL ->
+
+    Posts scraper retrieves posts from recovered canonical URL -> Entry created with full traceability ->
+    TrackedEntity metadata in DB is NOT modified.
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-rec")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", None)
+
+    configured_url = "https://www.linkedin.com/in/thomas-funke-67b14b14"
+    canonical_recovered_url = "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
+
+    matrix = TrackingMatrix(code=f"TEST-REC-{uuid.uuid4().hex[:6]}", name="Recovery Test Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Thomas Funke",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": configured_url,
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    snap_posts_fail = "snap_posts_dead_1"
+    snap_profile_ok = "snap_profile_res_2"
+    snap_posts_ok = "snap_posts_recovered_3"
+    funke_activity_id = "7888999000111"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+
+        if "/datasets/v3/trigger" in url_str:
+            body = json.loads(request.read())
+            req_url = body[0]["url"]
+            # 1. First trigger: Posts scraper on configured URL
+            if req_url == configured_url and "dataset_id=gd_lyy3tktm25m4avu764" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_posts_fail, "status": "running"})
+            # 2. Second trigger: Profile scraper on configured URL
+            elif req_url == configured_url and "dataset_id=gd_l1viktl72bvl7bjuj0" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_profile_ok, "status": "running"})
+            # 3. Third trigger: Posts scraper on recovered canonical URL
+            elif req_url == canonical_recovered_url and "dataset_id=gd_lyy3tktm25m4avu764" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_posts_ok, "status": "running"})
+            return httpx.Response(400, json={"error": f"Unexpected trigger: {url_str}"})
+
+        elif f"/progress/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T15:30:00Z",
+                "input": {"url": configured_url},
+                "error": "dead_page",
+            }])
+
+        elif f"/progress/{snap_profile_ok}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_profile_ok}" in url_str:
+            return httpx.Response(200, json=[{
+                "url": "https://id.linkedin.com/in/dr-thomas-g-funke-96297346",
+                "name": "Dr. Thomas G. Funke",
+                "id": "dr-thomas-g-funke-96297346",
+            }])
+
+        elif f"/progress/{snap_posts_ok}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_posts_ok}" in url_str:
+            return httpx.Response(200, json=[{
+                "url": f"https://www.linkedin.com/posts/dr-thomas-g-funke-96297346_antitrust-digital-markets-activity-{funke_activity_id}?ref=feed",
+                "id": funke_activity_id,
+                "author": "Dr. Thomas G. Funke",
+                "use_url": canonical_recovered_url,
+                "post_text": "Insights on merger control proceedings in digital ecosystems.",
+                "date_posted": "2026-03-25T09:00:00Z",
+                "account_type": "Person",
+            }])
+
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    assert report.failed_jobs == 0
+    assert report.entries_created == 1
+    assert len(report.items_detail) == 1
+
+    detail = report.items_detail[0]
+    assert detail["action"] == "CREATED"
+    assert detail["recovery_used"] is True
+    assert detail["configured_profile_url"] == configured_url
+    assert detail["resolved_profile_url"] == canonical_recovered_url
+    assert detail["profile_resolution_provider"] == "brightdata"
+    assert "Recovered via brightdata" in detail["recovery_reason"]
+
+    # Verify Entry created in DB with metadata
+    created_entry = db_session.execute(
+        select(Entry).where(Entry.external_id == f"urn:li:activity:{funke_activity_id}")
+    ).scalar_one()
+    assert created_entry is not None
+    assert created_entry.raw_metadata["recovery_used"] is True
+    assert created_entry.raw_metadata["configured_profile_url"] == configured_url
+    assert created_entry.raw_metadata["resolved_profile_url"] == canonical_recovered_url
+    assert created_entry.raw_metadata["profile_resolution_provider"] == "brightdata"
+    assert created_entry.raw_metadata["fallback_used"] is False
+
+    # CRUCIAL CONSTRAINT: Verify TrackedEntity in DB was NOT changed
+    entity_db = db_session.get(TrackedEntity, entity.id)
+    assert entity_db.metadata_["linkedin_url"] == configured_url
+
+
+def test_linkedin_discovery_profile_recovery_rejected_different_person(db_session: Session, monkeypatch):
+    """When Profile Scraper resolves an unidentifiable or different individual, candidate is rejected and Apify fallback is used."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-rec")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-apify-token")
+
+    configured_url = "https://www.linkedin.com/in/thomas-funke-67b14b14"
+
+    matrix = TrackingMatrix(code=f"TEST-DIFF-{uuid.uuid4().hex[:6]}", name="Different Person Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Thomas Funke",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": configured_url,
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    snap_posts_fail = "snap_posts_dead_diff"
+    snap_profile_wrong = "snap_profile_wrong_diff"
+    apify_activity_id = "7999111222333"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+
+        if "/datasets/v3/trigger" in url_str:
+            if "dataset_id=gd_lyy3tktm25m4avu764" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_posts_fail, "status": "running"})
+            elif "dataset_id=gd_l1viktl72bvl7bjuj0" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_profile_wrong, "status": "running"})
+
+        elif f"/progress/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json=[{
+                "timestamp": "2026-10-06T15:30:00Z",
+                "input": {"url": configured_url},
+                "error": "dead_page",
+            }])
+
+        elif f"/progress/{snap_profile_wrong}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_profile_wrong}" in url_str:
+            # Resolves a completely different person!
+            return httpx.Response(200, json=[{
+                "url": "https://www.linkedin.com/in/jane-doe-12345",
+                "name": "Jane Doe",
+                "id": "jane-doe-12345",
+            }])
+
+        # Apify fallback should be called for configured_url
+        elif "api.apify.com" in url_str and "run-sync-get-dataset-items" in url_str:
+            body = json.loads(request.read())
+            assert body["targetUrls"] == [configured_url]
+            return httpx.Response(200, json=[{
+                "id": apify_activity_id,
+                "linkedinUrl": f"https://www.linkedin.com/feed/update/urn:li:activity:{apify_activity_id}",
+                "author": {"name": "Thomas Funke", "linkedinUrl": configured_url},
+                "content": "Apify post for Thomas Funke.",
+                "postedAt": {"date": "2026-03-25T12:00:00.000Z"},
+            }])
+
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    assert report.failed_jobs == 0
+    assert report.entries_created == 1
+    assert report.fallback_count == 1
+    detail = report.items_detail[0]
+    assert detail["action"] == "CREATED"
+    assert detail["recovery_used"] is False
+    assert detail["retrieval_provider"] == "apify"
+
+    entry = db_session.execute(
+        select(Entry).where(Entry.external_id == f"urn:li:activity:{apify_activity_id}")
+    ).scalar_one()
+    assert entry.raw_metadata["fallback_used"] is True
+    assert entry.raw_metadata["recovery_used"] is False
+
+
+def test_linkedin_discovery_provenance_rejects_unrelated_author_after_recovery(db_session: Session, monkeypatch):
+    """Even if profile recovery succeeded, a post from an unrelated author is rejected (SKIPPED_PROVENANCE)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-rec")
+
+    configured_url = "https://www.linkedin.com/in/thomas-funke-67b14b14"
+    canonical_recovered_url = "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
+
+    matrix = TrackingMatrix(code=f"TEST-UNREL-{uuid.uuid4().hex[:6]}", name="Unrelated Author Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Thomas Funke",
+        entity_type="person",
+        active=True,
+        metadata_={"linkedin_url": configured_url, "linkedin_url_verified": True},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    snap_posts_fail = "snap_posts_unrel_1"
+    snap_profile_ok = "snap_profile_unrel_2"
+    snap_posts_ok = "snap_posts_unrel_3"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            if "dataset_id=gd_lyy3tktm25m4avu764" in url_str and configured_url in request.read().decode():
+                return httpx.Response(200, json={"snapshot_id": snap_posts_fail, "status": "running"})
+            elif "dataset_id=gd_l1viktl72bvl7bjuj0" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_profile_ok, "status": "running"})
+            elif "dataset_id=gd_lyy3tktm25m4avu764" in url_str and canonical_recovered_url in request.read().decode():
+                return httpx.Response(200, json={"snapshot_id": snap_posts_ok, "status": "running"})
+
+        elif f"/progress/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json=[{"error": "dead_page"}])
+
+        elif f"/progress/{snap_profile_ok}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_profile_ok}" in url_str:
+            return httpx.Response(200, json=[{
+                "url": canonical_recovered_url,
+                "name": "Dr. Thomas G. Funke",
+            }])
+
+        elif f"/progress/{snap_posts_ok}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_posts_ok}" in url_str:
+            # Post returned has an unrelated third-party author URL!
+            return httpx.Response(200, json=[{
+                "url": "https://www.linkedin.com/posts/spammer-123_test-activity-7911223344",
+                "id": "7911223344",
+                "author": "Dr. Thomas G. Funke",
+                "use_url": "https://www.linkedin.com/in/unrelated-spammer",
+                "post_text": "Random spam post.",
+                "date_posted": "2026-03-25T09:00:00Z",
+            }])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    assert report.provenance_rejected == 1
+    assert report.entries_created == 0
+    assert report.items_detail[0]["action"] == "SKIPPED_PROVENANCE"
+    assert "author_profile_url_mismatch" in report.items_detail[0]["rejection_reason"]
+
+
+def test_linkedin_discovery_profile_recovery_skips_identical_url(db_session: Session, monkeypatch):
+    """When Profile Scraper resolves an identical URL to the failed one, avoid loop and fall back."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-rec")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", None)
+
+    configured_url = "https://www.linkedin.com/in/stefan-tuinenga"
+
+    matrix = TrackingMatrix(code=f"TEST-IDENT-{uuid.uuid4().hex[:6]}", name="Identical URL Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Stefan Tuinenga",
+        entity_type="person",
+        active=True,
+        metadata_={"linkedin_url": configured_url, "linkedin_url_verified": True},
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    snap_posts_fail = "snap_posts_ident_1"
+    snap_profile_same = "snap_profile_ident_2"
+    posts_attempts = 0
+
+    def mock_router(request: httpx.Request):
+        nonlocal posts_attempts
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            if "dataset_id=gd_lyy3tktm25m4avu764" in url_str:
+                posts_attempts += 1
+                return httpx.Response(200, json={"snapshot_id": snap_posts_fail, "status": "running"})
+            elif "dataset_id=gd_l1viktl72bvl7bjuj0" in url_str:
+                return httpx.Response(200, json={"snapshot_id": snap_profile_same, "status": "running"})
+
+        elif f"/progress/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 1, "error_codes": ["dead_page"]})
+        elif f"/snapshot/{snap_posts_fail}" in url_str:
+            return httpx.Response(200, json=[{"error": "dead_page"}])
+
+        elif f"/progress/{snap_profile_same}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_profile_same}" in url_str:
+            # Returns identical URL!
+            return httpx.Response(200, json=[{
+                "url": configured_url,
+                "name": "Stefan Tuinenga",
+            }])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=False,
+    )
+
+    # Posts scraper should only have been attempted once (initial try), NOT retried with same URL
+    assert posts_attempts == 1
+    assert report.failed_jobs == 1
+    assert report.entries_created == 0
+    assert report.items_detail[0]["action"] == "FAILED"

@@ -35,6 +35,9 @@ from app.providers.linkedin.apify import ApifyLinkedInProvider
 from app.providers.linkedin.normalizer import (
     extract_linkedin_activity_id,
     normalize_linkedin_canonical_url,
+    normalize_linkedin_profile_url,
+    canonicalize_linkedin_profile_url,
+    is_profile_name_match,
     resolve_canonical_identity,
     is_author_profile_coherent,
 )
@@ -582,6 +585,11 @@ class LinkedInIngestionService:
         posts: list[LinkedInDiscoveredPost] = []
         used_fallback_for_job = False
         fallback_reason: Optional[str] = None
+        recovery_used = False
+        recovery_reason: Optional[str] = None
+        configured_profile_url = job.linkedin_url
+        resolved_profile_url: Optional[str] = None
+        profile_resolution_provider: Optional[str] = None
 
         # ── Provider dispatch ─────────────────────────────────────────────────
         try:
@@ -613,6 +621,11 @@ class LinkedInIngestionService:
                 "retrieval_provider": self.primary.provider_name,
                 "action": "AUTH_ERROR", "entry_id": None, "external_id": None,
                 "error": str(auth_err),
+                "configured_profile_url": configured_profile_url,
+                "resolved_profile_url": resolved_profile_url,
+                "profile_resolution_provider": profile_resolution_provider,
+                "recovery_used": recovery_used,
+                "recovery_reason": recovery_reason,
             })
             return
 
@@ -647,6 +660,11 @@ class LinkedInIngestionService:
                         "retrieval_provider": self.fallback.provider_name,
                         "action": "FAILED", "entry_id": None, "external_id": None,
                         "error": f"Snapshot timeout; Fallback failed: {fb_err}",
+                        "configured_profile_url": configured_profile_url,
+                        "resolved_profile_url": resolved_profile_url,
+                        "profile_resolution_provider": profile_resolution_provider,
+                        "recovery_used": recovery_used,
+                        "recovery_reason": recovery_reason,
                     })
                     return
             else:
@@ -667,63 +685,137 @@ class LinkedInIngestionService:
                     "retrieval_provider": self.primary.provider_name,
                     "action": "TIMED_OUT_SNAPSHOT", "entry_id": None, "external_id": None,
                     "error": f"{snap_err} ({reason_msg})",
+                    "configured_profile_url": configured_profile_url,
+                    "resolved_profile_url": resolved_profile_url,
+                    "profile_resolution_provider": profile_resolution_provider,
+                    "recovery_used": recovery_used,
+                    "recovery_reason": recovery_reason,
                 })
                 return
 
         except LinkedInRecoverableError as rec_err:
-            logger.warning("Primary failed for '%s'. Checking fallback...", job.entity_name)
-            fallback_reason = str(rec_err)
-            if not disable_fallback and self.settings.apify_token:
+            if isinstance(rec_err, LinkedInExtractionError) and getattr(rec_err, "is_dead_page", False):
+                logger.info(
+                    "Primary extraction indicated dead_page for '%s' (%s). Attempting profile recovery...",
+                    job.entity_name, job.linkedin_url,
+                )
                 try:
-                    posts = self.fallback.discover_posts(
-                        target_url=job.linkedin_url, client=client, limit=max_posts_eff,
-                        entity_name=job.entity_name, entity_id=job.tracked_entity_id,
+                    profile_res = self.primary.resolve_profile_details(
+                        target_url=job.linkedin_url,
+                        client=client,
                     )
-                    used_fallback_for_job = True
-                    counters["fallback_count"] += 1
-                    provider_items_used[self.fallback.provider_name] = (
-                        provider_items_used.get(self.fallback.provider_name, 0) + len(posts)
-                    )
-                except Exception as fb_err:
+                except Exception as res_err:
+                    logger.warning("Profile resolution error for '%s': %s", job.entity_name, res_err)
+                    profile_res = None
+
+                if profile_res:
+                    cand_url = profile_res.get("url")
+                    cand_name = profile_res.get("name")
+                    if cand_url and cand_name and is_profile_name_match(job.entity_name, cand_name):
+                        if normalize_linkedin_profile_url(cand_url) != normalize_linkedin_profile_url(job.linkedin_url):
+                            logger.info(
+                                "Profile recovery successfully matched candidate for '%s': '%s' -> '%s' (name: '%s')",
+                                job.entity_name, job.linkedin_url, cand_url, cand_name,
+                            )
+                            try:
+                                recovered_posts = self.primary.discover_posts(
+                                    target_url=cand_url,
+                                    client=client,
+                                    limit=max_posts_eff,
+                                    entity_name=job.entity_name,
+                                    entity_id=job.tracked_entity_id,
+                                )
+                                posts = recovered_posts
+                                recovery_used = True
+                                resolved_profile_url = cand_url
+                                profile_resolution_provider = self.primary.provider_name
+                                recovery_reason = (
+                                    f"Recovered via {self.primary.provider_name} profile scraper: "
+                                    f"matched name '{cand_name}' to '{job.entity_name}', resolved URL '{cand_url}'"
+                                )
+                                provider_items_used[self.primary.provider_name] = (
+                                    provider_items_used.get(self.primary.provider_name, 0) + len(posts)
+                                )
+                            except Exception as rec_post_err:
+                                logger.warning(
+                                    "Recovered URL '%s' post discovery failed for '%s': %s",
+                                    cand_url, job.entity_name, rec_post_err,
+                                )
+                        else:
+                            logger.warning(
+                                "Profile recovery resolved identical URL '%s' for '%s'; skipping retry.",
+                                cand_url, job.entity_name,
+                            )
+                    else:
+                        logger.warning(
+                            "Profile recovery rejected for '%s': candidate name '%s' does not match or URL missing",
+                            job.entity_name, cand_name,
+                        )
+
+            if not recovery_used:
+                logger.warning("Primary failed for '%s'. Checking fallback...", job.entity_name)
+                fallback_reason = str(rec_err)
+                if not disable_fallback and self.settings.apify_token:
+                    try:
+                        posts = self.fallback.discover_posts(
+                            target_url=job.linkedin_url, client=client, limit=max_posts_eff,
+                            entity_name=job.entity_name, entity_id=job.tracked_entity_id,
+                        )
+                        used_fallback_for_job = True
+                        counters["fallback_count"] += 1
+                        provider_items_used[self.fallback.provider_name] = (
+                            provider_items_used.get(self.fallback.provider_name, 0) + len(posts)
+                        )
+                    except Exception as fb_err:
+                        counters["failed_jobs"] += 1
+                        counters["provider_errors"] += 1
+                        errors.append(f"Job failed on {job.entity_name}: {fb_err}")
+                        per_entity.append({
+                            "entity": job.entity_name, "provider": self.fallback.provider_name,
+                            "posts": 0, "created": 0, "duplicates": 0, "provenance_rejected": 0,
+                            "errors": 1, "timed_out_snapshots": 0, "provider_errors": 1,
+                        })
+                        items_detail.append({
+                            "entity_name": job.entity_name, "http_status": "ERROR",
+                            "records_returned": 0, "author_name": None, "author_profile_url": None,
+                            "linkedin_post_url": None, "activity_id": None, "published_at": None,
+                            "identity_status": None, "provenance_status": None,
+                            "retrieval_provider": self.fallback.provider_name,
+                            "action": "FAILED", "entry_id": None, "external_id": None,
+                            "error": f"Fallback failed: {fb_err}",
+                            "configured_profile_url": configured_profile_url,
+                            "resolved_profile_url": resolved_profile_url,
+                            "profile_resolution_provider": profile_resolution_provider,
+                            "recovery_used": recovery_used,
+                            "recovery_reason": recovery_reason,
+                        })
+                        return
+                else:
+                    reason_msg = "fallback disabled" if disable_fallback else "fallback token not configured"
                     counters["failed_jobs"] += 1
                     counters["provider_errors"] += 1
-                    errors.append(f"Job failed on {job.entity_name}: {fb_err}")
+                    errors.append(f"Job failed on {job.entity_name}: {rec_err} ({reason_msg})")
                     per_entity.append({
-                        "entity": job.entity_name, "provider": self.fallback.provider_name,
+                        "entity": job.entity_name, "provider": self.primary.provider_name,
                         "posts": 0, "created": 0, "duplicates": 0, "provenance_rejected": 0,
                         "errors": 1, "timed_out_snapshots": 0, "provider_errors": 1,
                     })
+                    http_status_val = 200 if isinstance(rec_err, LinkedInExtractionError) else "ERROR"
                     items_detail.append({
-                        "entity_name": job.entity_name, "http_status": "ERROR",
+                        "entity_name": job.entity_name, "http_status": http_status_val,
                         "records_returned": 0, "author_name": None, "author_profile_url": None,
                         "linkedin_post_url": None, "activity_id": None, "published_at": None,
                         "identity_status": None, "provenance_status": None,
-                        "retrieval_provider": self.fallback.provider_name,
+                        "retrieval_provider": self.primary.provider_name,
                         "action": "FAILED", "entry_id": None, "external_id": None,
-                        "error": f"Fallback failed: {fb_err}",
+                        "error": f"{rec_err} ({reason_msg})",
+                        "configured_profile_url": configured_profile_url,
+                        "resolved_profile_url": resolved_profile_url,
+                        "profile_resolution_provider": profile_resolution_provider,
+                        "recovery_used": recovery_used,
+                        "recovery_reason": recovery_reason,
                     })
                     return
-            else:
-                reason_msg = "fallback disabled" if disable_fallback else "fallback token not configured"
-                counters["failed_jobs"] += 1
-                counters["provider_errors"] += 1
-                errors.append(f"Job failed on {job.entity_name}: {rec_err} ({reason_msg})")
-                per_entity.append({
-                    "entity": job.entity_name, "provider": self.primary.provider_name,
-                    "posts": 0, "created": 0, "duplicates": 0, "provenance_rejected": 0,
-                    "errors": 1, "timed_out_snapshots": 0, "provider_errors": 1,
-                })
-                http_status_val = 200 if isinstance(rec_err, LinkedInExtractionError) else "ERROR"
-                items_detail.append({
-                    "entity_name": job.entity_name, "http_status": http_status_val,
-                    "records_returned": 0, "author_name": None, "author_profile_url": None,
-                    "linkedin_post_url": None, "activity_id": None, "published_at": None,
-                    "identity_status": None, "provenance_status": None,
-                    "retrieval_provider": self.primary.provider_name,
-                    "action": "FAILED", "entry_id": None, "external_id": None,
-                    "error": f"{rec_err} ({reason_msg})",
-                })
-                return
 
         except Exception as unk_err:
             logger.error("Unexpected error for '%s': %s", job.entity_name, unk_err)
@@ -743,6 +835,11 @@ class LinkedInIngestionService:
                 "retrieval_provider": self.primary.provider_name,
                 "action": "ERROR", "entry_id": None, "external_id": None,
                 "error": str(unk_err),
+                "configured_profile_url": configured_profile_url,
+                "resolved_profile_url": resolved_profile_url,
+                "profile_resolution_provider": profile_resolution_provider,
+                "recovery_used": recovery_used,
+                "recovery_reason": recovery_reason,
             })
             return
 
@@ -757,6 +854,11 @@ class LinkedInIngestionService:
                 "identity_status": None, "provenance_status": None,
                 "retrieval_provider": self.fallback.provider_name if used_fallback_for_job else self.primary.provider_name,
                 "action": "NO_POSTS", "entry_id": None, "external_id": None,
+                "configured_profile_url": configured_profile_url,
+                "resolved_profile_url": resolved_profile_url,
+                "profile_resolution_provider": profile_resolution_provider,
+                "recovery_used": recovery_used,
+                "recovery_reason": recovery_reason,
             })
 
         job_created_start = counters["entries_created"]
@@ -788,10 +890,19 @@ class LinkedInIngestionService:
                     "rejection_reason": "missing_or_unreliable_author",
                     "content_snippet": (post.text or "").strip()[:200],
                     "entry_id": None, "external_id": None,
+                    "configured_profile_url": configured_profile_url,
+                    "resolved_profile_url": resolved_profile_url,
+                    "profile_resolution_provider": profile_resolution_provider,
+                    "recovery_used": recovery_used,
+                    "recovery_reason": recovery_reason,
                 })
                 continue
 
-            if not is_author_profile_coherent(post.author_profile_url, job.linkedin_url):
+            candidate_expected_urls = [job.linkedin_url]
+            if resolved_profile_url:
+                candidate_expected_urls.append(resolved_profile_url)
+
+            if not is_author_profile_coherent(post.author_profile_url, candidate_expected_urls):
                 counters["provenance_rejected"] += 1
                 items_detail.append({
                     "entity_name": job.entity_name,
@@ -803,9 +914,14 @@ class LinkedInIngestionService:
                     "published_at": post.published_at.isoformat() if post.published_at else None,
                     "identity_status": None, "provenance_status": "unverified",
                     "retrieval_provider": post.provider, "action": "SKIPPED_PROVENANCE",
-                    "rejection_reason": f"author_profile_url_mismatch: {post.author_profile_url} != {job.linkedin_url}",
+                    "rejection_reason": f"author_profile_url_mismatch: {post.author_profile_url} not in {candidate_expected_urls}",
                     "content_snippet": (post.text or "").strip()[:200],
                     "entry_id": None, "external_id": None,
+                    "configured_profile_url": configured_profile_url,
+                    "resolved_profile_url": resolved_profile_url,
+                    "profile_resolution_provider": profile_resolution_provider,
+                    "recovery_used": recovery_used,
+                    "recovery_reason": recovery_reason,
                 })
                 continue
 
@@ -829,6 +945,11 @@ class LinkedInIngestionService:
                     "rejection_reason": None,
                     "content_snippet": (post.text or "").strip()[:200],
                     "entry_id": None, "external_id": external_id,
+                    "configured_profile_url": configured_profile_url,
+                    "resolved_profile_url": resolved_profile_url,
+                    "profile_resolution_provider": profile_resolution_provider,
+                    "recovery_used": recovery_used,
+                    "recovery_reason": recovery_reason,
                 })
                 continue
 
@@ -875,6 +996,11 @@ class LinkedInIngestionService:
                 "linkedin_activity_id": activity_id,
                 "engagement": post.engagement,
                 "fallback_used": used_fallback_for_job,
+                "configured_profile_url": configured_profile_url,
+                "resolved_profile_url": resolved_profile_url,
+                "profile_resolution_provider": profile_resolution_provider,
+                "recovery_used": recovery_used,
+                "recovery_reason": recovery_reason,
             })
             if fallback_reason:
                 enriched_meta["fallback_reason"] = fallback_reason
@@ -909,6 +1035,11 @@ class LinkedInIngestionService:
                 "retrieval_provider": post.provider, "action": "CREATED",
                 "rejection_reason": None, "content_snippet": clean_content[:200],
                 "entry_id": str(entry.id), "external_id": external_id,
+                "configured_profile_url": configured_profile_url,
+                "resolved_profile_url": resolved_profile_url,
+                "profile_resolution_provider": profile_resolution_provider,
+                "recovery_used": recovery_used,
+                "recovery_reason": recovery_reason,
             })
 
         # Per-entity summary
