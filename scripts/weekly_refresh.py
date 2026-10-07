@@ -54,6 +54,12 @@ def main() -> int:
         help="Window of days to look back for recent content (default: 8 days).",
     )
     parser.add_argument(
+        "--cadence",
+        choices=["daily", "weekly"],
+        default=None,
+        help="Cadence mode ('daily' or 'weekly'). Defaults to configured SCHEDULER_CADENCE.",
+    )
+    parser.add_argument(
         "--sources",
         nargs="+",
         default=None,
@@ -73,6 +79,7 @@ def main() -> int:
             lookback_days=args.lookback_days,
             confirm_real_calls=is_real,
             sources_filter=args.sources,
+            cadence=args.cadence,
         )
 
         if report.status == "already_running":

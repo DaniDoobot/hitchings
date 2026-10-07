@@ -56,13 +56,14 @@ class SourceRefreshDetail(BaseModel):
 
 
 class WeeklyRefreshReport(BaseModel):
-    """Consolidated summary report of a weekly refresh execution."""
+    """Consolidated summary report of a source refresh execution (daily or weekly)."""
 
     run_id: str = Field(default_factory=lambda: f"wr-{uuid.uuid4().hex[:8]}")
     started_at: datetime = Field(default_factory=utc_now)
     finished_at: Optional[datetime] = None
     duration_seconds: float = 0.0
     status: str = "completed"  # "completed", "already_running", "failed"
+    cadence: str = "weekly"  # "daily" or "weekly"
     is_dry_run: bool = True
     lookback_days: int = 8
     active_matrix_code: Optional[str] = None
@@ -80,8 +81,9 @@ class WeeklyRefreshReport(BaseModel):
 
     def summary_text(self) -> str:
         """Produce clean human-readable summary text."""
+        title = "Daily" if self.cadence == "daily" else "Weekly"
         return (
-            f"Weekly refresh completed\n\n"
+            f"{title} refresh completed\n\n"
             f"Sources attempted: {self.sources_attempted}\n"
             f"Sources successful: {self.sources_successful}\n"
             f"Sources failed: {self.sources_failed}\n"
@@ -96,7 +98,7 @@ class WeeklyRefreshReport(BaseModel):
 
 
 class WeeklyRefreshService:
-    """Service that orchestrates the weekly refresh of all active sources."""
+    """Service that orchestrates the periodic refresh (daily or weekly) of all active sources."""
 
     def __init__(
         self,
@@ -122,25 +124,34 @@ class WeeklyRefreshService:
         lookback_days: Optional[int] = None,
         confirm_real_calls: bool = False,
         sources_filter: Optional[list[str]] = None,
+        cadence: Optional[str] = None,
     ) -> WeeklyRefreshReport:
-        """Execute the weekly refresh over all active sources with strict concurrency and failure isolation."""
-        effective_lookback = (
-            lookback_days
-            if lookback_days is not None
-            else self.settings.WEEKLY_REFRESH_LOOKBACK_DAYS
-        )
+        """Execute the refresh over all active sources with strict concurrency and failure isolation."""
+        eff_cadence = (
+            cadence
+            or getattr(self.settings, "SCHEDULER_CADENCE", "weekly")
+        ).lower().strip()
+
+        if lookback_days is not None:
+            effective_lookback = lookback_days
+        elif eff_cadence == "daily":
+            effective_lookback = getattr(self.settings, "SCHEDULER_DAILY_LOOKBACK_DAYS", 3)
+        else:
+            effective_lookback = self.settings.WEEKLY_REFRESH_LOOKBACK_DAYS
 
         lock = RefreshAdvisoryLock(db)
         if not lock.acquire():
-            logger.warning("[WeeklyRefresh] Another weekly refresh instance is currently running. Exiting cleanly.")
+            logger.warning("[Refresh] Another refresh instance is currently running. Exiting cleanly.")
             return WeeklyRefreshReport(
                 status="already_running",
+                cadence=eff_cadence,
                 is_dry_run=not confirm_real_calls,
                 lookback_days=effective_lookback,
                 finished_at=utc_now(),
             )
 
         report = WeeklyRefreshReport(
+            cadence=eff_cadence,
             is_dry_run=not confirm_real_calls,
             lookback_days=effective_lookback,
         )
@@ -154,7 +165,8 @@ class WeeklyRefreshService:
             )
             report.active_matrix_code = active_matrix.code if active_matrix else None
             logger.info(
-                "[WeeklyRefresh] Starting run %s (matrix=%s, lookback=%d days, real_calls=%s)",
+                "[Refresh] Starting %s run %s (matrix=%s, lookback=%d days, real_calls=%s)",
+                eff_cadence,
                 report.run_id,
                 report.active_matrix_code,
                 effective_lookback,
@@ -253,6 +265,9 @@ class WeeklyRefreshService:
             lock.release()
 
         return report
+
+    # Backwards-compatible alias for periodic refresh (daily/weekly)
+    run_refresh = run_weekly_refresh
 
     def _process_source(
         self,

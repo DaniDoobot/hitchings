@@ -148,7 +148,13 @@ class Settings(BaseSettings):
     INCREMENTAL_ANALYSIS_MAX_ESTIMATED_COST_USD: float = 0.50
     INCREMENTAL_ANALYSIS_DEFAULT_LIMIT: int = 10
 
-    # Weekly Refresh (Bloque 11C - Automated Weekly Source Ingestion & Analysis)
+    # Weekly Refresh & Daily Scheduler (Bloque 10 & Bloque 11C - Automated Source Ingestion & Analysis)
+    SCHEDULER_CADENCE: str = "weekly"  # "daily" or "weekly"
+    SCHEDULER_ENABLED: Optional[bool] = None  # If set, overrides WEEKLY_REFRESH_ENABLED
+    SCHEDULER_TIMEZONE: Optional[str] = None  # If set, overrides WEEKLY_REFRESH_TIMEZONE
+    SCHEDULER_DAILY_HOUR: int = 6
+    SCHEDULER_DAILY_MINUTE: int = 0
+    SCHEDULER_DAILY_LOOKBACK_DAYS: int = 3
     WEEKLY_REFRESH_ENABLED: bool = True
     WEEKLY_REFRESH_TIMEZONE: str = "Europe/Madrid"
     WEEKLY_REFRESH_DAY: str = "monday"
@@ -156,6 +162,31 @@ class Settings(BaseSettings):
     WEEKLY_REFRESH_MINUTE: int = 0
     WEEKLY_REFRESH_LOOKBACK_DAYS: int = 8
     WEEKLY_REFRESH_CONFIRM_REAL_CALLS: bool = False
+
+    @field_validator("SCHEDULER_CADENCE", mode="after")
+    @classmethod
+    def validate_scheduler_cadence(cls, v: Any) -> str:
+        """Validate scheduler cadence is either 'daily' or 'weekly'."""
+        if isinstance(v, str):
+            clean = v.strip().lower()
+            if clean in ("daily", "weekly"):
+                return clean
+        raise ValueError("SCHEDULER_CADENCE must be 'daily' or 'weekly'")
+
+    @property
+    def scheduler_is_enabled(self) -> bool:
+        """Return True if periodic scheduler is enabled."""
+        if self.SCHEDULER_ENABLED is not None:
+            return self.SCHEDULER_ENABLED
+        return self.WEEKLY_REFRESH_ENABLED
+
+    @property
+    def scheduler_timezone(self) -> str:
+        """Return target timezone for the scheduler."""
+        if self.SCHEDULER_TIMEZONE and self.SCHEDULER_TIMEZONE.strip():
+            return self.SCHEDULER_TIMEZONE.strip()
+        return self.WEEKLY_REFRESH_TIMEZONE
+
 
     @field_validator("GOOGLE_NEWS_LANGUAGES", mode="after")
     @classmethod
