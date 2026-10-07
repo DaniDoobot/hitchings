@@ -42,6 +42,7 @@ from app.providers.linkedin.normalizer import (
     canonicalize_linkedin_profile_url,
     is_profile_name_match,
     is_author_profile_coherent,
+    normalize_linkedin_profile_url,
 )
 
 
@@ -1084,24 +1085,69 @@ def test_is_author_profile_coherent_edge_cases():
     """Verify is_author_profile_coherent handles subdomains, casing, slashes, query params, and mismatches."""
     from app.providers.linkedin.normalizer import is_author_profile_coherent
 
-    # Matching subdomains and casing
+    # 1. German regional subdomain (Thomas Höppner case)
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/thomas-höppner-7ba59a70",
+        "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    ) is True
+
+    # 2. Spanish regional subdomain
     assert is_author_profile_coherent(
         "https://es.linkedin.com/company/hausfeld/",
         "https://www.linkedin.com/company/hausfeld"
     ) is True
 
+    # 3. Dutch regional subdomain (Joost Fanoy / Stefan Tuinenga)
     assert is_author_profile_coherent(
-        "https://pt.linkedin.com/in/miguel-sousa-ferro-b7551666?trk=public_profile",
-        "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"
+        "https://nl.linkedin.com/in/joost-fanoy",
+        "https://www.linkedin.com/in/joost-fanoy"
     ) is True
 
-    # Trailing slashes
+    # 4. HTTP vs HTTPS protocol equivalence
+    assert is_author_profile_coherent(
+        "http://www.linkedin.com/in/joost-fanoy",
+        "https://www.linkedin.com/in/joost-fanoy"
+    ) is True
+
+    # 5. Trailing slashes
     assert is_author_profile_coherent(
         "https://linkedin.com/company/eskariam/",
         "https://www.linkedin.com/company/eskariam"
     ) is True
 
-    # Incoherent / Mismatch
+    # 6. Tracking parameters and fragments
+    assert is_author_profile_coherent(
+        "https://pt.linkedin.com/in/miguel-sousa-ferro-b7551666?trk=public_profile#details",
+        "https://www.linkedin.com/in/miguel-sousa-ferro-b7551666"
+    ) is True
+
+    # 7. Percent-encoded characters in URL (Thomas Höppner case)
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70",
+        "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    ) is True
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/thomas-h%c3%b6ppner-7ba59a70/?trk=public",
+        "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    ) is True
+
+    # 8. Multi-level subdomains (www.de.linkedin.com)
+    assert is_author_profile_coherent(
+        "https://www.de.linkedin.com/in/thomas-höppner-7ba59a70",
+        "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    ) is True
+
+    # 9. Conservative mismatch: Different persons must NOT match
+    assert is_author_profile_coherent(
+        "https://www.linkedin.com/in/persona-a",
+        "https://www.linkedin.com/in/persona-b"
+    ) is False
+
+    # 10. Conservative mismatch: Person vs company must NOT match
+    assert is_author_profile_coherent(
+        "https://www.linkedin.com/in/hausfeld",
+        "https://www.linkedin.com/company/hausfeld"
+    ) is False
     assert is_author_profile_coherent(
         "https://www.linkedin.com/company/competitor",
         "https://www.linkedin.com/company/hausfeld"
@@ -1111,6 +1157,67 @@ def test_is_author_profile_coherent_edge_cases():
     assert is_author_profile_coherent("", "https://www.linkedin.com/company/hausfeld") is False
     assert is_author_profile_coherent(None, "https://www.linkedin.com/company/hausfeld") is False
     assert is_author_profile_coherent("https://www.linkedin.com/company/hausfeld", None) is False
+
+
+def test_normalize_linkedin_profile_url_comprehensive():
+    """Verify normalize_linkedin_profile_url handles subdomains, encoding, protocols, slashes, and strict mismatch."""
+    # 1. www vs de
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == normalize_linkedin_profile_url("https://de.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 2. www vs es
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == normalize_linkedin_profile_url("https://es.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 3. www vs nl
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == normalize_linkedin_profile_url("https://nl.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 4. http vs https
+    assert (
+        normalize_linkedin_profile_url("http://www.linkedin.com/in/user-x")
+        == normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 5. Trailing slash
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x/")
+        == normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 6. Tracking parameters & fragments
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x?trk=public_profile#experience")
+        == normalize_linkedin_profile_url("https://www.linkedin.com/in/user-x")
+        == "linkedin.com/in/user-x"
+    )
+    # 7. Percent-encoded characters (Thomas Höppner)
+    assert (
+        normalize_linkedin_profile_url("https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70")
+        == normalize_linkedin_profile_url("https://www.linkedin.com/in/thomas-höppner-7ba59a70")
+        == "linkedin.com/in/thomas-höppner-7ba59a70"
+    )
+    # 8. Different persons inequality
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona-a")
+        != normalize_linkedin_profile_url("https://www.linkedin.com/in/persona-b")
+    )
+    # 9. Person vs company inequality
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona")
+        != normalize_linkedin_profile_url("https://www.linkedin.com/company/persona")
+    )
+    # Canonicalize helper check
+    assert (
+        canonicalize_linkedin_profile_url("https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70")
+        == "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    )
 
 
 def test_controlled_local_mock_full_flow_hausfeld(db_session: Session, client, monkeypatch):
@@ -4022,3 +4129,61 @@ def test_linkedin_discovery_profile_recovery_skips_identical_url(db_session: Ses
     assert report.failed_jobs == 1
     assert report.entries_created == 0
     assert report.items_detail[0]["action"] == "FAILED"
+
+def test_controlled_local_mock_full_flow_thomas_hoppner_regional_subdomain(db_session: Session, monkeypatch):
+    """Full-flow controlled local mock test verifying that Thomas Höppner's German author profile URL
+    (https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70) does not get rejected for
+    author_profile_url_mismatch against configured https://www.linkedin.com/in/thomas-höppner-7ba59a70.
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-bd-token")
+
+    matrix = TrackingMatrix(code="TEST-HOPPNER-MATRIX", name="Hoppner Matrix", status="active")
+    entity = TrackedEntity(
+        display_name="Thomas Höppner",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/thomas-höppner-7ba59a70",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    planner = LinkedInDiscoveryPlanner()
+    jobs = planner.plan_jobs(db_session)
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.entity_name == "Thomas Höppner"
+
+    activity_id = "7199887766554433221"
+    bd_post_data = [{
+        "url": f"https://www.linkedin.com/posts/thomas-h%C3%B6ppner-7ba59a70_antitrust-digital-markets-activity-{activity_id}",
+        "id": activity_id,
+        "author": "Thomas Höppner",
+        "use_url": "https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70",
+        "post_text": "Analysis of the latest European DMA and antitrust enforcement decisions.",
+        "date_posted": "2026-03-20T09:00:00Z",
+        "account_type": "Person",
+    }]
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json=bd_post_data)))
+    service = LinkedInIngestionService(planner=planner)
+    report = service.execute_discovery(db=db_session, confirm_real_calls=True, client=mock_client)
+
+    assert report.entities_executed == 1
+    assert report.posts_seen == 1
+    assert report.provenance_rejected == 0
+    assert report.entries_created == 1
+    assert report.failed_jobs == 0
+
+    expected_ext_id = f"urn:li:activity:{activity_id}"
+    created_entry = db_session.execute(select(Entry).where(Entry.external_id == expected_ext_id)).scalar_one()
+
+    assert created_entry.external_id == expected_ext_id
+    assert created_entry.raw_metadata["provenance_status"] == "verified"
+    assert created_entry.raw_metadata["author_name"] == "Thomas Höppner"
+    assert created_entry.raw_metadata["author_profile_url"] == "https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70"

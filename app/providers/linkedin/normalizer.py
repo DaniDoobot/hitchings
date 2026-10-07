@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
+import urllib.parse
 from typing import Iterable, Optional, Tuple, Union
 
 
@@ -66,17 +67,18 @@ def normalize_linkedin_profile_url(url: Optional[str]) -> str:
     """Normalize a LinkedIn profile or company page URL for strict provenance matching.
 
     - Lowercases
+    - Decodes percent-encoded characters (e.g. %c3%b6 -> ö) and normalizes unicode (NFC)
     - Strips protocol (http/https)
-    - Normalizes regional/www subdomains (e.g., es., uk., pt., www. -> linkedin.com)
+    - Normalizes regional/www subdomains (e.g., de., es., nl., fr., www., www.de. -> linkedin.com)
     - Strips query parameters and fragments
     - Strips trailing slashes
     """
     if not url or not isinstance(url, str):
         return ""
-    clean = url.strip().lower()
+    clean = urllib.parse.unquote(url.strip())
+    clean = unicodedata.normalize("NFC", clean).lower()
     clean = re.sub(r"^https?://", "", clean)
-    clean = re.sub(r"^(?:[a-z]{2}\.)?linkedin\.com/", "linkedin.com/", clean)
-    clean = re.sub(r"^www\.linkedin\.com/", "linkedin.com/", clean)
+    clean = re.sub(r"^(?:[a-z0-9\-]+\.)*linkedin\.com(?=/|$)", "linkedin.com", clean)
     clean = clean.split("?")[0].split("#")[0].strip().rstrip("/")
     return clean
 
@@ -86,6 +88,8 @@ def canonicalize_linkedin_profile_url(url: Optional[str]) -> str:
     norm = normalize_linkedin_profile_url(url)
     if not norm:
         return ""
+    if norm == "linkedin.com":
+        return "https://www.linkedin.com"
     if norm.startswith("linkedin.com/"):
         return f"https://www.{norm}"
     return f"https://www.linkedin.com/{norm.lstrip('/')}"
