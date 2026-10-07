@@ -843,6 +843,63 @@ class LinkedInIngestionService:
             })
             return
 
+        # ── Fallback on primary empty result (Bright Data -> Apify) ───────────
+        if (
+            len(posts) == 0
+            and not used_fallback_for_job
+            and self.primary.provider_name == "brightdata"
+            and not disable_fallback
+            and self.settings.apify_token
+            and self.fallback.provider_name == "apify"
+        ):
+            logger.info(
+                "Primary (%s) returned 0 posts for '%s'. Attempting fallback (%s)...",
+                self.primary.provider_name, job.entity_name, self.fallback.provider_name,
+            )
+            fallback_reason = "primary_empty_result"
+            try:
+                fallback_posts = self.fallback.discover_posts(
+                    target_url=resolved_profile_url or job.linkedin_url,
+                    client=client,
+                    limit=max_posts_eff,
+                    entity_name=job.entity_name,
+                    entity_id=job.tracked_entity_id,
+                )
+                used_fallback_for_job = True
+                counters["fallback_count"] += 1
+                provider_items_used[self.fallback.provider_name] = (
+                    provider_items_used.get(self.fallback.provider_name, 0) + len(fallback_posts)
+                )
+                posts = fallback_posts
+            except Exception as fb_err:
+                logger.warning(
+                    "Fallback %s failed for '%s' after empty primary result: %s",
+                    self.fallback.provider_name, job.entity_name, fb_err,
+                )
+                counters["failed_jobs"] += 1
+                counters["provider_errors"] += 1
+                errors.append(f"Job failed on {job.entity_name}: fallback failed: {fb_err}")
+                per_entity.append({
+                    "entity": job.entity_name, "provider": self.fallback.provider_name,
+                    "posts": 0, "created": 0, "duplicates": 0, "provenance_rejected": 0,
+                    "errors": 1, "timed_out_snapshots": 0, "provider_errors": 1,
+                })
+                items_detail.append({
+                    "entity_name": job.entity_name, "http_status": "ERROR",
+                    "records_returned": 0, "author_name": None, "author_profile_url": None,
+                    "linkedin_post_url": None, "activity_id": None, "published_at": None,
+                    "identity_status": None, "provenance_status": None,
+                    "retrieval_provider": self.fallback.provider_name,
+                    "action": "FAILED", "entry_id": None, "external_id": None,
+                    "error": f"Fallback failed: {fb_err}",
+                    "configured_profile_url": configured_profile_url,
+                    "resolved_profile_url": resolved_profile_url,
+                    "profile_resolution_provider": profile_resolution_provider,
+                    "recovery_used": recovery_used,
+                    "recovery_reason": recovery_reason,
+                })
+                return
+
         # ── Post processing ───────────────────────────────────────────────────
         counters["posts_seen"] += len(posts)
 

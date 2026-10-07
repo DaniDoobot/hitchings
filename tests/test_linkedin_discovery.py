@@ -4187,3 +4187,383 @@ def test_controlled_local_mock_full_flow_thomas_hoppner_regional_subdomain(db_se
     assert created_entry.raw_metadata["provenance_status"] == "verified"
     assert created_entry.raw_metadata["author_name"] == "Thomas Höppner"
     assert created_entry.raw_metadata["author_profile_url"] == "https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70"
+
+# ==============================================================================
+# FALLBACK ON PRIMARY EMPTY RESULT (BRIGHT DATA -> APIFY) TESTS
+# ==============================================================================
+
+
+def test_fallback_empty_result_brightdata_returns_posts_apify_not_called(db_session: Session, monkeypatch):
+    """Scenario 1: Bright Data returns posts -> Apify is NOT called, posts processed normally."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-EMP1-{uuid.uuid4().hex[:6]}", name="Matrix EMP1", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_called = False
+    apify_called = False
+    bd_snap_id = "snap_emp1_bd"
+    activity_id = "7444000111222"
+
+    bd_posts = [{
+        "url": f"https://www.linkedin.com/posts/joost-fanoy_antitrust-litigation-activity-{activity_id}",
+        "id": activity_id,
+        "author": "Joost Fanoy",
+        "use_url": "https://www.linkedin.com/in/joost-fanoy",
+        "post_text": "Joost Fanoy post content via Bright Data.",
+        "date_posted": "2026-03-25T10:00:00Z",
+        "account_type": "Person",
+    }]
+
+    def mock_router(request: httpx.Request):
+        nonlocal bd_called, apify_called
+        url_str = str(request.url)
+        if "brightdata.com" in url_str:
+            bd_called = True
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snap_id, "status": "running"})
+            elif f"/progress/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 0})
+            elif f"/snapshot/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json=bd_posts)
+        if "apify.com" in url_str:
+            apify_called = True
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert bd_called is True
+    assert apify_called is False
+    assert report.fallback_count == 0
+    assert report.entries_created == 1
+    assert report.posts_seen == 1
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+
+    entry = db_session.execute(select(Entry).where(Entry.external_id == f"urn:li:activity:{activity_id}")).scalar_one()
+    assert entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert entry.raw_metadata["fallback_used"] is False
+
+
+def test_fallback_empty_result_brightdata_empty_apify_returns_posts(db_session: Session, monkeypatch):
+    """Scenario 2: Bright Data returns [] + Apify returns posts -> Apify triggered, posts processed."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-EMP2-{uuid.uuid4().hex[:6]}", name="Matrix EMP2", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_called = False
+    apify_called = False
+    bd_snap_id = "snap_emp2_bd"
+    activity_id = "7555000111333"
+
+    apify_posts = [{
+        "id": activity_id,
+        "linkedinUrl": f"https://www.linkedin.com/posts/joost-fanoy_competition-law-activity-{activity_id}",
+        "content": "Joost Fanoy article on digital markets and distribution law via Apify.",
+        "author": {
+            "name": "Joost Fanoy",
+            "linkedinUrl": "https://www.linkedin.com/in/joost-fanoy",
+        },
+        "postedAt": {"date": "2026-03-26T11:00:00Z"},
+        "type": "post",
+    }]
+
+    def mock_router(request: httpx.Request):
+        nonlocal bd_called, apify_called
+        url_str = str(request.url)
+        if "brightdata.com" in url_str:
+            bd_called = True
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snap_id, "status": "running"})
+            elif f"/progress/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 0})
+            elif f"/snapshot/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json=[])  # Empty snapshot!
+        if "apify.com" in url_str:
+            apify_called = True
+            return httpx.Response(200, json=apify_posts)
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert bd_called is True
+    assert apify_called is True
+    assert report.fallback_count == 1
+    assert report.entries_created == 1
+    assert report.posts_seen == 1
+    assert report.failed_jobs == 0
+    assert report.items_detail[0]["action"] == "CREATED"
+    assert report.items_detail[0]["retrieval_provider"] == "apify"
+
+    entry = db_session.execute(select(Entry).where(Entry.external_id == f"urn:li:activity:{activity_id}")).scalar_one()
+    assert entry.raw_metadata["retrieval_provider"] == "apify"
+    assert entry.raw_metadata["fallback_used"] is True
+    assert entry.raw_metadata["fallback_reason"] == "primary_empty_result"
+
+
+def test_fallback_empty_result_brightdata_empty_apify_empty_final_no_posts(db_session: Session, monkeypatch):
+    """Scenario 3: Bright Data returns [] + Apify returns [] -> NO_POSTS, no error, not failed."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-EMP3-{uuid.uuid4().hex[:6]}", name="Matrix EMP3", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_called = False
+    apify_called = False
+    bd_snap_id = "snap_emp3_bd"
+
+    def mock_router(request: httpx.Request):
+        nonlocal bd_called, apify_called
+        url_str = str(request.url)
+        if "brightdata.com" in url_str:
+            bd_called = True
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snap_id, "status": "running"})
+            elif f"/progress/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 0})
+            elif f"/snapshot/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json=[])
+        if "apify.com" in url_str:
+            apify_called = True
+            return httpx.Response(200, json=[])  # Apify also returns empty!
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert bd_called is True
+    assert apify_called is True
+    assert report.fallback_count == 1
+    assert report.entries_created == 0
+    assert report.posts_seen == 0
+    assert report.failed_jobs == 0
+    assert report.provider_errors == 0
+    assert report.items_detail[0]["action"] == "NO_POSTS"
+    assert report.items_detail[0]["retrieval_provider"] == "apify"
+
+
+def test_fallback_empty_result_brightdata_empty_apify_no_token_keeps_no_posts(db_session: Session, monkeypatch):
+    """Scenario 4: Bright Data returns [] + Apify has no token -> Apify NOT called, NO_POSTS."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", None)
+
+    matrix = TrackingMatrix(code=f"TEST-EMP4-{uuid.uuid4().hex[:6]}", name="Matrix EMP4", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_called = False
+    apify_called = False
+    bd_snap_id = "snap_emp4_bd"
+
+    def mock_router(request: httpx.Request):
+        nonlocal bd_called, apify_called
+        url_str = str(request.url)
+        if "brightdata.com" in url_str:
+            bd_called = True
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snap_id, "status": "running"})
+            elif f"/progress/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 0})
+            elif f"/snapshot/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json=[])
+        if "apify.com" in url_str:
+            apify_called = True
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert bd_called is True
+    assert apify_called is False
+    assert report.fallback_count == 0
+    assert report.entries_created == 0
+    assert report.failed_jobs == 0
+    assert report.items_detail[0]["action"] == "NO_POSTS"
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+
+
+def test_fallback_empty_result_brightdata_empty_fallback_disabled_keeps_no_posts(db_session: Session, monkeypatch):
+    """Scenario 5: Bright Data returns [] + disable_fallback=True -> Apify NOT called, NO_POSTS."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-EMP5-{uuid.uuid4().hex[:6]}", name="Matrix EMP5", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_called = False
+    apify_called = False
+    bd_snap_id = "snap_emp5_bd"
+
+    def mock_router(request: httpx.Request):
+        nonlocal bd_called, apify_called
+        url_str = str(request.url)
+        if "brightdata.com" in url_str:
+            bd_called = True
+            if "/datasets/v3/trigger" in url_str:
+                return httpx.Response(200, json={"snapshot_id": bd_snap_id, "status": "running"})
+            elif f"/progress/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json={"status": "ready", "errors": 0})
+            elif f"/snapshot/{bd_snap_id}" in url_str:
+                return httpx.Response(200, json=[])
+        if "apify.com" in url_str:
+            apify_called = True
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+        disable_fallback=True,  # Explicitly disabled!
+    )
+
+    assert bd_called is True
+    assert apify_called is False
+    assert report.fallback_count == 0
+    assert report.entries_created == 0
+    assert report.failed_jobs == 0
+    assert report.items_detail[0]["action"] == "NO_POSTS"
+    assert report.items_detail[0]["retrieval_provider"] == "brightdata"
+
+
+def test_fallback_empty_result_no_double_execution_or_loop(db_session: Session, monkeypatch):
+    """Scenario 6: Verify Apify is never executed twice, and Apify as primary never triggers Apify fallback."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "APIFY_API_TOKEN", "mock-token-apify")
+
+    matrix = TrackingMatrix(code=f"TEST-EMP6-{uuid.uuid4().hex[:6]}", name="Matrix EMP6", status="active")
+    entity = TrackedEntity(
+        display_name="Joost Fanoy",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/joost-fanoy",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    apify_call_count = 0
+
+    def mock_router(request: httpx.Request):
+        nonlocal apify_call_count
+        url_str = str(request.url)
+        if "apify.com" in url_str:
+            apify_call_count += 1
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service_apify_primary = LinkedInIngestionService(primary_provider=ApifyLinkedInProvider())
+    report = service_apify_primary.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    assert apify_call_count == 1  # Exactly 1 call (as primary), NOT retried as fallback
+    assert report.fallback_count == 0
+    assert report.items_detail[0]["action"] == "NO_POSTS"
+    assert report.items_detail[0]["retrieval_provider"] == "apify"
