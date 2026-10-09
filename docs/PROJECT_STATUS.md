@@ -1,7 +1,25 @@
 # HITCHINGS — Current Project Status
 
 Fecha:
-2026-09-16
+2026-10-09
+
+## Módulo Documental e Informes (Bloque 11B)
+
+ESTADO: OPERATIVO Y VALIDADO
+- **Separación Conceptual y de Dominio**:
+  - Distinción nítida entre la vista ejecutiva del Observatorio (`/api/v1/observatory/entries` & `/observatorio`, que exige análisis completado vigente) y el Fondo Documental (`/api/v1/documents` & `/documentos`, que permite consultar tanto entradas analizadas como expedientes y capturas originales en archivo).
+- **Backend & API (`/api/v1/documents`)**:
+  - `GET /api/v1/documents`: Listado paginado con filtros (`q`, `source_id`, `has_analysis`, `origin_category`, `date_from`, `date_to`, `sort_by`, `sort_order`).
+  - `GET /api/v1/documents/{document_id}`: Detalle de documento. Devuelve HTTP 200 con `has_analysis=False` y cuerpo documental si no tiene análisis, o con dictamen completo, temas canónicos y citas de evidencia si está analizado. Devuelve HTTP 404 únicamente si el documento no existe.
+  - Anti-N+1: `selectinload` optimizado para `Source`, `TrackedEntity`, `analyses`, `topics` y `calls`.
+  - 0 llamadas externas / 0 Gemini: puramente lectura de base de datos PostgreSQL.
+- **Frontend Observatorio**:
+  - Integración en navegación principal (`AppLayout.tsx`) mediante la ruta `/documentos`.
+  - Página de catálogo `DocumentsPage.tsx` con búsqueda reactiva, filtro por estado de análisis ("Todos", "Con análisis IA", "Sin análisis"), filtros de procedencia y paginación.
+  - Vista de expediente `DocumentDetailPage.tsx` con doble columna: cuerpo documental íntegro original a la izquierda y dictamen jurídico IA estructurado con citas literales a la derecha.
+- **Batería de Pruebas**:
+  - Backend: 9 tests específicos de integración en `tests/test_document_module.py` (731 passed en suite general).
+  - Frontend: 51 passed en Vitest (`src/test/documents.test.tsx` cubriendo listado, detalle analizado y detalle no analizado).
 
 ## LinkedIn Source: Operational Readiness & Production Integration (Bloques 9C, 9C.1, 9C.2, 9E)
 

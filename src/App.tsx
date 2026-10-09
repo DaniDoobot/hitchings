@@ -8,6 +8,8 @@ import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ObservatoryPage } from './pages/ObservatoryPage';
 import { EntryDetailPage } from './pages/EntryDetailPage';
+import { DocumentsPage } from './pages/DocumentsPage';
+import { DocumentDetailPage } from './pages/DocumentDetailPage';
 import { AdminUsersPage } from './pages/AdminUsersPage';
 
 export const App: React.FC = () => {
@@ -41,6 +43,22 @@ export const App: React.FC = () => {
               element={
                 <AppLayout>
                   <EntryDetailPage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/documentos"
+              element={
+                <AppLayout>
+                  <DocumentsPage />
+                </AppLayout>
+              }
+            />
+            <Route
+              path="/documentos/:documentId"
+              element={
+                <AppLayout>
+                  <DocumentDetailPage />
                 </AppLayout>
               }
             />

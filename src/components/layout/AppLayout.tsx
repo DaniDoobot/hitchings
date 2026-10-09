@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
   Compass,
+  FolderArchive,
   Menu,
   X,
   Scale,
@@ -31,6 +32,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
   const navItems = [
     { name: 'Cuadro de Mando', path: '/', icon: LayoutDashboard },
     { name: 'Observatorio', path: '/observatorio', icon: Compass },
+    { name: 'Fondo Documental', path: '/documentos', icon: FolderArchive },
   ];
 
   if (user?.role === 'admin') {
