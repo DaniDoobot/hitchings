@@ -12,7 +12,6 @@ import {
   User,
   Building2,
   FileText,
-  FolderArchive,
   Info,
 } from 'lucide-react';
 import { documentsApi } from '../services/documentsApi';

@@ -2,16 +2,13 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import {
   Search,
-  Filter,
   X,
   Calendar,
   ExternalLink,
   ChevronLeft,
   ChevronRight,
-  FileText,
   CheckCircle2,
   Clock,
-  Sparkles,
   Building2,
   User,
   FolderArchive,
@@ -220,7 +217,7 @@ export const DocumentsPage: React.FC = () => {
         <EmptyState
           title="No se encontraron documentos"
           message="No hay entradas documentales que coincidan con los filtros especificados."
-          onReset={clearAllFilters}
+          onClearFilters={clearAllFilters}
         />
       ) : (
         <div className="space-y-4">

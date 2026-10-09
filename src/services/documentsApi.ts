@@ -88,7 +88,7 @@ export class DocumentsApiService {
           type: entry.source.type,
           category: entry.source.category,
         },
-        is_linkedin: entry.is_linkedin,
+        is_linkedin: Boolean(entry.is_linkedin),
         source_origin_category: entry.source_origin_category || 'other',
         excerpt: entry.summary,
         has_analysis: index % 4 !== 3, // Simulate occasional unanalysed item
@@ -175,7 +175,7 @@ export class DocumentsApiService {
           type: entry.source.type,
           category: entry.source.category,
         },
-        is_linkedin: entry.is_linkedin,
+        is_linkedin: Boolean(entry.is_linkedin),
         source_origin_category: entry.source_origin_category || 'other',
         content: `Contenido documental íntegro de la publicación ${entry.title || ''}.\n\nSección I: Antecedentes de hecho y objeto de la resolución judicial.\nSección II: Fundamentos jurídicos de defensa de la competencia.`,
         excerpt: entry.summary,
