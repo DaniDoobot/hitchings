@@ -4735,3 +4735,19 @@ def test_thomas_funke_provenance_localized_url_verified(db_session: Session, mon
     assert entry.raw_metadata["tracked_entity_id"] == "b5bd6bab-8849-465d-84f3-8bad7ac3bb23"
     assert entry.raw_metadata.get("fallback_used") is False
     assert entry.author == "Dr. Thomas G. Funke"
+
+
+def test_verified_pilot_entities_thomas_funke_canonical_url():
+    """Verify that VERIFIED_LINKEDIN_PILOT_ENTITIES uses the canonical production URL for Thomas Funke."""
+    from scripts.ingest_linkedin import VERIFIED_LINKEDIN_PILOT_ENTITIES
+
+    funke_candidates = [
+        item for item in VERIFIED_LINKEDIN_PILOT_ENTITIES
+        if item.get("name") == "Thomas Funke"
+    ]
+    assert len(funke_candidates) == 1, "Thomas Funke must be configured exactly once in VERIFIED_LINKEDIN_PILOT_ENTITIES"
+    funke = funke_candidates[0]
+    expected_url = "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
+    assert funke["linkedin_url"] == expected_url, f"Expected canonical URL '{expected_url}', found '{funke['linkedin_url']}'"
+    assert funke["linkedin_url_verified"] is True
+    assert funke["linkedin_entity_type"] == "person"

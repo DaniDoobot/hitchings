@@ -117,7 +117,7 @@ VERIFIED_LINKEDIN_PILOT_ENTITIES = [
     },
     {
         "name": "Thomas Funke",
-        "linkedin_url": "https://www.linkedin.com/in/thomas-funke-67b14b14",
+        "linkedin_url": "https://www.linkedin.com/in/dr-thomas-g-funke-96297346",
         "linkedin_entity_type": "person",
         "linkedin_url_verified": True,
         "linkedin_url_verified_at": "2026-10-05T16:00:00Z",

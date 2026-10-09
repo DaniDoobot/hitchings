@@ -3,16 +3,20 @@
 ## Estado actual
 
 Fecha:
-2026-09-17
+2026-10-09
 
-Último bloque completado:
-Operational Health Diagnostics & Telemetry Hardening
-
-Incluye:
-- Script de diagnóstico operacional `scripts/diagnose_observatory_health.py`
-- Detección de anomalías de pipeline y costes
-- Verificación E2E de Weekly Refresh multiorigen
-- Cobertura de tests dedicada `tests/test_observatory_health_cli.py`
+Últimos bloques completados:
+1. **Bloque 9C / 9E — LinkedIn Source Operational & Verified Production Readiness**:
+   - Bright Data primario (`gd_lyy3tktm25m4avu764`) con snapshots asíncronos.
+   - Apify fallback (`harvestapi/linkedin-profile-posts`) ante timeouts, errores o resultados vacíos.
+   - Normalización de paths lingüísticos (`/en`) y subdominios regionales.
+   - Validación de procedencia estricta fail-closed.
+   - Entidad Thomas Funke probada y validada en producción (5/5 posts creados, 0 errores, 0 rechazos de provenance) con URL canónica `https://www.linkedin.com/in/dr-thomas-g-funke-96297346`.
+2. **Bloque 10 — Scheduler Diario**:
+   - `SCHEDULER_CADENCE=daily` a las 06:00 `Europe/Madrid`.
+   - Lookback diario de 3 días.
+   - Aislamiento de fallos y análisis incremental automático.
+   - Desplegado y operando en Dokploy.
 
 ---
 
@@ -21,7 +25,8 @@ Incluye:
 Backend:
 `pytest tests/`
 Resultado:
-646 passed (regresión estándar) / 660 passed (suite total)
+- 84 passed en tests específicos de LinkedIn (`tests/test_linkedin_discovery.py`).
+- 721+ passed en la suite total de la aplicación.
 
 Frontend:
 `npm test`

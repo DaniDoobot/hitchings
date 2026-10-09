@@ -3,12 +3,18 @@
 Fecha:
 2026-09-16
 
-## LinkedIn Source: Operational Readiness & Production Integration (Bloque 9C/9D)
+## LinkedIn Source: Operational Readiness & Production Integration (Bloques 9C, 9C.1, 9C.2, 9E)
 
-ESTADO: OPERATIVO EN PRODUCCIÓN
-- **Pipeline Operativo Completo**: Discovery asíncrono con Bright Data -> Normalización y validación de procedencia fail-closed -> Deduplicación por `activity_id` / canonical URL -> Creación de Entry -> Análisis Gemini automático (Triage v7 -> Deep Analysis v7 condicional).
+ESTADO: OPERATIVO Y VALIDADO EN PRODUCCIÓN
+- **Pipeline Operativo Completo**: Discovery asíncrono con Bright Data (`gd_lyy3tktm25m4avu764`) -> Fallback a Apify (`harvestapi/linkedin-profile-posts`) -> Recuperación canónica de perfiles ante `dead_page` o 0 publicaciones -> Normalización de subdominios regionales y paths localizados (`/en`) -> Validación de procedencia fail-closed -> Deduplicación por `activity_id` / canonical URL -> Creación de Entry -> Análisis Gemini automático (Triage v7 -> Deep Analysis v7 condicional).
+- **Validación Real de Thomas Funke en Producción**:
+  - Entidad: `Thomas Funke` (ID: `b5bd6bab-8849-465d-84f3-8bad7ac3bb23`).
+  - URL canónica verificada en BD de producción y sincronizada en código: `https://www.linkedin.com/in/dr-thomas-g-funke-96297346`.
+  - Bright Data extrajo publicaciones con URL localizada `https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=...`.
+  - Normalizador reconoció la equivalencia canónica exacta.
+  - Resultado en producción: 5/5 posts descubiertos, 5/5 Entries creadas, 0 duplicados, 0 provenance rejected, 0 errores de proveedor.
 - **Modos de Ejecución**:
-  1. *Automático (WeeklyRefresh)*:
+  1. *Automático (WeeklyRefresh / Daily Refresh)*:
      - Integrado en `WeeklyRefreshService`.
      - Configuración dinámica en base de datos: `Source.config` y `Source.active` gobiernan `enabled`, `max_entities`, `max_posts` y `max_concurrent_jobs` sin necesidad de reiniciar el servicio o redeployar `.env`.
      - Límite de concurrencia: `LINKEDIN_MAX_CONCURRENT_JOBS=3` (controlado por semáforo `asyncio.Semaphore`).
@@ -23,13 +29,6 @@ ESTADO: OPERATIVO EN PRODUCCIÓN
   - Filtro por origen en barra lateral de escritorio y cajón móvil: `Todas`, `Institucional`, `LinkedIn`, `Expert Analysis`.
   - Badge `"Fuente LinkedIn"` visible en las tarjetas de publicación y cabecera de detalle para publicaciones originadas en LinkedIn.
   - Estricto aislamiento institucional: cero exposición de términos técnicos de proveedor (`brightdata`, `apify`) en la interfaz de usuario.
-- **Evaluación del Prompt de Triage v7 (`scripts/evaluate_linkedin_triage.py`)**:
-  - Comportamiento validado: alta especificidad filtrando ruido corporativo (publicidad, felicitaciones, eventos, webinars) y preservando publicaciones con fondo jurídico sustantivo (sentencias de tribunales, cárteles, litigios de daños, DMA/competencia).
-  - Sin necesidad de modificaciones en el prompt `observatory_triage:v7`.
-- **Próximos Pasos Naturales**:
-  - Monitorización continua de métricas de coste y ratio de relevancia vía `/api/v1/sources/metrics`.
-  - Incorporación progresiva de perfiles personales de la lista de expertos conforme se verifiquen sus URLs canónicas en abierto.
-  - Ajuste fino de concurrencia según SLA del proveedor de scraping.
 
 ## Estado Observatorio
 
@@ -43,14 +42,16 @@ CLOSED
 Fuentes:
 17/17 integradas (incluidas FTC y DOJ Antitrust Division).
 
-## Scheduler Semanal (Weekly Refresh)
+## Scheduler Diario y Semanal (Bloque 10 / 11C)
 
-HARDENED & AUDITED
+OPERATIVO Y DESPLEGADO EN PRODUCCIÓN
 - Daemon: `scheduler` en `docker-compose.prod.yml` (`python -m app.scheduler`).
-- Cadencia: Lunes 06:00 `Europe/Madrid`.
+- Cadencia configurada en producción: `SCHEDULER_CADENCE=daily`.
+- Ejecución diaria: 06:00 `Europe/Madrid`.
 - Cobertura: 17/17 fuentes activas procesadas con aislamiento estricto de fallos.
-- Lookback: 8 días fijados por defecto y propagados a nivel de ejecución (`ingestion_service.ingest_source` y `direct_web_service.execute_ingestion`).
+- Lookback diario: 3 días fijados por defecto (`SCHEDULER_DAILY_LOOKBACK_DAYS=3`).
 - Inmutabilidad: `Source.config` no se modifica.
+- Concurrencia segura: `RefreshAdvisoryLock` mediante advisory lock de PostgreSQL.
 - Gating de suficiencia: FULL analizada; PARTIAL e INSUFFICIENT omitidas de análisis automático.
 
 ## FTC
@@ -76,27 +77,18 @@ CLOSED & IMPLEMENTED
 - Scope guard fail-closed: exclusión automática de causas USAO/no-antitrust.
 - Identidad canónica: `doj_atr:node:{node_id}` o `doj_atr:{year}:{month}:{slug}`
 
-## LinkedIn Discovery Hardening (Bloque 9C / Provenance Closure)
+## LinkedIn Discovery: Estado de Entidades y Procedencia (Bloque 9E)
 
-HARDENED & DEDUPLICATED (INACTIVE / ZERO CALLS)
-- Discovery status: `LINKEDIN_DISCOVERY_ENABLED=false` (sin llamadas reales ni consumo de créditos).
-- Semántica de Identidad vs Procedencia:
-  - `identity_status`: `"activity_id"` (ID numérico extraído canónicamente) o `"canonical_url_fallback"` (hash determinista sha256 sobre URL canónica).
-  - `provenance_status`: `"verified"` o `"unverified"`. No se marca `provenance_status="verified"` únicamente por tener `activity_id`.
-  - Requisitos de `provenance_status="verified"`:
-    1. `TrackedEntity` inequívoca en base de datos.
-    2. `author_name` fiable (no vacío, no genérico/placeholder).
-    3. `author_profile_url` coherente con la URL configurada para esa entidad en `TrackedEntity.metadata_["linkedin_url"]` (normalizando subdominios regionales, query params y trailing slashes).
-  - Gating de autoría fail-closed: posts con autores no verificables o URLs incoherentes son descartados sin persistir.
-- Gestión de proveedor técnico (Legacy Provider):
-  - Nuevas escrituras: persisten ÚNICAMENTE `raw_metadata["retrieval_provider"]` (Bright Data / Apify). Se prohíbe escribir la clave duplicada `raw_metadata["provider"]`.
-  - Compatibilidad de lectura: `LinkedInIngestionService.get_retrieval_provider(entry)` resuelve con fallback retrocompatible `meta.get("retrieval_provider") or meta.get("provider")`.
-- Perfiles de Entidades Piloto Verificados (5):
+ESTADO DE VERIFICACIÓN DE ENTIDADES
+- Proveedores: Bright Data primario, Apify fallback.
+- Gating de autoría fail-closed: posts con autores no verificables o URLs incoherentes son descartados sin persistir.
+- Gestión de proveedor técnico: escrituras registran exclusivamente `raw_metadata["retrieval_provider"]`.
+- Entidades Piloto Verificadas en Código y Producción (11):
   - Organizaciones (4): Hausfeld, ESKARIAM, CNMC, European Commission.
-  - Personas (1): Miguel Sousa Ferro (`https://www.linkedin.com/in/miguel-sousa-ferro-b7551666`).
-- Perfiles Personales Pendientes (23):
-  - Por homónimos, falta de URL indexada en abierto o ausencia de enlace directo verificado sin login:
-    Pablo Ibáñez Colomo, Francisco Marcos, Pinar Akman, Damien Geradin, Thomas Höppner, Assimakis Komninos, Julia Suderow, Fernando Díez Estella, Antonio Robles Martín-Laborda, Alba Ribera Martínez, Pierre Bichet, Christian Bergqvist, Emilija Berzanskaite, Jaime Concheiro, Adoni Llosa, Eduardo Pastor, Pedro Suárez, Javier Pérez, Joost Fanoy, Stefan Tuinenga, Thomas Funke, James Hain-Cole, Lena Hornkohl.
+  - Personas (7): Miguel Sousa Ferro, Pinar Akman, Damien Geradin, Thomas Höppner, Joost Fanoy, Stefan Tuinenga, Thomas Funke (`https://www.linkedin.com/in/dr-thomas-g-funke-96297346`).
+- Entidades Personales Pendientes de Verificación (16):
+  - No tienen URL asignada o carecen de enlace público comprobado sin login; permanecen expresamente sin URL para evitar falsos positivos o homónimos:
+    Pablo Ibáñez Colomo, Francisco Marcos, Assimakis Komninos, Julia Suderow, Fernando Díez Estella, Antonio Robles Martín-Laborda, Alba Ribera Martínez, Pierre Bichet, Christian Bergqvist, Emilija Berzanskaite, Jaime Concheiro, Adoni Llosa, Eduardo Pastor, Pedro Suárez, Javier Pérez, James Hain-Cole, Lena Hornkohl.
 - Deduplicación cross-provider: orden estricto `external_id -> canonical_url -> fallback`.
 - UI portal (`ObservatoryPage` y `EntryDetailPage`):
   - Cabecera: `LinkedIn · {author_name}` acompañado de icono contextual (`Building2` para organización, `User` para persona).
