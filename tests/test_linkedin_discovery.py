@@ -1213,10 +1213,83 @@ def test_normalize_linkedin_profile_url_comprehensive():
         normalize_linkedin_profile_url("https://www.linkedin.com/in/persona")
         != normalize_linkedin_profile_url("https://www.linkedin.com/company/persona")
     )
+    # 10. Case A: Thomas Funke real case (/in/<slug> vs regional sub + /en + tracking)
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/dr-thomas-g-funke-96297346")
+        == normalize_linkedin_profile_url("https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name")
+        == "linkedin.com/in/dr-thomas-g-funke-96297346"
+    )
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name",
+        "https://www.linkedin.com/in/dr-thomas-g-funke-96297346",
+    ) is True
+
+    # 11. Case B: Other locale variants (/de, /fr, /es, /it, /nl)
+    for loc in ["de", "fr", "es", "it", "nl"]:
+        assert (
+            normalize_linkedin_profile_url(f"https://de.linkedin.com/in/dr-thomas-g-funke-96297346/{loc}?trk=actor")
+            == "linkedin.com/in/dr-thomas-g-funke-96297346"
+        )
+
+    # 12. Case C: Tracking query parameters stripped
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/dr-thomas-g-funke-96297346?trk=public_profile_browsemap&utm_source=share")
+        == "linkedin.com/in/dr-thomas-g-funke-96297346"
+    )
+
+    # 13. Case D: Diacritics/percent-encoded + regional subdomain + locale + tracking
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/thomas-h%C3%B6ppner")
+        == normalize_linkedin_profile_url("https://de.linkedin.com/in/thomas-höppner/en?trk=public_post_feed-actor-name")
+        == "linkedin.com/in/thomas-höppner"
+    )
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/thomas-höppner/en?trk=public_post_feed-actor-name",
+        "https://www.linkedin.com/in/thomas-h%C3%B6ppner",
+    ) is True
+
+    # 14. Case E: Reject distinct profiles with locales
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona-a")
+        != normalize_linkedin_profile_url("https://de.linkedin.com/in/persona-b/en")
+    )
+    assert is_author_profile_coherent(
+        "https://de.linkedin.com/in/persona-b/en",
+        "https://www.linkedin.com/in/persona-a",
+    ) is False
+
+    # 15. Case F: Reject /in vs /company
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona")
+        != normalize_linkedin_profile_url("https://www.linkedin.com/company/persona")
+    )
+    assert is_author_profile_coherent(
+        "https://www.linkedin.com/company/persona",
+        "https://www.linkedin.com/in/persona",
+    ) is False
+
+    # 16. Case G: Arbitrary non-locale segment must NOT be stripped
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona/foo")
+        == "linkedin.com/in/persona/foo"
+    )
+    assert (
+        normalize_linkedin_profile_url("https://www.linkedin.com/in/persona/foo")
+        != normalize_linkedin_profile_url("https://www.linkedin.com/in/persona")
+    )
+    assert is_author_profile_coherent(
+        "https://www.linkedin.com/in/persona/foo",
+        "https://www.linkedin.com/in/persona",
+    ) is False
+
     # Canonicalize helper check
     assert (
         canonicalize_linkedin_profile_url("https://de.linkedin.com/in/thomas-h%C3%B6ppner-7ba59a70")
         == "https://www.linkedin.com/in/thomas-höppner-7ba59a70"
+    )
+    assert (
+        canonicalize_linkedin_profile_url("https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name")
+        == "https://www.linkedin.com/in/dr-thomas-g-funke-96297346"
     )
 
 
@@ -4567,3 +4640,98 @@ def test_fallback_empty_result_no_double_execution_or_loop(db_session: Session, 
     assert report.fallback_count == 0
     assert report.items_detail[0]["action"] == "NO_POSTS"
     assert report.items_detail[0]["retrieval_provider"] == "apify"
+
+
+def test_thomas_funke_provenance_localized_url_verified(db_session: Session, monkeypatch):
+    """Reproduce exact production scenario for Thomas Funke:
+    - Configured URL: https://www.linkedin.com/in/dr-thomas-g-funke-96297346
+    - Bright Data returns: author_profile_url = https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name
+    - author_name = Dr. Thomas G. Funke
+    - Expected:
+      * provenance_status = verified
+      * provenance_rejected = 0
+      * publication NOT rejected by author_profile_url_mismatch
+      * pipeline completes normal deduplication and creates Entry
+    """
+    settings = get_settings()
+    monkeypatch.setattr(settings, "LINKEDIN_DISCOVERY_ENABLED", True)
+    monkeypatch.setattr(settings, "BRIGHTDATA_API_TOKEN", "mock-token-bd")
+    monkeypatch.setattr(settings, "BRIGHTDATA_LINKEDIN_DATASET_ID", "mock-dataset-posts")
+
+    matrix = TrackingMatrix(code=f"TEST-TF-{uuid.uuid4().hex[:6]}", name="Matrix TF", status="active")
+    entity = TrackedEntity(
+        id=uuid.UUID("b5bd6bab-8849-465d-84f3-8bad7ac3bb23"),
+        display_name="Thomas Funke",
+        entity_type="person",
+        active=True,
+        metadata_={
+            "linkedin_url": "https://www.linkedin.com/in/dr-thomas-g-funke-96297346",
+            "linkedin_url_verified": True,
+            "linkedin_entity_type": "person",
+        },
+    )
+    db_session.add_all([matrix, entity])
+    db_session.commit()
+
+    bd_posts = [
+        {
+            "url": "https://www.linkedin.com/posts/dr-thomas-g-funke-96297346_competition-law-update-activity-7199112233445566778",
+            "id": "7199112233445566778",
+            "author": "Dr. Thomas G. Funke",
+            "use_url": "https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name",
+            "post_text": "Insights on recent EU cartel damages litigation and collective redress procedures.",
+            "date_posted": "2026-03-25T15:00:00Z",
+            "account_type": "Individual",
+            "post_type": "post",
+        }
+    ]
+
+    snap_id = "snap_tf_mock"
+
+    def mock_router(request: httpx.Request):
+        url_str = str(request.url)
+        if "/datasets/v3/trigger" in url_str:
+            return httpx.Response(200, json={"snapshot_id": snap_id, "status": "running"})
+        elif f"/progress/{snap_id}" in url_str:
+            return httpx.Response(200, json={"status": "ready", "errors": 0})
+        elif f"/snapshot/{snap_id}" in url_str:
+            return httpx.Response(200, json=bd_posts)
+        return httpx.Response(404)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(mock_router))
+    service = LinkedInIngestionService()
+    report = service.execute_discovery(
+        db=db_session,
+        confirm_real_calls=True,
+        target_entity_id=entity.id,
+        client=mock_client,
+    )
+
+    # Validations requested:
+    # 1. provenance_rejected == 0
+    assert report.provenance_rejected == 0
+    assert report.failed_jobs == 0
+    assert report.provider_errors == 0
+    assert report.entries_created == 1
+    assert report.duplicates == 0
+    assert report.fallback_count == 0
+
+    # 2. items_detail check
+    assert len(report.items_detail) == 1
+    item = report.items_detail[0]
+    assert item["action"] == "CREATED"
+    assert item["provenance_status"] == "verified"
+    assert item["identity_status"] == "activity_id"
+    assert item["author_name"] == "Dr. Thomas G. Funke"
+    assert item["author_profile_url"] == "https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name"
+
+    # 3. Database Entry check
+    entry = db_session.execute(select(Entry).where(Entry.external_id == "urn:li:activity:7199112233445566778")).scalar_one()
+    assert entry.raw_metadata["provenance_status"] == "verified"
+    assert entry.raw_metadata["identity_status"] == "activity_id"
+    assert entry.raw_metadata["retrieval_provider"] == "brightdata"
+    assert entry.raw_metadata["author_name"] == "Dr. Thomas G. Funke"
+    assert entry.raw_metadata["author_profile_url"] == "https://de.linkedin.com/in/dr-thomas-g-funke-96297346/en?trk=public_post_feed-actor-name"
+    assert entry.raw_metadata["tracked_entity_id"] == "b5bd6bab-8849-465d-84f3-8bad7ac3bb23"
+    assert entry.raw_metadata.get("fallback_used") is False
+    assert entry.author == "Dr. Thomas G. Funke"

@@ -80,6 +80,9 @@ def normalize_linkedin_profile_url(url: Optional[str]) -> str:
     clean = re.sub(r"^https?://", "", clean)
     clean = re.sub(r"^(?:[a-z0-9\-]+\.)*linkedin\.com(?=/|$)", "linkedin.com", clean)
     clean = clean.split("?")[0].split("#")[0].strip().rstrip("/")
+    # Strip localized language subpath from personal profile URLs (e.g. /in/<slug>/en -> /in/<slug>)
+    clean = re.sub(r"^(linkedin\.com/in/[^/]+)/[a-z]{2}(?:/|$)", r"\1", clean)
+    clean = clean.rstrip("/")
     return clean
 
 
