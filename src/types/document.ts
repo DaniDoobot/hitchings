@@ -84,3 +84,42 @@ export interface DocumentsQueryParams {
   has_analysis?: 'all' | 'with_analysis' | 'without_analysis';
   relevance_status?: RelevanceStatus;
 }
+
+// =============================================================================
+// Manual Document Ingestion Types (BLOQUE 11C)
+// =============================================================================
+
+export interface IngestUrlRequest {
+  url: string;
+  analyze_with_ai?: boolean;
+  manual_title?: string | null;
+  manual_author?: string | null;
+  manual_published_at?: string | null;
+}
+
+export interface DocumentIngestionResponse {
+  status: 'created';
+  entry_id: string;
+  title?: string | null;
+  url: string;
+  canonical_url?: string | null;
+  content_type?: string | null;
+  analysis_requested: boolean;
+  analysis_scheduled: boolean;
+  created_at: string;
+}
+
+export interface DocumentDuplicateResponse {
+  status: 'duplicate';
+  existing_entry_id: string;
+  duplicate_reason: string;
+  message: string;
+}
+
+export interface UploadDocumentParams {
+  file: File;
+  analyze_with_ai?: boolean;
+  manual_title?: string | null;
+  manual_author?: string | null;
+  manual_published_at?: string | null;
+}

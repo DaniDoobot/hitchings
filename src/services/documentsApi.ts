@@ -1,10 +1,33 @@
 import {
   DocumentDetail,
+  DocumentDuplicateResponse,
+  DocumentIngestionResponse,
   DocumentListItem,
   DocumentListResponse,
   DocumentsQueryParams,
+  IngestUrlRequest,
+  UploadDocumentParams,
 } from '../types/document';
 import { MOCK_ENTRIES } from '../data/mockObservatoryData';
+
+export class ApiError extends Error {
+  public status: number;
+  public detail?: string;
+  public duplicateData?: DocumentDuplicateResponse;
+
+  constructor(
+    message: string,
+    status: number,
+    detail?: string,
+    duplicateData?: DocumentDuplicateResponse
+  ) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.detail = detail;
+    this.duplicateData = duplicateData;
+  }
+}
 
 export interface DocumentsApiOptions {
   apiBaseUrl?: string;
@@ -213,6 +236,115 @@ export class DocumentsApiService {
       throw new Error(`Error al obtener documento: HTTP ${res.status}`);
     }
     return res.json();
+  }
+
+  public async ingestDocumentFromUrl(
+    params: IngestUrlRequest
+  ): Promise<DocumentIngestionResponse | DocumentDuplicateResponse> {
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 150));
+      return {
+        status: 'created',
+        entry_id: 'mock-url-' + Date.now(),
+        title: params.manual_title || 'Documento desde URL',
+        url: params.url,
+        canonical_url: params.url,
+        content_type: 'document',
+        analysis_requested: Boolean(params.analyze_with_ai),
+        analysis_scheduled: Boolean(params.analyze_with_ai),
+        created_at: new Date().toISOString(),
+      };
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/documents/url`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
+    });
+
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hitchings:unauthorized'));
+    }
+
+    if (res.status === 409) {
+      const dupData = (await res.json().catch(() => ({}))) as DocumentDuplicateResponse;
+      return dupData;
+    }
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiError(
+        err.detail || `Error al procesar URL: HTTP ${res.status}`,
+        res.status,
+        err.detail
+      );
+    }
+
+    return (await res.json()) as DocumentIngestionResponse;
+  }
+
+  public async uploadDocument(
+    params: UploadDocumentParams
+  ): Promise<DocumentIngestionResponse | DocumentDuplicateResponse> {
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 150));
+      return {
+        status: 'created',
+        entry_id: 'mock-upload-' + Date.now(),
+        title: params.manual_title || params.file.name,
+        url: `upload://manual/mock/${params.file.name}`,
+        canonical_url: `upload://manual/mock/${params.file.name}`,
+        content_type: params.file.name.toLowerCase().endsWith('.pdf') ? 'pdf' : 'document',
+        analysis_requested: Boolean(params.analyze_with_ai),
+        analysis_scheduled: Boolean(params.analyze_with_ai),
+        created_at: new Date().toISOString(),
+      };
+    }
+
+    const formData = new FormData();
+    formData.append('file', params.file);
+    if (params.analyze_with_ai !== undefined) {
+      formData.append('analyze_with_ai', String(params.analyze_with_ai));
+    }
+    if (params.manual_title) {
+      formData.append('manual_title', params.manual_title);
+    }
+    if (params.manual_author) {
+      formData.append('manual_author', params.manual_author);
+    }
+    if (params.manual_published_at) {
+      formData.append('manual_published_at', params.manual_published_at);
+    }
+
+    // Do NOT set Content-Type header so the browser automatically sets multipart/form-data boundary
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/documents/upload`, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hitchings:unauthorized'));
+    }
+
+    if (res.status === 409) {
+      const dupData = (await res.json().catch(() => ({}))) as DocumentDuplicateResponse;
+      return dupData;
+    }
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new ApiError(
+        err.detail || `Error al subir documento: HTTP ${res.status}`,
+        res.status,
+        err.detail
+      );
+    }
+
+    return (await res.json()) as DocumentIngestionResponse;
   }
 }
 

@@ -12,6 +12,7 @@ import {
   Building2,
   User,
   FolderArchive,
+  Plus,
 } from 'lucide-react';
 import { documentsApi } from '../services/documentsApi';
 import { observatoryApi } from '../services/observatoryApi';
@@ -22,6 +23,7 @@ import { TopicBadge } from '../components/common/TopicBadge';
 import { CardSkeleton } from '../components/common/LoadingSkeleton';
 import { ErrorState } from '../components/common/ErrorState';
 import { EmptyState } from '../components/common/EmptyState';
+import { AddDocumentModal } from '../components/documents/AddDocumentModal';
 
 export const DocumentsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -45,6 +47,8 @@ export const DocumentsPage: React.FC = () => {
   const offset = parseInt(searchParams.get('offset') || '0', 10);
 
   const [searchInput, setSearchInput] = useState(q);
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   useEffect(() => {
     async function loadSources() {
@@ -98,7 +102,7 @@ export const DocumentsPage: React.FC = () => {
     return () => {
       isCancelled = true;
     };
-  }, [q, hasAnalysis, sourceId, originCategory, dateFrom, dateTo, sortBy, sortOrder, limit, offset]);
+  }, [q, hasAnalysis, sourceId, originCategory, dateFrom, dateTo, sortBy, sortOrder, limit, offset, refreshTrigger]);
 
   const updateParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(searchParams);
@@ -143,6 +147,14 @@ export const DocumentsPage: React.FC = () => {
             <span className="text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-700 border border-slate-200">
               Total documentos: <strong className="text-navy-950 font-bold">{total}</strong>
             </span>
+            <button
+              type="button"
+              onClick={() => setIsAddModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-navy-900 text-white rounded-md text-xs font-semibold hover:bg-navy-800 transition-colors shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Añadir documento</span>
+            </button>
           </div>
         </div>
 
@@ -347,6 +359,15 @@ export const DocumentsPage: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Modal Añadir Documento */}
+      <AddDocumentModal
+        isOpen={isAddModalOpen}
+        onClose={() => setIsAddModalOpen(false)}
+        onDocumentAdded={() => {
+          setRefreshTrigger((t) => t + 1);
+        }}
+      />
     </div>
   );
 };

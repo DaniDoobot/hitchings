@@ -157,17 +157,24 @@ export const DocumentDetailPage: React.FC = () => {
               })}
             </strong>
           </div>
-
-          <a
-            href={doc.canonical_url || doc.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-navy-800 hover:text-navy-950 font-semibold underline underline-offset-2 ml-auto"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-            <span>Ver fuente original</span>
-          </a>
+          {(doc.canonical_url || doc.url).startsWith('http') ? (
+            <a
+              href={doc.canonical_url || doc.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-navy-800 hover:text-navy-950 font-semibold underline underline-offset-2 ml-auto"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Ver fuente original</span>
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-slate-500 font-medium ml-auto">
+              <FileText className="w-3.5 h-3.5" />
+              <span>Archivo subido manualmente</span>
+            </span>
+          )}
         </div>
+
       </div>
 
       {/* Grid: Left Column Original Text, Right Column AI Intelligence */}
