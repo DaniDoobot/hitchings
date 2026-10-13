@@ -7,7 +7,7 @@ from typing import Optional, Any
 
 from sqlalchemy import String, Boolean, DateTime, Text, ForeignKey, Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID, JSONB
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, Session
 
 from app.db.base import Base
 
@@ -28,6 +28,13 @@ class SourceType(str, enum.Enum):
     LINKEDIN_PROFILE = "linkedin_profile"
     LINKEDIN_COMPANY = "linkedin_company"
     LINKEDIN_SEARCH = "linkedin_search"
+
+
+# Canonical source constants for manual document ingestion (Bloque 11C)
+MANUAL_UPLOAD_SOURCE_ID = uuid.UUID("a0000000-0000-4000-a000-000000000001")
+MANUAL_UPLOAD_SOURCE_NAME = "Aportación Manual / Fondo Documental"
+MANUAL_UPLOAD_SOURCE_CODE = "manual_upload"
+MANUAL_UPLOAD_SOURCE_URL = "https://hitchings.internal/manual-upload"
 
 
 class Source(Base):
@@ -90,3 +97,40 @@ class Source(Base):
 
     def __repr__(self) -> str:
         return f"<Source id={self.id} name='{self.name}' type='{self.type}' active={self.active}>"
+
+
+def get_or_create_manual_source(db: Session) -> Source:
+    """Resolve or idempotently create the canonical Source for manual document uploads."""
+    source = (
+        db.query(Source)
+        .filter(
+            (Source.id == MANUAL_UPLOAD_SOURCE_ID)
+            | (Source.name == MANUAL_UPLOAD_SOURCE_NAME)
+        )
+        .first()
+    )
+    if not source:
+        # Search by config logical code if present
+        all_sources = db.query(Source).all()
+        for s in all_sources:
+            if s.config and isinstance(s.config, dict) and s.config.get("code") == MANUAL_UPLOAD_SOURCE_CODE:
+                source = s
+                break
+
+    if not source:
+        source = Source(
+            id=MANUAL_UPLOAD_SOURCE_ID,
+            name=MANUAL_UPLOAD_SOURCE_NAME,
+            type=SourceType.WEBSITE,
+            url=MANUAL_UPLOAD_SOURCE_URL,
+            active=True,
+            category="manual_document",
+            provider="native",
+            config={
+                "code": MANUAL_UPLOAD_SOURCE_CODE,
+                "ingestion_mode": "manual",
+            },
+        )
+        db.add(source)
+        db.flush()
+    return source
