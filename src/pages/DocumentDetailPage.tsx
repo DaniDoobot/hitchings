@@ -19,6 +19,7 @@ import { DocumentDetail } from '../types/document';
 import { RelevanceBadge } from '../components/common/RelevanceBadge';
 import { TopicBadge } from '../components/common/TopicBadge';
 import { DetailSkeleton } from '../components/common/LoadingSkeleton';
+import { formatDocumentTitle, renderDocumentContent } from '../utils/documentFormatter';
 
 export const DocumentDetailPage: React.FC = () => {
   const { documentId } = useParams<{ documentId: string }>();
@@ -124,7 +125,7 @@ export const DocumentDetailPage: React.FC = () => {
         </div>
 
         <h1 className="text-2xl sm:text-3xl font-serif font-bold text-slate-900 leading-tight mb-4">
-          {doc.title || 'Expediente Documental'}
+          {formatDocumentTitle(doc.title)}
         </h1>
 
         <div className="flex flex-wrap items-center gap-y-2 gap-x-6 text-xs text-slate-600 pt-4 border-t border-slate-100">
@@ -195,9 +196,7 @@ export const DocumentDetailPage: React.FC = () => {
             </div>
 
             {doc.content ? (
-              <div className="prose prose-slate max-w-none text-sm leading-relaxed whitespace-pre-wrap font-sans text-slate-800">
-                {doc.content}
-              </div>
+              renderDocumentContent(doc.content)
             ) : doc.excerpt ? (
               <div className="space-y-4">
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded text-sm text-slate-700 italic">

@@ -268,6 +268,176 @@ def sanitize_filename(filename: str) -> str:
     return cleaned or "document.bin"
 
 
+COMMON_STANDALONE_WORDS: set[str] = {
+    "a", "an", "in", "on", "at", "to", "by", "for", "of", "or", "and", "the",
+    "is", "it", "as", "if", "be", "he", "we", "el", "la", "en", "de", "un", "y", "o", "del", "al"
+}
+
+
+def normalize_pdf_page_text(raw_text: str) -> str:
+    """Normalize extracted PDF text to heal split words and reflow broken lines while preserving legal structure."""
+    if not raw_text or not raw_text.strip():
+        return ""
+
+    lines = [line.strip() for line in raw_text.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    while lines and not lines[-1]:
+        lines.pop()
+
+    if not lines:
+        return ""
+
+    # Phase 1: Heal drop caps and split words
+    healed: list[str] = []
+    i = 0
+    while i < len(lines):
+        curr = lines[i]
+        if not curr:
+            healed.append("")
+            i += 1
+            continue
+
+        if i + 1 < len(lines) and lines[i + 1]:
+            nxt = lines[i + 1]
+
+            # Case 1: Drop cap / split initial fragment alone on line
+            # e.g., 'Ne' + 'utral...', 'Bef' + 'ore...', 's' + 'ummary...', 'di' + 'sproportionate...'
+            if re.match(r"^[A-Za-z]{1,4}$", curr) and curr.lower() not in COMMON_STANDALONE_WORDS:
+                if re.match(r"^[a-z]", nxt):
+                    healed.append(curr + nxt)
+                    i += 2
+                    continue
+                elif curr.isupper() and re.match(r"^[A-Z]", nxt):
+                    parts = nxt.split(" ", 1)
+                    if len(parts) == 2:
+                        healed.append(curr + parts[0] + " " + parts[1])
+                    else:
+                        healed.append(curr + nxt)
+                    i += 2
+                    continue
+            elif len(curr) == 1 and curr.isalpha() and curr.lower() not in ("a", "i", "y", "o"):
+                if re.match(r"^[a-z]{2,}", nxt):
+                    healed.append(curr + nxt)
+                    i += 2
+                    continue
+
+            # Case 2: Hyphenated line break: 'word-' followed by 'continuation'
+            if curr.endswith("-") and len(curr) > 1 and curr[-2].isalpha() and re.match(r"^[a-z]", nxt):
+                healed.append(curr[:-1] + nxt)
+                i += 2
+                continue
+
+        healed.append(curr)
+        i += 1
+
+    # Phase 2: Paragraph reflowing (unwrapping soft line breaks while preserving headings, lists, numbering)
+    list_or_header_pattern = re.compile(
+        r"^(?:\d+[\.\)]|\([a-z\divxlcdm]+\)|[A-Z]\.|\u2022|\-|\*|[A-Z\s]{4,}:|[A-Z\s]{5,}$)"
+    )
+
+    paragraphs: list[str] = []
+    current_p: list[str] = []
+
+    for line in healed:
+        if not line:
+            if current_p:
+                paragraphs.append(" ".join(current_p))
+                current_p = []
+            continue
+
+        # Standalone page number (e.g. '1', '24')
+        if re.match(r"^\d{1,4}$", line):
+            if current_p:
+                paragraphs.append(" ".join(current_p))
+                current_p = []
+            paragraphs.append(line)
+            continue
+
+        if list_or_header_pattern.match(line):
+            if current_p:
+                paragraphs.append(" ".join(current_p))
+                current_p = []
+            current_p.append(line)
+        else:
+            if current_p and (current_p[-1].endswith(".") or current_p[-1].endswith(":")) and len(current_p[-1]) < 40:
+                paragraphs.append(" ".join(current_p))
+                current_p = [line]
+            else:
+                current_p.append(line)
+
+    if current_p:
+        paragraphs.append(" ".join(current_p))
+
+    return "\n\n".join(paragraphs)
+
+
+def extract_pdf_metadata_title(pdf_bytes: bytes) -> Optional[str]:
+    """Extract embedded document title from PDF metadata if present and valid."""
+    if len(pdf_bytes) < 4 or not pdf_bytes.startswith(b"%PDF"):
+        return None
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        metadata = reader.metadata
+        if metadata and metadata.title:
+            raw_title = str(metadata.title).strip()
+            if raw_title and len(raw_title) >= 3 and not raw_title.lower().startswith(("untitled", "sin título")):
+                return raw_title
+    except Exception:
+        pass
+    return None
+
+
+def clean_document_title(
+    manual_title: Optional[str] = None,
+    metadata_title: Optional[str] = None,
+    filename_or_url: Optional[str] = None,
+    default_fallback: str = "Documento sin título",
+) -> str:
+    """Resolve a clean, human-readable document title according to precedence and cleanup rules.
+
+    Precedence:
+    1. manual_title (if explicitly supplied)
+    2. metadata_title (embedded PDF/HTML metadata title, if valid)
+    3. Cleaned filename or URL path (URL decoded, extension stripped, tech prefix stripped)
+    4. default_fallback
+    """
+    if manual_title and manual_title.strip():
+        return " ".join(manual_title.strip().split())
+
+    if metadata_title and metadata_title.strip():
+        meta = " ".join(urllib.parse.unquote(metadata_title).strip().split())
+        if len(meta) >= 3 and not meta.lower().startswith(("untitled", "sin título")):
+            return meta
+
+    if filename_or_url and filename_or_url.strip():
+        raw = filename_or_url.strip()
+        if "/" in raw or "\\" in raw:
+            raw = Path(urlsplit(raw).path).name or raw.split("/")[-1]
+
+        # URL decode (e.g. %20 -> space, %26 -> &, %28 -> (, %29 -> ))
+        unquoted = urllib.parse.unquote(raw).strip()
+
+        # Strip common document extensions
+        for ext in (".pdf", ".txt", ".md", ".html", ".htm", ".doc", ".docx"):
+            if unquoted.lower().endswith(ext):
+                unquoted = unquoted[: -len(ext)].strip()
+                break
+
+        # Replace underscores if no spaces exist or if predominantly underscores
+        if "_" in unquoted and (unquoted.count("_") > unquoted.count(" ") or " " not in unquoted):
+            unquoted = unquoted.replace("_", " ")
+
+        # Strip technical numeric or hash prefix: e.g. '17497725 ' or 16+ hex chars
+        unquoted = re.sub(r"^(?:[a-f0-9]{16,}|\d{5,})[\s_\-]+", "", unquoted, flags=re.IGNORECASE).strip()
+
+        clean = " ".join(unquoted.split())
+        if clean:
+            return clean
+
+    return default_fallback
+
+
 def extract_pdf_digital_text(
     pdf_bytes: bytes,
     max_pages: int = MAX_PDF_PAGES,
@@ -294,7 +464,7 @@ def extract_pdf_digital_text(
         for idx in range(pages_to_read):
             page = reader.pages[idx]
             page_text = page.extract_text() or ""
-            cleaned = page_text.strip()
+            cleaned = normalize_pdf_page_text(page_text).strip()
             if cleaned:
                 chunks.append(cleaned)
                 total_chars += len(cleaned)
@@ -418,7 +588,13 @@ class ManualDocumentIngestionService:
 
         if is_pdf:
             extracted_content = extract_pdf_digital_text(content_bytes)
-            extracted_title = manual_title or Path(urlsplit(final_norm_url).path).name or "Documento PDF"
+            pdf_meta_title = extract_pdf_metadata_title(content_bytes)
+            extracted_title = clean_document_title(
+                manual_title=manual_title,
+                metadata_title=pdf_meta_title,
+                filename_or_url=final_norm_url,
+                default_fallback="Documento PDF",
+            )
             extracted_author = manual_author
             extracted_date = manual_published_at
             canonical = final_norm_url
@@ -444,7 +620,12 @@ class ManualDocumentIngestionService:
             if not auto_title and soup.title:
                 auto_title = soup.title.get_text().strip()
 
-            extracted_title = manual_title or auto_title or "Página Web"
+            extracted_title = clean_document_title(
+                manual_title=manual_title,
+                metadata_title=auto_title,
+                filename_or_url=final_norm_url,
+                default_fallback="Página Web",
+            )
             extracted_author = manual_author or extract_structured_author(soup)
             auto_date, _ = extract_structured_date(soup)
             extracted_date = manual_published_at or auto_date
@@ -553,9 +734,22 @@ class ManualDocumentIngestionService:
         # 3. Content extraction based on extension
         if ext == ".pdf":
             extracted_content = extract_pdf_digital_text(file_bytes)
+            pdf_meta_title = extract_pdf_metadata_title(file_bytes)
+            final_title = clean_document_title(
+                manual_title=manual_title,
+                metadata_title=pdf_meta_title,
+                filename_or_url=clean_name,
+                default_fallback="Documento PDF",
+            )
             doc_type = "pdf"
         elif ext in (".txt", ".md"):
             extracted_content = extract_plain_text(file_bytes)
+            final_title = clean_document_title(
+                manual_title=manual_title,
+                metadata_title=None,
+                filename_or_url=clean_name,
+                default_fallback="Documento manual",
+            )
             doc_type = "document"
         else:
             raise UnsupportedContentTypeError(f"Formato de archivo no soportado: {ext}")
@@ -582,10 +776,6 @@ class ManualDocumentIngestionService:
         # 5. Build synthetic URL & metadata
         entry_id = uuid.uuid4()
         synthetic_url = f"upload://manual/{entry_id}/{clean_name}"
-
-        # Resolve title: user-provided title or filename without extension
-        title_stem = Path(clean_name).stem.replace("_", " ").strip()
-        final_title = manual_title or title_stem or "Documento manual"
 
         raw_meta = {
             "origin": "manual_upload",

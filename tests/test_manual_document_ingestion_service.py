@@ -45,6 +45,9 @@ from app.services.manual_document_ingestion_service import (
     validate_url_security,
     extract_pdf_digital_text,
     extract_plain_text,
+    normalize_pdf_page_text,
+    clean_document_title,
+    extract_pdf_metadata_title,
     MAX_FILE_BYTES,
 )
 
@@ -662,3 +665,162 @@ async def test_37_analyze_with_ai_true_and_execution(db_session: Session):
     assert analysis.summary is not None
     assert "Executive summary for" in analysis.summary
     assert len(analysis.key_points) > 0
+
+
+# ==============================================================================
+# Document Presentation & Normalization Tests (Bloque 11C Presentation Fixes)
+# ==============================================================================
+
+
+def test_clean_document_title_percent_encoded_and_tech_prefix():
+    """Test percent-decoding, extension removal, and tech-prefix removal."""
+    raw_cat_url = (
+        "https://www.catribunal.org.uk/sites/cat/files/2026-10/"
+        "17497725%20Association%20of%20Consumer%20Support%20Organisations%20Ltd%20"
+        "v%20Amazon.com%2C%20Inc%20%26%20Ors%20-%20Ruling%20%28CPO%20Decision%29%20%2013%20Oct%202026.pdf"
+    )
+    cleaned = clean_document_title(filename_or_url=raw_cat_url)
+    assert "%20" not in cleaned
+    assert "%26" not in cleaned
+    assert "%28" not in cleaned
+    assert "%29" not in cleaned
+    assert "%2C" not in cleaned
+    assert not cleaned.endswith(".pdf")
+    assert not cleaned.startswith("17497725")
+    assert cleaned == (
+        "Association of Consumer Support Organisations Ltd v Amazon.com, "
+        "Inc & Ors - Ruling (CPO Decision) 13 Oct 2026"
+    )
+
+    # 4-digit years should not be stripped
+    assert clean_document_title(filename_or_url="2024_annual_competition_report.pdf") == "2024 annual competition report"
+
+    # 16+ hex hash prefix should be stripped
+    assert clean_document_title(filename_or_url="a1b2c3d4e5f67890123456789abcdef0_decision.pdf") == "decision"
+
+    # Precedence: manual_title overrides metadata and url
+    assert (
+        clean_document_title(
+            manual_title="Manual Title Override",
+            metadata_title="Metadata Title",
+            filename_or_url="17497725_file.pdf",
+        )
+        == "Manual Title Override"
+    )
+
+    # Precedence: metadata_title overrides url
+    assert (
+        clean_document_title(
+            metadata_title="Title from PDF Metadata",
+            filename_or_url="17497725_file.pdf",
+        )
+        == "Title from PDF Metadata"
+    )
+
+    # Fallback when empty
+    assert clean_document_title(default_fallback="Fallback Document") == "Fallback Document"
+
+
+def test_extract_pdf_metadata_title():
+    """Test extraction of metadata title from PDF bytes."""
+    # VALID_PDF_BYTES has no metadata title
+    assert extract_pdf_metadata_title(VALID_PDF_BYTES) is None
+
+    # Invalid PDF bytes
+    assert extract_pdf_metadata_title(b"not a pdf") is None
+
+    # Construct PDF with title metadata using pypdf
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=300, height=300)
+    writer.add_metadata({"/Title": "Resolucion de la CNMC Exp. S/0012/23"})
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_with_meta = buf.getvalue()
+
+    extracted = extract_pdf_metadata_title(pdf_with_meta)
+    assert extracted == "Resolucion de la CNMC Exp. S/0012/23"
+
+
+def test_normalize_pdf_page_text_drop_caps_and_split_words():
+    """Test healing of stylized drop caps, hyphenated words, and uppercase fragments."""
+    raw_text = (
+        "Ne\n"
+        "utral citation [2026] CAT 77\n"
+        "Bef\n"
+        "ore:\n"
+        "SI\n"
+        "R PETER ROTH\n"
+        "BETW\n"
+        "EEN:\n"
+        "TH\n"
+        "E ASSOCIATION OF CONSUMER SUPPORT\n"
+        "s\n"
+        "ummary judgment and/or strike out\n"
+        "di\n"
+        "sproportionate cost\n"
+        "dis-\n"
+        "tribution agreement\n"
+    )
+    normalized = normalize_pdf_page_text(raw_text)
+
+    assert "Neutral citation [2026] CAT 77" in normalized
+    assert "Before:" in normalized
+    assert "SIR PETER ROTH" in normalized
+    assert "BETWEEN:" in normalized
+    assert "THE ASSOCIATION OF CONSUMER SUPPORT" in normalized
+    assert "summary judgment and/or strike out" in normalized
+    assert "disproportionate cost" in normalized
+    assert "distribution agreement" in normalized
+
+
+def test_normalize_pdf_page_text_preserves_legal_structure():
+    """Test that numbered clauses, lists, headings, and paragraphs are preserved."""
+    raw_text = (
+        "1. This is the first numbered paragraph of the ruling. It has a soft wrap\n"
+        "here that continues the sentence.\n\n"
+        "2. This is the second paragraph.\n"
+        "(a) First sub-clause with condition.\n"
+        "(b) Second sub-clause with condition.\n"
+        "(i) Sub-sub-clause in roman numeral.\n\n"
+        "ORDER:\n\n"
+        "The Tribunal orders as follows."
+    )
+    normalized = normalize_pdf_page_text(raw_text)
+
+    # Soft line break inside 1. should be unwrapped
+    assert "first numbered paragraph of the ruling. It has a soft wrap here that continues the sentence." in normalized
+    # Numbered structure preserved
+    assert "1. This is" in normalized
+    assert "2. This is" in normalized
+    assert "(a) First sub-clause" in normalized
+    assert "(b) Second sub-clause" in normalized
+    assert "(i) Sub-sub-clause" in normalized
+    assert "ORDER:" in normalized
+
+
+def test_pdf_url_ingestion_with_percent_encoded_title(db_session: Session):
+    """Test full URL ingestion flow with percent-encoded PDF URL."""
+    def handler(request: httpx.Request):
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "application/pdf"},
+            content=VALID_PDF_BYTES,
+        )
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with mock.patch("socket.getaddrinfo", return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 80))]):
+        svc = ManualDocumentIngestionService()
+        res = svc.ingest_url(
+            db=db_session,
+            url="https://example.com/files/17497725%20Ruling%20%28Amazon%20Case%29.pdf",
+            client=mock_client,
+        )
+
+    assert res.status == ManualIngestionStatus.CREATED
+    assert res.entry is not None
+    assert "%20" not in res.entry.title
+    assert "%28" not in res.entry.title
+    assert not res.entry.title.endswith(".pdf")
+    assert not res.entry.title.startswith("17497725")
+    assert res.entry.title == "Ruling (Amazon Case)"

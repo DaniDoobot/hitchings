@@ -6,6 +6,7 @@ import { DocumentDetailPage } from '../pages/DocumentDetailPage';
 import { AddDocumentModal } from '../components/documents/AddDocumentModal';
 import { documentsApi, ApiError } from '../services/documentsApi';
 import { observatoryApi } from '../services/observatoryApi';
+import { formatDocumentTitle, renderDocumentContent } from '../utils/documentFormatter';
 
 describe('Documentary Archive Module (Bloque 11B Frontend)', () => {
   beforeEach(() => {
@@ -729,6 +730,129 @@ describe('Manual Document Ingestion (Bloque 11C Frontend)', () => {
       const link = screen.getByRole('link', { name: /Ver documento existente/i });
       expect(link).toBeInTheDocument();
       expect(link).toHaveAttribute('href', '/documentos/existing-entry-uuid-777');
+    });
+  });
+
+  describe('Document Presentation & Formatting (Bloque 11C Presentation Fixes)', () => {
+    it('25. formatDocumentTitle decodifica percent-encoding y elimina prefijos tecnicos y extension', () => {
+      const rawCatTitle =
+        '17497725%20Association%20of%20Consumer%20Support%20Organisations%20Ltd%20v%20Amazon.com%2C%20Inc%20%26%20Ors%20-%20Ruling%20%28CPO%20Decision%29%20%2013%20Oct%202026.pdf';
+      const clean = formatDocumentTitle(rawCatTitle);
+
+      expect(clean).not.toContain('%20');
+      expect(clean).not.toContain('%26');
+      expect(clean).not.toContain('%28');
+      expect(clean).not.toContain('%29');
+      expect(clean).not.toContain('%2C');
+      expect(clean).not.toMatch(/\.pdf$/i);
+      expect(clean).not.toMatch(/^17497725/);
+      expect(clean).toBe(
+        'Association of Consumer Support Organisations Ltd v Amazon.com, Inc & Ors - Ruling (CPO Decision) 13 Oct 2026'
+      );
+    });
+
+    it('26. formatDocumentTitle preserva anos de cuatro digitos y limpia guiones bajos', () => {
+      expect(formatDocumentTitle('2024_annual_competition_report.pdf')).toBe('2024 annual competition report');
+      expect(formatDocumentTitle('a1b2c3d4e5f67890123456789abcdef0_decision.pdf')).toBe('decision');
+      expect(formatDocumentTitle(null)).toBe('Expediente documental');
+      expect(formatDocumentTitle('')).toBe('Expediente documental');
+    });
+
+    it('27. renderDocumentContent reflows parrafos suaves y preserva estructuras juridicas', () => {
+      const legalText = `1. Este es el primer parrafo numerado de la resolucion. Tiene un salto suave
+que continua en la siguiente linea.
+
+2. Este es el segundo parrafo.
+(a) Primera condicion subordinada.
+(b) Segunda condicion subordinada.
+
+BETWEEN:
+
+THE ASSOCIATION AND THE DEFENDANTS
+
+24`;
+
+      render(<div>{renderDocumentContent(legalText)}</div>);
+
+      // Paragraph unwrapping
+      expect(
+        screen.getByText(/Este es el primer parrafo numerado de la resolucion\. Tiene un salto suave que continua en la siguiente linea\./)
+      ).toBeInTheDocument();
+
+      // Numbered items and sub-items
+      expect(screen.getByText(/1\. Este es el primer parrafo/)).toBeInTheDocument();
+      expect(screen.getByText(/\(a\) Primera condicion subordinada\./)).toBeInTheDocument();
+      expect(screen.getByText(/\(b\) Segunda condicion subordinada\./)).toBeInTheDocument();
+
+      // Heading
+      const heading = screen.getByRole('heading', { level: 3, name: 'BETWEEN:' });
+      expect(heading).toBeInTheDocument();
+
+      // Page marker
+      expect(screen.getByText(/— Página 24 —/)).toBeInTheDocument();
+    });
+
+    it('28. DocumentsPage formatea titulos codificados por URL en las tarjetas', async () => {
+      vi.spyOn(observatoryApi, 'getSources').mockResolvedValueOnce([]);
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          {
+            id: 'doc-cat',
+            title: '17497725%20Ruling%20%28Amazon%20Case%29.pdf',
+            url: 'https://example.com/cat.pdf',
+            source: { id: 's1', name: 'CAT' },
+            has_analysis: false,
+            is_linkedin: false,
+            source_origin_category: 'direct_web',
+            captured_at: '2026-10-13T10:00:00Z',
+          },
+        ],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('link', { name: 'Ruling (Amazon Case)' })).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/17497725%20Ruling/)).not.toBeInTheDocument();
+    });
+
+    it('29. DocumentDetailPage formatea titulo y renderiza contenido con tipografia estructurada', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce({
+        id: 'doc-detail-1',
+        title: '17497725%20Ruling%20%28Amazon%20Case%29.pdf',
+        url: 'https://example.com/cat.pdf',
+        content: '1. Párrafo de la sentencia.\n(a) Cláusula primera.\n\nORDER:\nTribunal final order.',
+        has_analysis: false,
+        is_linkedin: false,
+        source_origin_category: 'direct_web',
+        source: { id: 's1', name: 'CAT' },
+        captured_at: '2026-10-13T10:00:00Z',
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-detail-1']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { level: 1, name: 'Ruling (Amazon Case)' })).toBeInTheDocument();
+      });
+
+      expect(screen.getByText(/1\. Párrafo de la sentencia\./)).toBeInTheDocument();
+      expect(screen.getByText(/\(a\) Cláusula primera\./)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 3, name: 'ORDER:' })).toBeInTheDocument();
+      expect(screen.getByText(/Tribunal final order\./)).toBeInTheDocument();
     });
   });
 });

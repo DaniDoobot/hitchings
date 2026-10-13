@@ -24,6 +24,7 @@ import { CardSkeleton } from '../components/common/LoadingSkeleton';
 import { ErrorState } from '../components/common/ErrorState';
 import { EmptyState } from '../components/common/EmptyState';
 import { AddDocumentModal } from '../components/documents/AddDocumentModal';
+import { formatDocumentTitle } from '../utils/documentFormatter';
 
 export const DocumentsPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -281,7 +282,7 @@ export const DocumentsPage: React.FC = () => {
                 {/* Title */}
                 <h2 className="text-base font-bold text-slate-900 group-hover:text-navy-900 mb-2">
                   <Link to={`/documentos/${doc.id}`} className="hover:underline">
-                    {doc.title || 'Publicación sin título explícito'}
+                    {formatDocumentTitle(doc.title)}
                   </Link>
                 </h2>
 
