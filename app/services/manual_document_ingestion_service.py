@@ -274,6 +274,151 @@ COMMON_STANDALONE_WORDS: set[str] = {
 }
 
 
+def clean_inline_punctuation_and_spaces(text: str) -> str:
+    """Clean unwanted spaces before punctuation, possessives, parentheses, and hyphenated breaks."""
+    # Space before closing punctuation: "Porta , " -> "Porta, "
+    text = re.sub(r"[ \t]+([,.:;?!])", r"\1", text)
+    # Space before possessive 's or ’s: "XXXLutz 's" -> "XXXLutz's"
+    text = re.sub(r"[ \t]+(['’]s\b)", r"\1", text)
+    # Spacing around parentheses
+    text = re.sub(r"\(\s+", "(", text)
+    text = re.sub(r"\s+\)", ")", text)
+    # Spurious spaces in hyphenated words: "opt -out" -> "opt-out", "sub- paragraph" -> "sub-paragraph"
+    text = re.sub(r"(\b[A-Za-z0-9]+)\s+-\s*([A-Za-z0-9]+\b)", r"\1-\2", text)
+    text = re.sub(r"(\b[A-Za-z0-9]+)-\s+([A-Za-z0-9]+\b)", r"\1-\2", text)
+    # Collapse multiple horizontal spaces
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def extract_page_spans_and_reconstruct(page: pypdf.PageObject) -> str:
+    """Extract page text using coordinate baseline clustering to heal inline fragmentation and split words."""
+    spans: list[tuple[float, float, str, float]] = []
+
+    def visitor(
+        text: str,
+        cm: list[float] | None,
+        tm: list[float] | None,
+        font_dict: dict | None,
+        font_size: float | None,
+    ) -> None:
+        if not text:
+            return
+        cleaned = text.replace("\r", "").strip("\n")
+        if not cleaned.strip():
+            return
+
+        c = cm if cm and len(cm) == 6 else [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+        t = tm if tm and len(tm) == 6 else [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+
+        x = t[4] * c[0] + t[5] * c[2] + c[4]
+        y = t[4] * c[1] + t[5] * c[3] + c[5]
+        spans.append((y, x, cleaned, font_size or 10.0))
+
+    try:
+        page.extract_text(visitor_text=visitor)
+    except Exception:
+        return ""
+
+    if not spans:
+        return ""
+
+    # Cluster spans into horizontal lines by Y baseline (tolerance 2.5pt)
+    lines: list[dict] = []
+    for y, x, text_chunk, fs in spans:
+        placed = False
+        for line in lines:
+            if abs(line["y"] - y) <= 2.5:
+                line["spans"].append((x, text_chunk, fs))
+                placed = True
+                break
+        if not placed:
+            lines.append({"y": y, "spans": [(x, text_chunk, fs)]})
+
+    # Sort lines descending by Y (top of page first)
+    lines.sort(key=lambda l: l["y"], reverse=True)
+
+    result_lines: list[tuple[float, str]] = []
+    for line in lines:
+        line["spans"].sort(key=lambda s: s[0])  # Sort by X ascending
+        line_str = ""
+        for i, (x, text_chunk, fs) in enumerate(line["spans"]):
+            if i == 0:
+                line_str = text_chunk
+            else:
+                prev_x, prev_text, _ = line["spans"][i - 1]
+                is_suffix = bool(re.match(r"^['’](?:s|re|ve|ll|d|m|t)\b", text_chunk))
+                is_closing_punct = bool(re.match(r"^[,.:;?!%)\]]", text_chunk))
+                should_join_without_space = False
+
+                if is_suffix or is_closing_punct:
+                    should_join_without_space = True
+                elif prev_text.endswith(" ") or text_chunk.startswith(" "):
+                    should_join_without_space = False
+                else:
+                    char_len = len(prev_text.rstrip())
+                    dx = x - prev_x
+                    avg_char_w = dx / char_len if char_len > 0 else 10.0
+                    # Adjacent characters of the same word (e.g. drop caps 'Ne'+'utral', 'BETW'+'EEN:')
+                    if (
+                        4.0 <= avg_char_w <= 13.0
+                        and re.match(r"^[A-Za-z]+$", prev_text.rstrip())
+                        and re.match(r"^[A-Za-z]", text_chunk.lstrip())
+                    ):
+                        should_join_without_space = True
+
+                if should_join_without_space:
+                    line_str = line_str.rstrip() + text_chunk.lstrip()
+                else:
+                    line_str = line_str.rstrip() + " " + text_chunk.lstrip()
+
+        line_str = clean_inline_punctuation_and_spaces(line_str)
+        if line_str:
+            result_lines.append((line["y"], line_str))
+
+    if not result_lines:
+        return ""
+
+    # Estimate median line pitch (dy)
+    dys = [
+        result_lines[i][0] - result_lines[i + 1][0]
+        for i in range(len(result_lines) - 1)
+        if 5.0 <= result_lines[i][0] - result_lines[i + 1][0] <= 35.0
+    ]
+    typical_dy = sorted(dys)[len(dys) // 2] if dys else 14.0
+    paragraph_threshold = typical_dy * 1.45
+
+    list_or_header_pattern = re.compile(
+        r"^(?:\d+[\.\)]|\([a-z\divxlcdm]+\)|[A-Z]\.|\u2022|\-|\*|[A-Z\s]{4,}:|[A-Z\s]{5,}$)"
+    )
+    date_pattern = re.compile(r"^(?:[A-Z][a-z]+,\s+)?\d{1,2}\s+[A-Z][a-z]+\s+\d{4}$")
+
+    paragraphs: list[str] = []
+    current_p: list[str] = []
+
+    for i, (y, line_text) in enumerate(result_lines):
+        if not current_p:
+            current_p.append(line_text)
+            continue
+
+        prev_y = result_lines[i - 1][0]
+        dy = prev_y - y
+
+        is_structure = bool(list_or_header_pattern.match(line_text)) or bool(date_pattern.match(line_text))
+        prev_is_short_title = len(current_p[-1]) < 50 and (current_p[-1].isupper() or current_p[-1].endswith(":"))
+
+        if dy >= paragraph_threshold or is_structure or prev_is_short_title:
+            paragraphs.append(" ".join(current_p))
+            current_p = [line_text]
+        else:
+            current_p.append(line_text)
+
+    if current_p:
+        paragraphs.append(" ".join(current_p))
+
+    return "\n\n".join(paragraphs)
+
+
 def normalize_pdf_page_text(raw_text: str) -> str:
     """Normalize extracted PDF text to heal split words and reflow broken lines while preserving legal structure."""
     if not raw_text or not raw_text.strip():
@@ -288,7 +433,7 @@ def normalize_pdf_page_text(raw_text: str) -> str:
     if not lines:
         return ""
 
-    # Phase 1: Heal drop caps and split words
+    # Phase 1: Heal drop caps, split words, and inline style fragments
     healed: list[str] = []
     i = 0
     while i < len(lines):
@@ -301,7 +446,17 @@ def normalize_pdf_page_text(raw_text: str) -> str:
         if i + 1 < len(lines) and lines[i + 1]:
             nxt = lines[i + 1]
 
-            # Case 1: Drop cap / split initial fragment alone on line
+            # Case A: Attached punctuation or suffix on next line: e.g. curr='Porta', nxt=', under...' or nxt="'s proposed"
+            if re.match(r"^[,.:;?!]", nxt):
+                healed.append(curr + nxt)
+                i += 2
+                continue
+            if re.match(r"^['’](?:s|re|ve|ll|d|m|t)\b", nxt):
+                healed.append(curr + nxt)
+                i += 2
+                continue
+
+            # Case B: Drop cap / split initial fragment alone on line
             # e.g., 'Ne' + 'utral...', 'Bef' + 'ore...', 's' + 'ummary...', 'di' + 'sproportionate...'
             if re.match(r"^[A-Za-z]{1,4}$", curr) and curr.lower() not in COMMON_STANDALONE_WORDS:
                 if re.match(r"^[a-z]", nxt):
@@ -322,7 +477,7 @@ def normalize_pdf_page_text(raw_text: str) -> str:
                     i += 2
                     continue
 
-            # Case 2: Hyphenated line break: 'word-' followed by 'continuation'
+            # Case C: Hyphenated line break: 'word-' followed by 'continuation'
             if curr.endswith("-") and len(curr) > 1 and curr[-2].isalpha() and re.match(r"^[a-z]", nxt):
                 healed.append(curr[:-1] + nxt)
                 i += 2
@@ -342,32 +497,42 @@ def normalize_pdf_page_text(raw_text: str) -> str:
     for line in healed:
         if not line:
             if current_p:
-                paragraphs.append(" ".join(current_p))
+                clean_p = clean_inline_punctuation_and_spaces(" ".join(current_p))
+                if clean_p:
+                    paragraphs.append(clean_p)
                 current_p = []
             continue
 
         # Standalone page number (e.g. '1', '24')
         if re.match(r"^\d{1,4}$", line):
             if current_p:
-                paragraphs.append(" ".join(current_p))
+                clean_p = clean_inline_punctuation_and_spaces(" ".join(current_p))
+                if clean_p:
+                    paragraphs.append(clean_p)
                 current_p = []
             paragraphs.append(line)
             continue
 
         if list_or_header_pattern.match(line):
             if current_p:
-                paragraphs.append(" ".join(current_p))
+                clean_p = clean_inline_punctuation_and_spaces(" ".join(current_p))
+                if clean_p:
+                    paragraphs.append(clean_p)
                 current_p = []
             current_p.append(line)
         else:
             if current_p and (current_p[-1].endswith(".") or current_p[-1].endswith(":")) and len(current_p[-1]) < 40:
-                paragraphs.append(" ".join(current_p))
+                clean_p = clean_inline_punctuation_and_spaces(" ".join(current_p))
+                if clean_p:
+                    paragraphs.append(clean_p)
                 current_p = [line]
             else:
                 current_p.append(line)
 
     if current_p:
-        paragraphs.append(" ".join(current_p))
+        clean_p = clean_inline_punctuation_and_spaces(" ".join(current_p))
+        if clean_p:
+            paragraphs.append(clean_p)
 
     return "\n\n".join(paragraphs)
 
@@ -463,8 +628,12 @@ def extract_pdf_digital_text(
 
         for idx in range(pages_to_read):
             page = reader.pages[idx]
-            page_text = page.extract_text() or ""
-            cleaned = normalize_pdf_page_text(page_text).strip()
+            reconstructed = extract_page_spans_and_reconstruct(page)
+            if reconstructed and reconstructed.strip():
+                cleaned = normalize_pdf_page_text(reconstructed).strip()
+            else:
+                page_text = page.extract_text() or ""
+                cleaned = normalize_pdf_page_text(page_text).strip()
             if cleaned:
                 chunks.append(cleaned)
                 total_chars += len(cleaned)

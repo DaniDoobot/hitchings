@@ -48,6 +48,8 @@ from app.services.manual_document_ingestion_service import (
     normalize_pdf_page_text,
     clean_document_title,
     extract_pdf_metadata_title,
+    clean_inline_punctuation_and_spaces,
+    extract_page_spans_and_reconstruct,
     MAX_FILE_BYTES,
 )
 
@@ -824,3 +826,77 @@ def test_pdf_url_ingestion_with_percent_encoded_title(db_session: Session):
     assert not res.entry.title.endswith(".pdf")
     assert not res.entry.title.startswith("17497725")
     assert res.entry.title == "Ruling (Amazon Case)"
+
+
+def test_clean_inline_punctuation_and_spaces():
+    """Test cleaning of unwanted spaces before punctuation, possessives, parentheses, and hyphens."""
+    raw = "Porta , under the EU Merger Regulation . And XXXLutz 's proposed acquisition ( ACSO ) opt -out sub- paragraph ."
+    cleaned = clean_inline_punctuation_and_spaces(raw)
+    assert cleaned == "Porta, under the EU Merger Regulation. And XXXLutz's proposed acquisition (ACSO) opt-out sub-paragraph."
+
+
+def test_normalize_pdf_page_text_inline_hyperlinks_and_styles():
+    """Test healing of fragmented inline spans caused by hyperlinks or typography."""
+    fragmented = (
+        "assess \n"
+        "XXXLutz\n"
+        "'s proposed\n"
+        "acquisition of \n"
+        "Porta\n"
+        ", under the \n"
+        "EU Merger Regulation\n"
+        "."
+    )
+    normalized = normalize_pdf_page_text(fragmented)
+    assert "assess XXXLutz's proposed acquisition of Porta, under the EU Merger Regulation." in normalized
+
+
+def test_extract_page_spans_and_reconstruct_mock_page():
+    """Test coordinate baseline clustering using a mock pypdf PageObject."""
+    class MockPage:
+        def extract_text(self, visitor_text=None):
+            if visitor_text:
+                # Baseline 1: Y=700.0, drop cap 'Ne' + 'utral citation [2026] CAT 77'
+                visitor_text("Ne\n", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 100.0, 700.0], {}, 12.0)
+                visitor_text("utral citation [2026] CAT 77", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 114.0, 700.0], {}, 12.0)
+                # Baseline 2: Y=680.0, 'Before:'
+                visitor_text("Bef\n", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 100.0, 680.0], {}, 12.0)
+                visitor_text("ore:", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 117.0, 680.0], {}, 12.0)
+                # Baseline 3: Y=650.0, inline link 'Porta' + ','
+                visitor_text("acquisition of ", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 100.0, 650.0], {}, 12.0)
+                visitor_text("Porta", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 180.0, 650.0], {}, 12.0)
+                visitor_text(", under the EU Merger Regulation .", [1, 0, 0, 1, 0, 0], [1, 0, 0, 1, 210.0, 650.0], {}, 12.0)
+            return "Ne\nutral citation [2026] CAT 77\nBef\nore:\nacquisition of \nPorta\n, under the EU Merger Regulation ."
+
+    reconstructed = extract_page_spans_and_reconstruct(MockPage())
+    assert "Neutral citation [2026] CAT 77" in reconstructed
+    assert "Before:" in reconstructed
+    assert "acquisition of Porta, under the EU Merger Regulation." in reconstructed
+    assert "Porta ," not in reconstructed
+
+
+def test_extract_pdf_digital_text_with_real_cat_and_ec_samples():
+    """Verify digital extraction on real legal PDFs when present in test scratch dir."""
+    scratch_dir = Path(__file__).resolve().parent.parent / ".system_generated"
+    cat_pdf_path = Path("C:/Users/danim/.gemini/antigravity/brain/379740a7-664c-4344-b0c1-f912228ad220/scratch/cat_ruling.pdf")
+    ec_pdf_path = Path("C:/Users/danim/.gemini/antigravity/brain/379740a7-664c-4344-b0c1-f912228ad220/scratch/ip_26_2126.pdf")
+
+    if cat_pdf_path.exists():
+        cat_bytes = cat_pdf_path.read_bytes()
+        cat_text = extract_pdf_digital_text(cat_bytes, max_pages=3)
+        assert "Neutral citation [2026] CAT 77" in cat_text
+        assert "Before:" in cat_text
+        assert "SIR PETER ROTH" in cat_text
+        assert "BETWEEN:" in cat_text
+        assert "THE ASSOCIATION OF CONSUMER SUPPORT ORGANISATIONS" in cat_text
+        assert "1. On 14 August 2025" in cat_text
+        assert "Ne\nutral" not in cat_text
+        assert "Bef\nore" not in cat_text
+        assert "BETW\nEEN" not in cat_text
+
+    if ec_pdf_path.exists():
+        ec_bytes = ec_pdf_path.read_bytes()
+        ec_text = extract_pdf_digital_text(ec_bytes, max_pages=2)
+        assert "assess XXXLutz's proposed acquisition of Porta, under the EU Merger Regulation." in ec_text
+        assert "Porta ," not in ec_text
+        assert "XXXLutz 's" not in ec_text

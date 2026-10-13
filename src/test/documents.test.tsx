@@ -6,7 +6,7 @@ import { DocumentDetailPage } from '../pages/DocumentDetailPage';
 import { AddDocumentModal } from '../components/documents/AddDocumentModal';
 import { documentsApi, ApiError } from '../services/documentsApi';
 import { observatoryApi } from '../services/observatoryApi';
-import { formatDocumentTitle, renderDocumentContent } from '../utils/documentFormatter';
+import { formatDocumentTitle, renderDocumentContent, healHistoricalContent } from '../utils/documentFormatter';
 
 describe('Documentary Archive Module (Bloque 11B Frontend)', () => {
   beforeEach(() => {
@@ -853,6 +853,80 @@ THE ASSOCIATION AND THE DEFENDANTS
       expect(screen.getByText(/\(a\) Cláusula primera\./)).toBeInTheDocument();
       expect(screen.getByRole('heading', { level: 3, name: 'ORDER:' })).toBeInTheDocument();
       expect(screen.getByText(/Tribunal final order\./)).toBeInTheDocument();
+    });
+
+    it('30. healHistoricalContent sana fragmentos de palabras y signos de puntuacion en textos historicos', () => {
+      const historical = [
+        'Ne\nutral citation [2026] CAT 77',
+        'Bef\nore:',
+        'SI\nR PETER ROTH',
+        'BETW\nEEN:',
+        'dis-\ntribution',
+        'Porta\n, under the EU Merger Regulation\n.',
+        "XXXLutz\n's proposed",
+      ].join('\n');
+
+      const healed = healHistoricalContent(historical);
+
+      expect(healed).toContain('Neutral citation [2026] CAT 77');
+      expect(healed).toContain('Before:');
+      expect(healed).toContain('SIR PETER ROTH');
+      expect(healed).toContain('BETWEEN:');
+      expect(healed).toContain('distribution');
+      expect(healed).toContain('Porta, under the EU Merger Regulation.');
+      expect(healed).toContain("XXXLutz's proposed");
+    });
+
+    it('31. renderDocumentContent no genera encabezados h3 falsos para fragmentos como BETW o ore:', () => {
+      const brokenFragments = `Ne
+utral citation [2026] CAT 77
+
+Bef
+ore:
+
+SI
+R PETER ROTH
+
+BETW
+EEN:
+
+THE ASSOCIATION OF CONSUMER SUPPORT ORGANISATIONS`;
+
+      render(<div>{renderDocumentContent(brokenFragments)}</div>);
+
+      // Should heal and render legitimate headings
+      expect(screen.getByRole('heading', { level: 3, name: 'BETWEEN:' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 3, name: 'Before:' })).toBeInTheDocument();
+
+      // Should NEVER render broken fragments as headers
+      expect(screen.queryByRole('heading', { level: 3, name: 'BETW' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { level: 3, name: 'EEN:' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { level: 3, name: 'ore:' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { level: 3, name: 'Bef' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { level: 3, name: 'SI' })).not.toBeInTheDocument();
+
+      // Normal text paragraphs should be present
+      expect(screen.getByText(/Neutral citation \[2026\] CAT 77/)).toBeInTheDocument();
+      expect(screen.getByText(/SIR PETER ROTH/)).toBeInTheDocument();
+    });
+
+    it('32. renderDocumentContent reflows texto de la Comision Europea sin saltos inline', () => {
+      const ecBroken = [
+        'The European Commission has opened an in-depth investigation to assess',
+        'XXXLutz',
+        "'s proposed",
+        'acquisition of',
+        'Porta',
+        ', under the',
+        'EU Merger Regulation',
+        '.',
+      ].join('\n');
+
+      render(<div>{renderDocumentContent(ecBroken)}</div>);
+
+      expect(
+        screen.getByText(/assess XXXLutz's proposed acquisition of Porta, under the EU Merger Regulation\./)
+      ).toBeInTheDocument();
     });
   });
 });

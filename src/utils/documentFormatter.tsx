@@ -65,6 +65,79 @@ interface ParsedItem {
 }
 
 /**
+ * Defensively cleans and heals historical documents that may have been stored with
+ * artificial linebreaks in drop caps, split words, or attached punctuation.
+ */
+export function healHistoricalContent(raw: string): string {
+  if (!raw || !raw.trim()) return '';
+
+  const lines = raw.split('\n');
+  const healed: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    let curr = lines[i];
+
+    while (i + 1 < lines.length) {
+      const nxt = lines[i + 1];
+      const trimmedCurr = curr.trim();
+      const trimmedNxt = nxt.trim();
+
+      // Attached punctuation or suffix on next line: e.g. curr='Porta', nxt=', under...' or nxt='.' or nxt="'s proposed"
+      if (/^[,.:;?!]/.test(trimmedNxt)) {
+        curr = curr.trimEnd() + trimmedNxt;
+        i++;
+        continue;
+      }
+      if (/^['’](?:s|re|ve|ll|d|m|t)\b/.test(trimmedNxt)) {
+        curr = curr.trimEnd() + trimmedNxt;
+        i++;
+        continue;
+      }
+
+      // Hyphenated word break across line: e.g. 'dis-' + 'tribution'
+      if (curr.endsWith('-') && /[a-zA-Z]/.test(curr.slice(-2, -1)) && /^[a-z]/.test(trimmedNxt)) {
+        curr = curr.slice(0, -1) + trimmedNxt;
+        i++;
+        continue;
+      }
+
+      // Drop cap / short prefix fragment alone on line:
+      // e.g. 'Ne' + 'utral...', 'Bef' + 'ore:...', 'BETW' + 'EEN:...'
+      const isShortAlpha = /^[A-Za-z]{1,4}$/.test(trimmedCurr);
+      const isCommonWord = /^(?:a|an|in|on|at|to|by|for|of|or|and|the|is|it|as|if|be|he|we)$/i.test(trimmedCurr);
+
+      if (isShortAlpha && !isCommonWord) {
+        if (/^[a-z]/.test(trimmedNxt)) {
+          curr = trimmedCurr + trimmedNxt;
+          i++;
+          continue;
+        } else if (/^[A-Z]{2,}/.test(trimmedCurr) && /^[A-Z]/.test(trimmedNxt)) {
+          const parts = trimmedNxt.split(' ');
+          curr = trimmedCurr + parts[0] + (parts.length > 1 ? ' ' + parts.slice(1).join(' ') : '');
+          i++;
+          continue;
+        }
+      }
+
+      break;
+    }
+
+    healed.push(curr);
+    i++;
+  }
+
+  let text = healed.join('\n');
+  text = text.replace(/[ \t]+([,.:;?!])/g, '$1');
+  text = text.replace(/[ \t]+(['’]s\b)/g, '$1');
+  text = text.replace(/\([ \t]+/g, '(').replace(/[ \t]+\)/g, ')');
+  text = text.replace(/(\b[A-Za-z0-9]+)[ \t]+-[ \t]*([A-Za-z0-9]+\b)/g, '$1-$2');
+  text = text.replace(/(\b[A-Za-z0-9]+)-[ \t]+([A-Za-z0-9]+\b)/g, '$1-$2');
+
+  return text;
+}
+
+/**
  * Parses lines within a block, detecting inline headings, numbered clauses,
  * bullet items, and unwrapping soft linebreaks for regular sentences.
  */
@@ -90,8 +163,15 @@ function parseBlockItems(rawBlock: string): ParsedItem[] {
 
   for (const line of lines) {
     const isHeading =
-      (ALL_CAPS_HEADING_REGEX.test(line) && line.length < 80 && !NUMBERED_CLAUSE_REGEX.test(line)) ||
-      (line.endsWith(':') && line.length < 60);
+      (ALL_CAPS_HEADING_REGEX.test(line) &&
+        line.length >= 5 &&
+        line.length < 80 &&
+        !NUMBERED_CLAUSE_REGEX.test(line) &&
+        !/^[A-Z]{1,4}$/.test(line)) ||
+      (line.endsWith(':') &&
+        line.length >= 5 &&
+        line.length < 60 &&
+        !/^(?:ore|een|ing|ed):$/i.test(line));
 
     const isNumbered = NUMBERED_CLAUSE_REGEX.test(line);
     const isBullet = BULLET_REGEX.test(line);
@@ -120,8 +200,11 @@ export function renderDocumentContent(content?: string | null): React.ReactNode 
     return null;
   }
 
+  // Defensively heal historical records
+  const healedContent = healHistoricalContent(content);
+
   // Split into paragraph blocks delimited by double (or more) newlines
-  const rawBlocks = content.trim().split(/\n\s*\n+/);
+  const rawBlocks = healedContent.trim().split(/\n\s*\n+/);
 
   return (
     <div className="document-body space-y-4 font-serif text-slate-800 text-[15px] leading-relaxed select-text">
