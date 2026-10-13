@@ -3,21 +3,32 @@
 ## Estado actual
 
 Fecha:
-2026-10-09
+2026-10-13
+
+HEAD:
+b3e3a57 — fix: improve PDF text reconstruction
 
 Últimos bloques completados:
-1. **Bloque 11B — Módulo Documental e Informes**:
+1. **Bloque 11C — Ingesta Manual de Documentos**:
+   - Ingesta manual desde URL y desde archivo multipart (PDF, TXT, MD hasta 25 MB).
+   - Mitigación SSRF, deduplicación jerárquica por URL y SHA-256 (HTTP 409 Conflict).
+   - Fuente canónica `SourceType.MANUAL_UPLOAD` (migración 0008 en producción).
+   - Modal interactivo con drag & drop, conmutador de análisis IA y gestión de duplicados.
+   - Reconstrucción geométrica de párrafos PDF por coordenadas y reparación tipográfica.
+   - Desplegado y verificado en producción Dokploy.
+2. **Bloque 11B — Módulo Documental e Informes**:
    - Consulta documental integral `/api/v1/documents` y `/documentos`.
    - Consulta transparente de entradas analizadas y sin análisis previo.
    - Detalle documental con doble perspectiva (texto original vs análisis IA y evidencia literal).
    - Anti-N+1, 0 llamadas a IA en tiempo de consulta.
-2. **Bloque 9C / 9E — LinkedIn Source Operational & Verified Production Readiness**:
+   - Desplegado y validado en producción Dokploy.
+3. **Bloque 9C / 9E — LinkedIn Source Operational & Verified Production Readiness**:
    - Bright Data primario (`gd_lyy3tktm25m4avu764`) con snapshots asíncronos.
    - Apify fallback (`harvestapi/linkedin-profile-posts`) ante timeouts, errores o resultados vacíos.
    - Normalización de paths lingüísticos (`/en`) y subdominios regionales.
    - Validación de procedencia estricta fail-closed.
    - Entidad Thomas Funke probada y validada en producción (5/5 posts creados, 0 errores, 0 rechazos de provenance) con URL canónica `https://www.linkedin.com/in/dr-thomas-g-funke-96297346`.
-3. **Bloque 10 — Scheduler Diario**:
+4. **Bloque 10 — Scheduler Diario**:
    - `SCHEDULER_CADENCE=daily` a las 06:00 `Europe/Madrid`.
    - Lookback diario de 3 días.
    - Aislamiento de fallos y análisis incremental automático.
@@ -30,14 +41,16 @@ Fecha:
 Backend:
 `pytest tests/`
 Resultado:
-- 9 passed en tests específicos del módulo documental (`tests/test_document_module.py`).
-- 84 passed en tests específicos de LinkedIn (`tests/test_linkedin_discovery.py`).
-- 731 passed en la suite total de la aplicación.
+- 85 passed en tests específicos de LinkedIn (`tests/test_linkedin_discovery.py`).
+- 9 passed en tests del módulo documental (`tests/test_document_module.py`).
+- 84 tests específicos de infraestructura, servicio y API de ingesta manual (`tests/test_manual_*.py`).
+- 731 passed en la suite general de la aplicación.
 
 Frontend:
 `npm test`
 Resultado:
-- 51 passed (incluyendo los 3 tests del módulo documental en `src/test/documents.test.tsx`).
+- 83 passed en Vitest (8 suites passed, incluyendo tests del fondo documental e ingesta manual en `src/test/documents.test.tsx`).
+- `npm run build` (`tsc && vite build`): 0 errores TypeScript, build limpio.
 
 ---
 

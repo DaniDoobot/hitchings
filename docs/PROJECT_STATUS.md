@@ -1,25 +1,78 @@
 # HITCHINGS — Current Project Status
 
 Fecha:
-2026-10-09
+2026-10-13
 
-## Módulo Documental e Informes (Bloque 11B)
+HEAD:
+b3e3a57 — fix: improve PDF text reconstruction
 
-ESTADO: OPERATIVO Y VALIDADO
+## Bloque 11B — Fondo Documental
+ESTADO: COMPLETADO Y OPERATIVO EN PRODUCCIÓN.
+
 - **Separación Conceptual y de Dominio**:
   - Distinción nítida entre la vista ejecutiva del Observatorio (`/api/v1/observatory/entries` & `/observatorio`, que exige análisis completado vigente) y el Fondo Documental (`/api/v1/documents` & `/documentos`, que permite consultar tanto entradas analizadas como expedientes y capturas originales en archivo).
 - **Backend & API (`/api/v1/documents`)**:
   - `GET /api/v1/documents`: Listado paginado con filtros (`q`, `source_id`, `has_analysis`, `origin_category`, `date_from`, `date_to`, `sort_by`, `sort_order`).
   - `GET /api/v1/documents/{document_id}`: Detalle de documento. Devuelve HTTP 200 con `has_analysis=False` y cuerpo documental si no tiene análisis, o con dictamen completo, temas canónicos y citas de evidencia si está analizado. Devuelve HTTP 404 únicamente si el documento no existe.
   - Anti-N+1: `selectinload` optimizado para `Source`, `TrackedEntity`, `analyses`, `topics` y `calls`.
-  - 0 llamadas externas / 0 Gemini: puramente lectura de base de datos PostgreSQL.
+  - 0 llamadas externas / 0 Gemini en tiempo de consulta: puramente lectura optimizada de PostgreSQL.
 - **Frontend Observatorio**:
   - Integración en navegación principal (`AppLayout.tsx`) mediante la ruta `/documentos`.
-  - Página de catálogo `DocumentsPage.tsx` con búsqueda reactiva, filtro por estado de análisis ("Todos", "Con análisis IA", "Sin análisis"), filtros de procedencia y paginación.
+  - Página de catálogo `DocumentsPage.tsx` con búsqueda reactiva, filtro por estado de análisis ("Todos", "Con análisis IA", "Sin análisis"), filtros de procedencia (institucional, LinkedIn, Google News, manual) y paginación.
   - Vista de expediente `DocumentDetailPage.tsx` con doble columna: cuerpo documental íntegro original a la izquierda y dictamen jurídico IA estructurado con citas literales a la derecha.
-- **Batería de Pruebas**:
-  - Backend: 9 tests específicos de integración en `tests/test_document_module.py` (731 passed en suite general).
-  - Frontend: 51 passed en Vitest (`src/test/documents.test.tsx` cubriendo listado, detalle analizado y detalle no analizado).
+- **Integración con Fuentes y Producción Validada**:
+  - Conexión con todas las fuentes existentes (>1102 documentos en producción).
+  - Cobertura de entradas institucionales, LinkedIn y Google News.
+  - Commits relevantes: `fcecf0a` (implementación inicial 11B), `0ee5f5c` (resolución de build TS), `3eb1479` (registro de rutas API).
+
+## Bloque 11C — Ingesta Manual de Documentos
+ESTADO: COMPLETADO Y OPERATIVO EN PRODUCCIÓN.
+
+Módulo de incorporación manual de resoluciones, demandas y enlaces externos al Fondo Documental con análisis IA desacoplado, deduplicación institucional y calidad de lectura legal.
+
+- **Fase 1: Infraestructura y Persistencia**:
+  - Dependencia `python-multipart` integrada en `requirements.txt`.
+  - Límite de carga en Nginx `client_max_body_size 25M` en `nginx.conf`.
+  - Tipo de fuente canónico `SourceType.MANUAL_UPLOAD = "manual_upload"`.
+  - Migración Alembic `0008_seed_manual_upload_source.py` y script `scripts/seed_source_manual_upload.py`.
+  - Fuente canónica creada en producción: UUID `00000000-0000-0000-0000-000000000001`, code `manual_upload`, nombre `Carga manual de documentos`.
+  - Commit: `d44cea0`.
+- **Fase 2: Backend Core Service**:
+  - Servicio `ManualDocumentIngestionService` en `app/services/manual_document_ingestion_service.py` (1048 líneas).
+  - Ingesta desde URL externa con extracción automática de título/contenido mediante trafilatura/BeautifulSoup.
+  - Ingesta desde archivo con soporte para PDF, TXT y MD hasta 25 MB (`MAX_FILE_BYTES = 25 * 1024 * 1024`).
+  - Validación de extensiones y magic bytes (detección y rechazo de PDFs corruptos o vacíos).
+  - Protección SSRF estricta contra IPs loopback, rangos privados RFC 1918 y metadata cloud (`169.254.169.254`).
+  - Deduplicación jerárquica fail-closed: detección por URL canónica normalizada y por hash de contenido SHA-256 (`content_hash`).
+  - Ejecución desacoplada de análisis IA (`_execute_background_analysis` vía `BackgroundTasks` de FastAPI) gobernada por parámetro `analyze_with_ai`.
+  - Commit: `c63e43e`.
+- **Fase 3: Endpoints API REST**:
+  - `POST /api/v1/documents/url`: Endpoint para ingesta manual por URL.
+  - `POST /api/v1/documents/upload`: Endpoint para carga manual por archivo multipart/form-data.
+  - Autenticación obligatoria mediante sesión `get_current_user`.
+  - Respuestas HTTP: `201 Created` con payload del documento o `409 Conflict` con esquema `DocumentDuplicateResponse` (`duplicate_reason`, `existing_document_id`, `existing_document_title`, `existing_document_url`).
+  - Commit: `dadf7ac`.
+- **Fase 4: Frontend UI (Modal y Gestión de Duplicados)**:
+  - Botón `"Añadir documento"` visible en cabecera de `DocumentsPage.tsx`.
+  - Componente modal interactivo `AddDocumentModal.tsx` (728 líneas):
+    - Tab `"Desde URL"`: validación de protocolo HTTP/HTTPS y metadatos opcionales.
+    - Tab `"Desde archivo"`: zona drag & drop, validación inmediata de extensión y tamaño.
+    - Selector conmutador `"Analizar con IA"` (activado por defecto).
+    - Metadatos opcionales desplegables: título personalizado, autor y fecha de emisión.
+    - Modal secundario ante HTTP 409 Conflict con enlace directo al documento existente para evitar duplicidades.
+    - Redirección automática tras éxito a `/documentos/:id`.
+  - Commit: `798c076`.
+- **Fase 5: Calidad, Limpieza y Reconstrucción de Texto PDF**:
+  - Sanitización de títulos: eliminación de extensiones `.pdf`, `.txt`, `.md` y de hashes SHA-256 o UUIDs en los títulos mostrados.
+  - Reconstrucción geométrica de texto PDF por coordenadas (`_reconstruct_page_text_geometrically`): extracción ordenada vertical y horizontalmente mediante `pypdf`, preservando párrafos reales y evitando fragmentaciones por columnas.
+  - Parser y formateador jurídico en `documentFormatter.tsx` (`healHistoricalContent`): unión tipográfica de palabras partidas por guion a final de línea y corrección de drop caps descolgados.
+  - Commits: `937c360` (limpieza de títulos y párrafos) y `b3e3a57` (reconstrucción geométrica PDF).
+
+- **Validación en Producción Dokploy**:
+  - Desplegado y verificado en Dokploy con build TypeScript exitoso.
+  - Migración 0008 aplicada en PostgreSQL de producción.
+  - Pruebas reales de ingesta por archivo PDF, ingesta por URL, respuesta 409 ante duplicados y visualización de expedientes con formato jurídico.
+  - Commit final desplegado: `b3e3a57` (*fix: improve PDF text reconstruction*).
 
 ## LinkedIn Source: Operational Readiness & Production Integration (Bloques 9C, 9C.1, 9C.2, 9E)
 
@@ -142,9 +195,8 @@ IMPLEMENTADO & AUDITADO
 
 ## Próximo paso exacto
 
-1. Ejecución manual del diagnóstico de salud en producción Dokploy:
-   `docker exec -it <backend_container> python -m scripts.diagnose_observatory_health`
-2. Revisar los resultados de las 17 fuentes institucionales y LinkedIn antes de autorizar el primer ciclo semanal completo.
+1. Supervisión del primer ciclo refresh completo en producción Dokploy con telemetría operacional activa.
+2. Revisión del dashboard de monitorización y consolidación de métricas de calidad y telemetría por fuente.
 
 ## Invariantes
 
