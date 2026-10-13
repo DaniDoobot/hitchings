@@ -1,7 +1,19 @@
 """API router aggregator."""
 
 from fastapi import APIRouter
-from app.api.v1.endpoints import health, sources, tracking, entries, ingestion_runs, analysis, observatory, auth, admin_users, taxonomy, documents
+from app.api.v1.endpoints import (
+    health,
+    sources,
+    tracking,
+    entries,
+    ingestion_runs,
+    analysis,
+    observatory,
+    auth,
+    admin_users,
+    taxonomy,
+    documents,
+)
 
 api_router = APIRouter()
 
