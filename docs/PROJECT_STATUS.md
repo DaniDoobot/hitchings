@@ -1,10 +1,10 @@
 # HITCHINGS — Current Project Status
 
 Fecha:
-2026-10-13
+2026-10-14
 
 HEAD:
-b3e3a57 — fix: improve PDF text reconstruction
+f3fbfe5 — feat: complete observatory tracking priorities
 
 ## Bloque 11B — Fondo Documental
 ESTADO: COMPLETADO Y OPERATIVO EN PRODUCCIÓN.
@@ -73,6 +73,46 @@ Módulo de incorporación manual de resoluciones, demandas y enlaces externos al
   - Migración 0008 aplicada en PostgreSQL de producción.
   - Pruebas reales de ingesta por archivo PDF, ingesta por URL, respuesta 409 ante duplicados y visualización de expedientes con formato jurídico.
   - Commit final desplegado: `b3e3a57` (*fix: improve PDF text reconstruction*).
+
+## Bloque 12 — Exportación Documental y Dossiers Temáticos Word (.docx)
+ESTADO: COMPLETADO Y OPERATIVO.
+
+Generación determinista de informes ejecutivos y exportación de expedientes a formato Microsoft Word (.docx) maquetados con estilo visual corporativo de HITCHINGS & GONZÁLEZ. 100% en memoria mediante `io.BytesIO`, sin persistencia de ficheros temporales y sin coste adicional de llamadas a IA.
+
+- **Fase 1: Servicio Backend de Exportación Word Individual (`DocumentExportService`)**:
+  - Generación de DOCX para documentos individuales con o sin análisis IA completado.
+  - Maquetación corporativa: paleta Navy corporativa, tipografía Calibri/Calibri Light, márgenes 2.5 cm, metadatos, dictamen jurídico con badges de relevancia y citas literales de evidencia con llamadas a pie de página.
+  - Commit: `a5b2596`.
+- **Fase 2: Endpoint HTTP de Exportación Individual**:
+  - `GET /api/v1/documents/{document_id}/export`: Autenticación obligatoria, validación de existencia, streaming HTTP con headers `Content-Disposition` y `application/vnd.openxmlformats-officedocument.wordprocessingml.document`.
+  - Commit: `7ab5d7b`.
+- **Fase 3: Integración Frontend en `DocumentDetailPage`**:
+  - Botón `"Exportar Word"` en cabecera de detalle de documento, descarga directa blob en navegador con feedback de carga y error.
+  - Commit: `331e2ba`.
+- **Fase 4A: Motor Backend de Dossiers Temáticos (`generate_dossier_docx`)**:
+  - Selección de 1 a 30 documentos por dossier.
+  - Portada ejecutiva corporativa, índice estructurado con metadatos clave y separación limpia por saltos de página de sección para cada documento.
+- **Fase 4B: Endpoint HTTP de Exportación de Dossiers**:
+  - `POST /api/v1/documents/dossier/export`: Validación de lista `document_ids` (1-30), preservación estricta de orden solicitado, rechazo fail-closed ante duplicados o IDs inexistentes, título de dossier opcional.
+- **Fase 4C: Frontend de Selección Múltiple y Exportación de Dossier**:
+  - Checkboxes en catálogo `DocumentsPage.tsx`, barra de acciones flotante con contador dinámico, límite estricto de 30 documentos (deshabilitación preventiva de checkboxes excedentes), modal de configuración y descarga en navegador.
+  - Commit: `8935405`.
+
+## Prioridades del Observatorio: Taxonomía y Blindaje de Fuentes
+ESTADO: COMPLETADO, DESPLEGADO Y VERIFICADO EN PRODUCCIÓN.
+
+- **Ampliación de la Matriz `HITCHINGS-v0.1` a 20 Tópicos**:
+  - Subtema nuevo `unfair_competition` ("Competencia desleal", prioridad 75, parent `competition_law_general`) con keywords y discovery queries específicas.
+  - Subtema nuevo `ai_intellectual_property` ("IA y Propiedad Intelectual", prioridad 70, parent `competition_law_general`) con keywords y discovery queries específicas.
+  - Incorporación de referencias normativas europeas clave: Arts. 101 y 102 TFUE (`cartels_agreements`, `abuse_dominance`), Directiva de Daños 2014/104 (`damages_actions`), Reglamento DMA (UE) 2022/1925 (`digital_competition_dma`) y Directiva (UE) 2020/1828 de Acciones de Representación y Tutela Colectiva (`collective_actions`).
+  - Sincronización idempotente (`upsert`) en `scripts/seed_tracking_v01.py` (520 líneas).
+  - **Ejecutado y verificado en Dokploy producción**: 20/20 tópicos confirmados en PostgreSQL de producción (`hitchings-news`).
+- **Blindaje y Exclusión de la Fuente Manual en el Scheduler**:
+  - Helper discriminador `is_manual_source()` en `WeeklyRefreshService`.
+  - Exclusión de `candidate_sources` en la ingesta periódica programada.
+  - Salida segura (`status="skipped"`, `errors=["manual_source_excluded"]`) en `_process_source()`.
+  - Guardia fail-closed en `IngestionService.ingest_source()` elevando `ValueError` si se invoca sobre la fuente manual.
+  - Commit: `f3fbfe5`.
 
 ## LinkedIn Source: Operational Readiness & Production Integration (Bloques 9C, 9C.1, 9C.2, 9E)
 
@@ -195,8 +235,9 @@ IMPLEMENTADO & AUDITADO
 
 ## Próximo paso exacto
 
-1. Supervisión del primer ciclo refresh completo en producción Dokploy con telemetría operacional activa.
-2. Revisión del dashboard de monitorización y consolidación de métricas de calidad y telemetría por fuente.
+1. Esperar al próximo ciclo automático del Scheduler (Lunes 19 de octubre de 2026, 06:00 Europe/Madrid).
+2. Ejecutar la batería de verificaciones READ-ONLY post-ciclo (ejecución de queries Google News, asignación de nuevos tópicos, 20 tópicos en snapshot, exclusión de fuente manual y 0 regresiones).
+3. NO hay ningún desarrollo pendiente bloqueante.
 
 ## Invariantes
 
