@@ -136,7 +136,15 @@ def seed() -> dict[str, int]:
                 "name": "Cárteles y acuerdos anticompetitivos",
                 "description": "Subtema provisional: Detección y sanción de cárteles y acuerdos colusorios.",
                 "priority": 60,
-                "keywords": ["cartel", "cartel damages", "anticompetitive agreements", "cártel", "acuerdos anticompetitivos"],
+                "keywords": [
+                    "cartel",
+                    "cartel damages",
+                    "anticompetitive agreements",
+                    "cártel",
+                    "acuerdos anticompetitivos",
+                    "101 TFEU",
+                    "Article 101 TFEU",
+                ],
                 "discovery_queries": ["cartel sanction decisions", "leniency competition", "acuerdos colusorios"],
             },
             {
@@ -145,7 +153,13 @@ def seed() -> dict[str, int]:
                 "name": "Abuso de posición dominante",
                 "description": "Subtema provisional: Conductas unilaterales y aplicación del Artículo 102 TFUE.",
                 "priority": 60,
-                "keywords": ["abuse of dominance", "dominant position", "Article 102 TFEU", "abuso de posición dominante"],
+                "keywords": [
+                    "abuse of dominance",
+                    "dominant position",
+                    "Article 102 TFEU",
+                    "102 TFEU",
+                    "abuso de posición dominante",
+                ],
                 "discovery_queries": ["Article 102 TFEU investigation", "abuse of dominant position ruling"],
             },
             {
@@ -163,7 +177,15 @@ def seed() -> dict[str, int]:
                 "name": "Competencia digital / Digital Markets Act",
                 "description": "Subtema provisional: Mercados digitales, plataformas gatekeeper y normativa DMA.",
                 "priority": 70,
-                "keywords": ["Digital Markets Act", "DMA", "gatekeepers", "mercados digitales", "digital platforms antitrust"],
+                "keywords": [
+                    "Digital Markets Act",
+                    "DMA",
+                    "gatekeepers",
+                    "mercados digitales",
+                    "digital platforms antitrust",
+                    "Regulation (EU) 2022/1925",
+                    "Reglamento (UE) 2022/1925",
+                ],
                 "discovery_queries": ["Digital Markets Act compliance", "gatekeeper designation DMA"],
             },
             {
@@ -184,6 +206,24 @@ def seed() -> dict[str, int]:
                 "keywords": ["competition case law", "CJEU competition", "General Court judgment", "jurisprudencia competencia"],
                 "discovery_queries": ["CJEU antitrust judgment", "General Court competition appeal"],
             },
+            {
+                "parent_code": "competition_law_general",
+                "code": "unfair_competition",
+                "name": "Competencia desleal",
+                "description": "Subtema provisional: Infracciones de competencia desleal y su persecución judicial o relación con antitrust.",
+                "priority": 75,
+                "keywords": ["competencia desleal", "unfair competition", "actos de competencia desleal"],
+                "discovery_queries": ["competencia desleal sentencia mercantil", "unfair competition damages"],
+            },
+            {
+                "parent_code": "competition_law_general",
+                "code": "ai_intellectual_property",
+                "name": "IA y Propiedad Intelectual",
+                "description": "Subtema provisional: Novedades en materia de inteligencia artificial, derechos de autor y propiedad intelectual.",
+                "priority": 70,
+                "keywords": ["IA", "AI", "propiedad intelectual", "copyright", "artificial intelligence"],
+                "discovery_queries": ["inteligencia artificial propiedad intelectual demanda", "AI copyright infringement"],
+            },
             # Under private_enforcement
             {
                 "parent_code": "private_enforcement",
@@ -200,7 +240,13 @@ def seed() -> dict[str, int]:
                 "name": "Acciones de daños",
                 "description": "Subtema provisional: Reclamaciones de indemnización de daños y perjuicios por ilícitos anticompetitivos.",
                 "priority": 70,
-                "keywords": ["damages actions", "competition damages claims", "reclamaciones de daños"],
+                "keywords": [
+                    "damages actions",
+                    "competition damages claims",
+                    "reclamaciones de daños",
+                    "Directive 2014/104",
+                    "Directiva 2014/104",
+                ],
                 "discovery_queries": ["antitrust damages claim", "reclamación daños cártel"],
             },
             {
@@ -209,8 +255,24 @@ def seed() -> dict[str, int]:
                 "name": "Acciones colectivas",
                 "description": "Subtema provisional: Mecanismos de tutela colectiva y class actions en competencia.",
                 "priority": 65,
-                "keywords": ["collective actions", "collective redress", "class actions", "acciones colectivas"],
-                "discovery_queries": ["opt-out collective action antitrust", "collective redress competition"],
+                "keywords": [
+                    "collective actions",
+                    "collective redress",
+                    "class actions",
+                    "acciones colectivas",
+                    "acción colectiva",
+                    "tutela colectiva",
+                    "acciones de representación",
+                    "representative actions",
+                    "Directive 2020/1828",
+                    "Directiva 2020/1828",
+                ],
+                "discovery_queries": [
+                    "opt-out collective action antitrust",
+                    "collective redress competition",
+                    "acciones colectivas competencia",
+                    "representative actions antitrust",
+                ],
             },
             {
                 "parent_code": "private_enforcement",
@@ -298,6 +360,11 @@ def seed() -> dict[str, int]:
                 topics_by_code[code] = topic
                 stats["topics_created"] += 1
             else:
+                existing_topic.keywords = item["keywords"]
+                existing_topic.discovery_queries = item["discovery_queries"]
+                existing_topic.name = item["name"]
+                existing_topic.description = item["description"]
+                existing_topic.priority = item["priority"]
                 topics_by_code[code] = existing_topic
                 stats["topics_existing"] += 1
 
@@ -330,6 +397,11 @@ def seed() -> dict[str, int]:
                 topics_by_code[code] = subtopic
                 stats["topics_created"] += 1
             else:
+                existing_subtopic.keywords = item["keywords"]
+                existing_subtopic.discovery_queries = item["discovery_queries"]
+                existing_subtopic.name = item["name"]
+                existing_subtopic.description = item["description"]
+                existing_subtopic.priority = item["priority"]
                 topics_by_code[code] = existing_subtopic
                 stats["topics_existing"] += 1
 

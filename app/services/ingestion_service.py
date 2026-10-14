@@ -135,6 +135,23 @@ class IngestionService:
         if not source.active:
             raise ValueError(f"Source '{source.name}' is inactive. Cannot ingest.")
 
+        from app.models.source import (
+            MANUAL_UPLOAD_SOURCE_ID,
+            MANUAL_UPLOAD_SOURCE_NAME,
+            MANUAL_UPLOAD_SOURCE_URL,
+        )
+        src_conf = source.config or {}
+        if (
+            source.id == MANUAL_UPLOAD_SOURCE_ID
+            or source.name == MANUAL_UPLOAD_SOURCE_NAME
+            or source.url == MANUAL_UPLOAD_SOURCE_URL
+            or (isinstance(src_conf, dict) and src_conf.get("ingestion_mode") == "manual")
+            or getattr(source, "category", None) == "manual_document"
+        ):
+            raise ValueError(
+                f"Source '{source.name}' is designated for manual ingestion and cannot be crawled automatically."
+            )
+
         provider = self.get_provider(source.provider)
         if not provider.is_enabled():
             raise ProviderDisabledError(f"Provider '{source.provider}' is disabled.")

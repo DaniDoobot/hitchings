@@ -1025,3 +1025,77 @@ def test_linkedin_activation_does_not_affect_institutional_sources(
     mock_ingest.ingest_source.assert_called_once_with(
         source_cnmc.id, db_session, lookback_days=report.lookback_days
     )
+
+
+def test_manual_upload_source_excluded_from_weekly_refresh(
+    db_session: Session, active_matrix: TrackingMatrix, test_sources: dict[str, Source]
+) -> None:
+    """Manual upload source must be explicitly excluded from automatic weekly refresh."""
+    from app.models.source import get_or_create_manual_source, MANUAL_UPLOAD_SOURCE_ID
+
+    manual_source = get_or_create_manual_source(db_session)
+    manual_source.active = True
+    db_session.commit()
+
+    source_cnmc = test_sources["cnmc"]
+    now = datetime.now(timezone.utc)
+
+    mock_ingest = MagicMock()
+    mock_ingest.ingest_source.return_value = IngestionResult(
+        ingestion_run_id=uuid.uuid4(),
+        source_id=source_cnmc.id,
+        status="success",
+        fetched=1,
+        created=1,
+        duplicates=0,
+        started_at=now,
+        finished_at=now,
+    )
+
+    service = WeeklyRefreshService(ingestion_service=mock_ingest)
+
+    # 1. Full run across all active sources
+    report = service.run_weekly_refresh(db=db_session, confirm_real_calls=True)
+
+    # Verify manual source was NOT attempted
+    attempted_ids = [s.source_id for s in report.per_source]
+    assert str(manual_source.id) not in attempted_ids
+    assert str(MANUAL_UPLOAD_SOURCE_ID) not in attempted_ids
+
+    # Verify regular sources were processed normally
+    assert any(s.source_name == "CNMC Test" for s in report.per_source)
+    assert not any(call[0][0] == manual_source.id for call in mock_ingest.ingest_source.call_args_list)
+
+    # 2. Direct filter targeting manual source must not execute crawler
+    report_filter = service.run_weekly_refresh(
+        db=db_session,
+        confirm_real_calls=True,
+        sources_filter=[manual_source.name],
+    )
+    assert report_filter.sources_attempted == 0
+    assert len(report_filter.per_source) == 0
+
+    # 3. Direct invocation of _process_source on manual source safely returns skipped
+    detail = service._process_source(
+        db=db_session,
+        source=manual_source,
+        lookback_days=8,
+        confirm_real_calls=True,
+    )
+    assert detail.status == "skipped"
+    assert "manual_source_excluded" in detail.errors or "manual_ingestion_mode" in detail.errors
+
+
+@pytest.mark.asyncio
+async def test_ingestion_service_rejects_manual_source(db_session: Session) -> None:
+    """IngestionService.ingest_source must fail-closed if invoked on a manual source."""
+    from app.models.source import get_or_create_manual_source
+    from app.services.ingestion_service import IngestionService
+
+    manual_source = get_or_create_manual_source(db_session)
+    manual_source.active = True
+    db_session.commit()
+
+    service = IngestionService()
+    with pytest.raises(ValueError, match="designated for manual ingestion"):
+        await service.ingest_source(manual_source.id, db_session)

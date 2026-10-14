@@ -15,7 +15,13 @@ from sqlalchemy.orm import Session
 from app.core.advisory_lock import RefreshAdvisoryLock
 from app.core.config import Settings, get_settings
 from app.models.entry import Entry
-from app.models.source import Source, SourceType
+from app.models.source import (
+    Source,
+    SourceType,
+    MANUAL_UPLOAD_SOURCE_ID,
+    MANUAL_UPLOAD_SOURCE_NAME,
+    MANUAL_UPLOAD_SOURCE_URL,
+)
 from app.models.tracking import TrackingMatrix
 from app.providers.direct_web.registry import DirectWebAdapterRegistry
 from app.services.direct_web_ingestion_service import DirectWebIngestionService
@@ -34,6 +40,22 @@ logger = logging.getLogger(__name__)
 def utc_now() -> datetime:
     """Return timezone-aware current UTC datetime."""
     return datetime.now(timezone.utc)
+
+
+def is_manual_source(source: Source) -> bool:
+    """Return True if source is designated exclusively for manual document ingestion."""
+    if source.id == MANUAL_UPLOAD_SOURCE_ID:
+        return True
+    if source.name == MANUAL_UPLOAD_SOURCE_NAME:
+        return True
+    if source.url == MANUAL_UPLOAD_SOURCE_URL:
+        return True
+    src_conf = source.config or {}
+    if isinstance(src_conf, dict) and src_conf.get("ingestion_mode") == "manual":
+        return True
+    if getattr(source, "category", None) == "manual_document":
+        return True
+    return False
 
 
 class SourceRefreshDetail(BaseModel):
@@ -173,7 +195,7 @@ class WeeklyRefreshService:
                 confirm_real_calls,
             )
 
-            # 2. Fetch active candidate sources
+            # 2. Fetch active candidate sources (excluding purely manual ingestion sources)
             query = db.query(Source).filter(Source.active.is_(True))
             all_active_sources = query.all()
 
@@ -181,10 +203,11 @@ class WeeklyRefreshService:
                 filter_set = {s.lower().strip() for s in sources_filter}
                 candidate_sources = [
                     s for s in all_active_sources
-                    if str(s.id).lower() in filter_set or s.name.lower() in filter_set
+                    if (str(s.id).lower() in filter_set or s.name.lower() in filter_set)
+                    and not is_manual_source(s)
                 ]
             else:
-                candidate_sources = all_active_sources
+                candidate_sources = [s for s in all_active_sources if not is_manual_source(s)]
 
             # 3. Process each source in isolation
             all_newly_created_entry_ids: list[uuid.UUID] = []
@@ -286,6 +309,15 @@ class WeeklyRefreshService:
         )
 
         try:
+            # 0. MANUAL INGESTION SOURCE (Exclusively reactive, excluded from periodic crawler)
+            if is_manual_source(source):
+                logger.info("[WeeklyRefresh] Source '%s' skipped (manual_source_excluded)", source.name)
+                detail.status = "skipped"
+                detail.errors.append("manual_source_excluded")
+                detail.finished_at = utc_now()
+                detail.duration_seconds = round((detail.finished_at - start_time).total_seconds(), 2)
+                return detail
+
             # 1. LINKEDIN
             if source.type == SourceType.LINKEDIN:
                 src_conf = source.config or {}
