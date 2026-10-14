@@ -123,3 +123,12 @@ export interface UploadDocumentParams {
   manual_author?: string | null;
   manual_published_at?: string | null;
 }
+
+// =============================================================================
+// Word Document Export Types (BLOQUE 12)
+// =============================================================================
+
+export interface DocumentExportResult {
+  blob: Blob;
+  filename: string;
+}

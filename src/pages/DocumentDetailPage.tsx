@@ -13,8 +13,10 @@ import {
   Building2,
   FileText,
   Info,
+  FileDown,
+  Loader2,
 } from 'lucide-react';
-import { documentsApi } from '../services/documentsApi';
+import { documentsApi, ApiError, triggerBrowserDownload } from '../services/documentsApi';
 import { DocumentDetail } from '../types/document';
 import { RelevanceBadge } from '../components/common/RelevanceBadge';
 import { TopicBadge } from '../components/common/TopicBadge';
@@ -28,6 +30,58 @@ export const DocumentDetailPage: React.FC = () => {
   const [doc, setDoc] = useState<DocumentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+
+  const mapExportErrorMessage = (err: unknown): string => {
+    if (err instanceof ApiError) {
+      switch (err.status) {
+        case 401:
+          return 'Sesión no válida o expirada. Por favor, vuelva a iniciar sesión.';
+        case 404:
+          return 'El documento solicitado no existe en el fondo documental.';
+        case 500:
+          return 'Error interno del servidor al exportar el documento. Inténtelo de nuevo más tarde.';
+        default:
+          return err.detail || 'No se pudo generar el documento Word. Inténtelo de nuevo.';
+      }
+    }
+    if (err instanceof Error) {
+      if (err.message.includes('401')) {
+        return 'Sesión no válida o expirada. Por favor, vuelva a iniciar sesión.';
+      }
+      if (err.message.includes('404')) {
+        return 'El documento solicitado no existe en el fondo documental.';
+      }
+      if (err.message.includes('500')) {
+        return 'Error interno del servidor al exportar el documento. Inténtelo de nuevo más tarde.';
+      }
+      return err.message;
+    }
+    return 'Error inesperado al generar el archivo Word.';
+  };
+
+  const handleExportWord = async () => {
+    if (!doc || exporting) return;
+    setExporting(true);
+    setExportError(null);
+    setExportSuccess(null);
+
+    try {
+      const { blob, filename } = await documentsApi.exportDocument(doc.id);
+      triggerBrowserDownload(blob, filename);
+      setExportSuccess(`Descarga iniciada: ${filename}`);
+      setTimeout(() => {
+        setExportSuccess(null);
+      }, 5000);
+    } catch (err: unknown) {
+      setExportError(mapExportErrorMessage(err));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   useEffect(() => {
     async function loadDoc() {
@@ -99,30 +153,86 @@ export const DocumentDetailPage: React.FC = () => {
 
       {/* Main Document Header Card */}
       <div className="bg-white rounded-lg border border-slate-200 p-6 md:p-8 shadow-sm">
-        <div className="flex flex-wrap items-center gap-2 mb-4">
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-800 border border-slate-200">
-            {doc.is_linkedin ? <User className="w-3.5 h-3.5" /> : <Building2 className="w-3.5 h-3.5" />}
-            <span>{doc.source.name}</span>
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-800 border border-slate-200">
+              {doc.is_linkedin ? <User className="w-3.5 h-3.5" /> : <Building2 className="w-3.5 h-3.5" />}
+              <span>{doc.source.name}</span>
+            </span>
 
-          {doc.has_analysis ? (
-            <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-              Análisis IA Vigente
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-600 border border-slate-200">
-              <Clock className="w-3.5 h-3.5 text-slate-400" />
-              Documento en Archivo Original (Sin análisis IA)
-            </span>
-          )}
+            {doc.has_analysis ? (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded bg-emerald-50 text-emerald-800 border border-emerald-200">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                Análisis IA Vigente
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded bg-slate-100 text-slate-600 border border-slate-200">
+                <Clock className="w-3.5 h-3.5 text-slate-400" />
+                Documento en Archivo Original (Sin análisis IA)
+              </span>
+            )}
 
-          {doc.source.tracked_entity_name && (
-            <span className="text-xs text-slate-500 font-medium ml-2">
-              Entidad: <strong>{doc.source.tracked_entity_name}</strong>
-            </span>
-          )}
+            {doc.source.tracked_entity_name && (
+              <span className="text-xs text-slate-500 font-medium ml-2">
+                Entidad: <strong>{doc.source.tracked_entity_name}</strong>
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={handleExportWord}
+            disabled={exporting}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-md text-xs font-semibold bg-navy-900 text-white hover:bg-navy-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm ml-auto"
+            title="Descargar dictamen o expediente en formato Word (.docx)"
+          >
+            {exporting ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-legal-gold" />
+                <span>Generando Word...</span>
+              </>
+            ) : (
+              <>
+                <FileDown className="w-3.5 h-3.5 text-legal-gold" />
+                <span>Exportar Word</span>
+              </>
+            )}
+          </button>
         </div>
+
+        {exportSuccess && (
+          <div className="mb-4 p-2.5 rounded-md bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+              <span>{exportSuccess}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setExportSuccess(null)}
+              className="text-emerald-700 hover:text-emerald-900 font-bold text-sm ml-2"
+              aria-label="Cerrar notificación"
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {exportError && (
+          <div className="mb-4 p-2.5 rounded-md bg-red-50 border border-red-200 text-xs text-red-800 flex items-center justify-between" role="alert">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0" />
+              <span>{exportError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setExportError(null)}
+              className="text-red-700 hover:text-red-900 font-bold text-sm ml-2"
+              aria-label="Cerrar alerta de error"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         <h1 className="text-2xl sm:text-3xl font-serif font-bold text-slate-900 leading-tight mb-4">
           {formatDocumentTitle(doc.title)}

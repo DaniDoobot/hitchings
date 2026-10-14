@@ -7,6 +7,7 @@ import {
   DocumentsQueryParams,
   IngestUrlRequest,
   UploadDocumentParams,
+  DocumentExportResult,
 } from '../types/document';
 import { MOCK_ENTRIES } from '../data/mockObservatoryData';
 
@@ -345,6 +346,89 @@ export class DocumentsApiService {
     }
 
     return (await res.json()) as DocumentIngestionResponse;
+  }
+
+  public async exportDocument(documentId: string): Promise<DocumentExportResult> {
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 120));
+      const entry = MOCK_ENTRIES.find((e) => e.entry_id === documentId);
+      const prefix = entry ? 'dictamen-' : 'expediente-';
+      const mockFilename = `${prefix}${documentId.slice(0, 8)}.docx`;
+      const mockBlob = new Blob(['PK\x03\x04mock-docx-binary-content'], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      return {
+        blob: mockBlob,
+        filename: mockFilename,
+      };
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/documents/${documentId}/export`, {
+      method: 'GET',
+      credentials: 'include',
+    });
+
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hitchings:unauthorized'));
+    }
+
+    if (!res.ok) {
+      let detail: string | undefined;
+      try {
+        const errorJson = await res.json();
+        detail = errorJson.detail;
+      } catch {
+        // Response might not be JSON (e.g. 500 or HTML error)
+      }
+      throw new ApiError(
+        detail || `Error al exportar documento: HTTP ${res.status}`,
+        res.status,
+        detail
+      );
+    }
+
+    const disposition = res.headers.get('content-disposition');
+    const filename =
+      parseContentDispositionFilename(disposition) || `documento-${documentId.slice(0, 8)}.docx`;
+    const blob = await res.blob();
+
+    return {
+      blob,
+      filename,
+    };
+  }
+}
+
+export function parseContentDispositionFilename(dispositionHeader: string | null): string | null {
+  if (!dispositionHeader) return null;
+  const utf8Match = dispositionHeader.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim());
+    } catch {
+      return utf8Match[1].trim();
+    }
+  }
+  const match = dispositionHeader.match(/filename="([^"]+)"/i) || dispositionHeader.match(/filename=([^;]+)/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return null;
+}
+
+export function triggerBrowserDownload(blob: Blob, filename: string): void {
+  if (typeof window === 'undefined') return;
+  const url = window.URL.createObjectURL(blob);
+  try {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } finally {
+    window.URL.revokeObjectURL(url);
   }
 }
 

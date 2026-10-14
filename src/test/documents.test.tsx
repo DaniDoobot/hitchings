@@ -4,7 +4,12 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { DocumentsPage } from '../pages/DocumentsPage';
 import { DocumentDetailPage } from '../pages/DocumentDetailPage';
 import { AddDocumentModal } from '../components/documents/AddDocumentModal';
-import { documentsApi, ApiError } from '../services/documentsApi';
+import {
+  documentsApi,
+  ApiError,
+  parseContentDispositionFilename,
+  triggerBrowserDownload,
+} from '../services/documentsApi';
 import { observatoryApi } from '../services/observatoryApi';
 import { formatDocumentTitle, renderDocumentContent, healHistoricalContent } from '../utils/documentFormatter';
 
@@ -927,6 +932,513 @@ THE ASSOCIATION OF CONSUMER SUPPORT ORGANISATIONS`;
       expect(
         screen.getByText(/assess XXXLutz's proposed acquisition of Porta, under the EU Merger Regulation\./)
       ).toBeInTheDocument();
+    });
+  });
+});
+
+describe('Word Document Export Integration (Bloque 12 Fase 3)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    if (!window.URL.createObjectURL) {
+      window.URL.createObjectURL = vi.fn();
+    }
+    if (!window.URL.revokeObjectURL) {
+      window.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const mockAnalysedDoc = {
+    id: 'doc-export-analysed',
+    title: 'Resolución Sancionadora CNMC: Cártel de Fabricantes',
+    url: 'https://cnmc.example.org/res-101',
+    canonical_url: 'https://cnmc.example.org/res-101',
+    author: 'CNMC',
+    published_at: '2026-10-01T10:00:00Z',
+    captured_at: '2026-10-01T10:00:00Z',
+    source: { id: 'src-cnmc', name: 'CNMC', tracked_entity_name: 'Consejo CNMC' },
+    is_linkedin: false,
+    source_origin_category: 'institutional',
+    content: 'Texto íntegro de la resolución sancionadora por cártel colusorio.',
+    excerpt: 'Extracto de la resolución sancionadora...',
+    has_analysis: true,
+    analysis: {
+      id: 'ana-export-1',
+      status: 'completed',
+      relevance_status: 'relevant' as const,
+      relevance_score: 96,
+      summary: 'Dictamen de relevancia jurídica confirmando infracción continuada.',
+      key_points: ['Infracción grave art. 1 LDC'],
+      canonical_topics: [{ code: 'antitrust', name: 'Antitrust' }],
+    },
+    evidence: {
+      source: 'deep',
+      summary_quotes: [{ source_field: 'content', quote: 'cártel colusorio' }],
+      key_points: [],
+    },
+  };
+
+  const mockUnanalysedDoc = {
+    id: 'doc-export-unanalysed',
+    title: 'Consulta Pública Previa MITECO',
+    url: 'https://miteco.example.org/consulta-202',
+    canonical_url: 'https://miteco.example.org/consulta-202',
+    author: 'MITECO',
+    published_at: '2026-10-05T10:00:00Z',
+    captured_at: '2026-10-05T10:00:00Z',
+    source: { id: 'src-miteco', name: 'MITECO' },
+    is_linkedin: false,
+    source_origin_category: 'institutional',
+    content: 'Texto original de la consulta pública sin análisis posterior.',
+    has_analysis: false,
+    analysis: null,
+    evidence: null,
+  };
+
+  // ===========================================================================
+  // API Service Unit Tests (Punto 11)
+  // ===========================================================================
+
+  describe('documentsApi.exportDocument service', () => {
+    it('parses Content-Disposition filename correctly', () => {
+      expect(
+        parseContentDispositionFilename('attachment; filename="dictamen-caso-123.docx"')
+      ).toBe('dictamen-caso-123.docx');
+      expect(
+        parseContentDispositionFilename('attachment; filename=expediente-456.docx')
+      ).toBe('expediente-456.docx');
+      expect(
+        parseContentDispositionFilename("attachment; filename*=UTF-8''resolucion-espanola.docx")
+      ).toBe('resolucion-espanola.docx');
+      expect(parseContentDispositionFilename(null)).toBeNull();
+      expect(parseContentDispositionFilename('inline')).toBeNull();
+    });
+
+    it('performs GET to correct endpoint with credentials and returns blob and filename', async () => {
+      const mockBlob = new Blob(['docx-content'], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          'content-type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          'content-disposition': 'attachment; filename="dictamen-prueba.docx"',
+        }),
+        blob: async () => mockBlob,
+      } as unknown as Response);
+
+      const result = await documentsApi.exportDocument('doc-test-123');
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v1/documents/doc-test-123/export'),
+        expect.objectContaining({
+          method: 'GET',
+          credentials: 'include',
+        })
+      );
+      expect(result.filename).toBe('dictamen-prueba.docx');
+      expect(result.blob).toBe(mockBlob);
+    });
+
+    it('handles 401 Unauthorized by dispatching hitchings:unauthorized and throwing ApiError', async () => {
+      const eventSpy = vi.fn();
+      window.addEventListener('hitchings:unauthorized', eventSpy);
+
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ detail: 'Not authenticated' }),
+      } as unknown as Response);
+
+      await expect(documentsApi.exportDocument('doc-test-123')).rejects.toThrow(ApiError);
+      expect(eventSpy).toHaveBeenCalled();
+      window.removeEventListener('hitchings:unauthorized', eventSpy);
+    });
+
+    it('handles 404 Not Found by throwing ApiError with status 404', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: async () => ({ detail: "Documento 'doc-999' no encontrado" }),
+      } as unknown as Response);
+
+      await expect(documentsApi.exportDocument('doc-999')).rejects.toMatchObject({
+        status: 404,
+        detail: "Documento 'doc-999' no encontrado",
+      });
+    });
+
+    it('handles 500 Internal Server Error by throwing ApiError with status 500', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ detail: 'Internal server error' }),
+      } as unknown as Response);
+
+      await expect(documentsApi.exportDocument('doc-500')).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+
+    it('triggerBrowserDownload creates anchor, triggers click and revokes object URL', () => {
+      const createObjectURLSpy = vi
+        .spyOn(window.URL, 'createObjectURL')
+        .mockReturnValue('blob:http://localhost/fake-uuid');
+      const revokeObjectURLSpy = vi
+        .spyOn(window.URL, 'revokeObjectURL')
+        .mockImplementation(() => {});
+
+      const clickSpy = vi.fn();
+      const origCreateElement = document.createElement.bind(document);
+      vi.spyOn(document, 'createElement').mockImplementation((tagName: string) => {
+        const el = origCreateElement(tagName);
+        if (tagName.toLowerCase() === 'a') {
+          el.click = clickSpy;
+        }
+        return el;
+      });
+
+      const testBlob = new Blob(['test']);
+      triggerBrowserDownload(testBlob, 'prueba.docx');
+
+      expect(createObjectURLSpy).toHaveBeenCalledWith(testBlob);
+      expect(clickSpy).toHaveBeenCalled();
+      expect(revokeObjectURLSpy).toHaveBeenCalledWith('blob:http://localhost/fake-uuid');
+    });
+  });
+
+  // ===========================================================================
+  // UI Integration Tests (Punto 10)
+  // ===========================================================================
+
+  describe('DocumentDetailPage UI Export Button', () => {
+    it('1. El boton "Exportar Word" aparece en la ficha', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Resolución Sancionadora CNMC: Cártel de Fabricantes')).toBeInTheDocument();
+      });
+
+      const exportBtn = screen.getByRole('button', { name: /Exportar Word/i });
+      expect(exportBtn).toBeInTheDocument();
+      expect(exportBtn).toBeEnabled();
+    });
+
+    it('2. El boton funciona para un documento con analisis IA', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      const exportSpy = vi.spyOn(documentsApi, 'exportDocument').mockResolvedValueOnce({
+        blob: new Blob(['fake-docx']),
+        filename: 'dictamen-resolucion-sancionadora-cnmc.docx',
+      });
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:http://localhost/123');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(exportSpy).toHaveBeenCalledWith('doc-export-analysed');
+        expect(
+          screen.getByText(/Descarga iniciada: dictamen-resolucion-sancionadora-cnmc\.docx/i)
+        ).toBeInTheDocument();
+      });
+    });
+
+    it('3. El boton funciona para un documento sin analisis IA', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockUnanalysedDoc);
+      const exportSpy = vi.spyOn(documentsApi, 'exportDocument').mockResolvedValueOnce({
+        blob: new Blob(['fake-docx-unanalysed']),
+        filename: 'expediente-consulta-publica-previa-miteco.docx',
+      });
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:http://localhost/456');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-unanalysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(exportSpy).toHaveBeenCalledWith('doc-export-unanalysed');
+        expect(
+          screen.getByText(/Descarga iniciada: expediente-consulta-publica-previa-miteco\.docx/i)
+        ).toBeInTheDocument();
+      });
+    });
+
+    it('4. Al pulsar muestra loading "Generando Word..." y el boton queda temporalmente deshabilitado', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+
+      let resolveExport: (val: { blob: Blob; filename: string }) => void;
+      const exportPromise = new Promise<{ blob: Blob; filename: string }>((resolve) => {
+        resolveExport = resolve;
+      });
+      vi.spyOn(documentsApi, 'exportDocument').mockReturnValueOnce(exportPromise);
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      const button = screen.getByRole('button', { name: /Exportar Word/i });
+      fireEvent.click(button);
+
+      // Verify loading state and disabled attribute
+      await waitFor(() => {
+        expect(screen.getByText(/Generando Word\.\.\./i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Generando Word\.\.\./i })).toBeDisabled();
+      });
+
+      // Complete export
+      resolveExport!({ blob: new Blob(['ok']), filename: 'test.docx' });
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeEnabled();
+      });
+    });
+
+    it('5 y 6. Procesa correctamente el Blob y utiliza el nombre devuelto por el backend', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      const testBlob = new Blob(['exact-binary-bytes']);
+      const customFilename = 'dictamen-personalizado-cnmc.docx';
+
+      vi.spyOn(documentsApi, 'exportDocument').mockResolvedValueOnce({
+        blob: testBlob,
+        filename: customFilename,
+      });
+
+      const createObjectUrlSpy = vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:http://test');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(createObjectUrlSpy).toHaveBeenCalledWith(testBlob);
+        expect(screen.getByText(new RegExp(customFilename, 'i'))).toBeInTheDocument();
+      });
+    });
+
+    it('7 y 8. Crea y dispara la descarga y libera el object URL', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockResolvedValueOnce({
+        blob: new Blob(['bytes']),
+        filename: 'dictamen-descarga.docx',
+      });
+
+      const createObjectUrlSpy = vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:http://download-url');
+      const revokeObjectUrlSpy = vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(createObjectUrlSpy).toHaveBeenCalled();
+        expect(revokeObjectUrlSpy).toHaveBeenCalledWith('blob:http://download-url');
+      });
+    });
+
+    it('9. Error 401 muestra feedback de sesion expirada', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockRejectedValueOnce(
+        new ApiError('Unauthorized', 401, 'Token expired')
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /Sesión no válida o expirada\. Por favor, vuelva a iniciar sesión\./i
+        );
+      });
+    });
+
+    it('10. Error 404 muestra feedback de documento no encontrado', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockRejectedValueOnce(
+        new ApiError('Not Found', 404, 'Documento no encontrado')
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /El documento solicitado no existe en el fondo documental\./i
+        );
+      });
+    });
+
+    it('11. Error 500 muestra feedback de error interno del servidor', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockRejectedValueOnce(
+        new ApiError('Internal Error', 500, 'Server crashed')
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /Error interno del servidor al exportar el documento\. Inténtelo de nuevo más tarde\./i
+        );
+      });
+    });
+
+    it('12. El boton vuelve a estar habilitado despues de un error para permitir reintento', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockRejectedValueOnce(
+        new ApiError('Server error', 500)
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      const button = screen.getByRole('button', { name: /Exportar Word/i });
+      fireEvent.click(button);
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+        expect(button).toBeEnabled();
+      });
+    });
+
+    it('13. No se produce navegacion ni reload de la pagina al pulsar exportar', async () => {
+      vi.spyOn(documentsApi, 'getDocument').mockResolvedValueOnce(mockAnalysedDoc);
+      vi.spyOn(documentsApi, 'exportDocument').mockResolvedValueOnce({
+        blob: new Blob(['fake-docx']),
+        filename: 'dictamen.docx',
+      });
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:http://test');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos/doc-export-analysed']}>
+          <Routes>
+            <Route path="/documentos/:documentId" element={<DocumentDetailPage />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /Exportar Word/i })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/Descarga iniciada/i)).toBeInTheDocument();
+      });
+
+      // Page stays on the same document view
+      expect(screen.getByText('Resolución Sancionadora CNMC: Cártel de Fabricantes')).toBeInTheDocument();
+      expect(screen.getByText('Cuerpo Documental Original')).toBeInTheDocument();
+      expect(screen.getByText('Dictamen Jurídico IA')).toBeInTheDocument();
     });
   });
 });
