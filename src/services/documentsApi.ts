@@ -397,6 +397,97 @@ export class DocumentsApiService {
       filename,
     };
   }
+
+  public async exportDossierDocx(
+    documentIds: string[],
+    title?: string
+  ): Promise<Blob> {
+    if (this.isMockMode) {
+      await new Promise((r) => setTimeout(r, 120));
+      const cleanTitle = (title || '').trim();
+      const mockFilename = cleanTitle
+        ? `dossier-${cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30)}.docx`
+        : 'dossier-documental-hitchings.docx';
+      const mockBlob = new Blob(['PK\x03\x04mock-dossier-binary-content'], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      (mockBlob as any).filename = mockFilename;
+      return mockBlob;
+    }
+
+    const payload: { document_ids: string[]; title?: string } = {
+      document_ids: documentIds,
+    };
+    if (title && title.trim()) {
+      payload.title = title.trim();
+    }
+
+    const res = await fetch(`${this.apiBaseUrl}/api/v1/documents/dossier/export`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+    });
+
+    if (res.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('hitchings:unauthorized'));
+    }
+
+    if (!res.ok) {
+      let detail: string | undefined;
+      try {
+        const errorJson = await res.json();
+        detail = errorJson.detail;
+      } catch {
+        // Response might not be JSON
+      }
+      throw new ApiError(
+        detail || `Error al exportar dossier: HTTP ${res.status}`,
+        res.status,
+        detail
+      );
+    }
+
+    const disposition = res.headers.get('content-disposition');
+    const filename =
+      parseContentDispositionFilename(disposition) || 'dossier-documental-hitchings.docx';
+    const blob = await res.blob();
+    (blob as any).filename = filename;
+
+    return blob;
+  }
+}
+
+export function mapDossierExportErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    if (err.status === 401) {
+      return 'Tu sesión ha expirado. Inicia sesión de nuevo.';
+    }
+    if (err.status === 404) {
+      return (
+        err.detail ||
+        'Uno o varios documentos seleccionados ya no están disponibles en el Fondo Documental.'
+      );
+    }
+    if (err.status === 422) {
+      return (
+        err.detail ||
+        'Los documentos seleccionados no cumplen las condiciones para generar el dossier.'
+      );
+    }
+    if (err.status >= 500) {
+      return 'No se ha podido generar el dossier. Inténtalo de nuevo.';
+    }
+    if (err.detail) {
+      return err.detail;
+    }
+  }
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return 'No se ha podido generar el dossier. Inténtalo de nuevo.';
 }
 
 export function parseContentDispositionFilename(dispositionHeader: string | null): string | null {

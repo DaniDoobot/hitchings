@@ -163,3 +163,40 @@ class DocumentDuplicateResponse(BaseModel):
     existing_entry_id: uuid.UUID
     duplicate_reason: str
     message: str
+
+
+class DossierExportRequest(BaseModel):
+    """Request payload for multi-document thematic dossier export (Bloque 12 — Fase 4B)."""
+
+    model_config = ConfigDict(from_attributes=False)
+
+    document_ids: list[uuid.UUID] = Field(
+        ...,
+        min_length=1,
+        max_length=30,
+        description="Ordered list of document UUIDs to compile into the dossier (1 to 30 items)",
+    )
+    title: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Optional custom title for the dossier cover page and header",
+    )
+
+    @field_validator("document_ids")
+    @classmethod
+    def validate_document_ids(cls, v: list[uuid.UUID]) -> list[uuid.UUID]:
+        if not v:
+            raise ValueError("El dossier debe contener al menos 1 documento.")
+        if len(v) > 30:
+            raise ValueError("El dossier no puede exceder el límite máximo de 30 documentos.")
+        if len(v) != len(set(v)):
+            raise ValueError("La lista de documentos contiene identificadores duplicados.")
+        return v
+
+    @field_validator("title")
+    @classmethod
+    def sanitize_title_input(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None:
+            trimmed = v.strip()
+            return trimmed if trimmed else None
+        return None

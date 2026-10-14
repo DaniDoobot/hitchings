@@ -1,6 +1,7 @@
-"""Unit tests for DocumentExportService (Bloque 12 — Fase 1).
+"""Unit tests for DocumentExportService (Bloque 12 — Fase 1 y Fase 4A).
 
 Covers:
+Fase 1 (Individual document export):
 1. Generación correcta de DOCX con análisis.
 2. Generación correcta de DOCX sin análisis.
 3. DOCX válido que pueda abrirse con python-docx.
@@ -17,13 +18,44 @@ Covers:
 14. Documento con campos opcionales ausentes.
 15. Documento largo sin errores de generación.
 16. Compatibilidad directa con el modelo ORM Entry.
+
+Fase 4A (Thematic multidocument dossier export):
+17. Dossier de 1 documento.
+18. Dossier de 2 documentos.
+19. Dossier de varios documentos (5 documentos).
+20. Dossier con todos los documentos con análisis.
+21. Dossier con documentos sin análisis.
+22. Dossier mixto con y sin análisis.
+23. Sección individual por documento.
+24. Salto de página entre documentos.
+25. Título personalizado del dossier.
+26. Título por defecto del dossier.
+27. Número correcto de documentos en portada e índice.
+28. Metadatos documentales de cada expediente.
+29. Relevancia y puntuación cuando existe análisis.
+30. Resumen analítico cuando existe análisis.
+31. Puntos clave cuando existen.
+32. Topics cuando existen.
+33. Evidencias y citas literales de respaldo cuando existen.
+34. Documento sin análisis claramente identificado.
+35. Contenido original incluido con reflow limpio.
+36. Colección vacía -> excepción DossierEmptyError (ValueError).
+37. Más de 30 documentos -> excepción DossierLimitExceededError (ValueError).
+38. Generación 100% en memoria sin archivos temporales en disco.
+39. Validación de estructura y márgenes del DOCX.
+40. Compatibilidad regresiva de exportación individual.
+41. Test de integración real del generador con inspección estructural.
+42. Sanitización de nombres de archivo de dossier.
 """
 
 import io
+import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 
 import docx
+from docx.oxml.ns import qn
 import pytest
 
 from app.models.entry import Entry
@@ -42,10 +74,27 @@ from app.schemas.observatory import (
     ObservatoryTopicItem,
 )
 from app.services.document_export_service import (
+    DEFAULT_DOSSIER_TITLE,
+    MAX_DOSSIER_DOCUMENTS,
     DocumentExportService,
+    DossierEmptyError,
+    DossierError,
+    DossierLimitExceededError,
     document_export_service,
+    sanitize_dossier_filename,
     sanitize_export_filename,
 )
+
+
+def _count_page_breaks(doc: docx.Document) -> int:
+    """Count page break elements in docx paragraphs."""
+    count = 0
+    for p in doc.paragraphs:
+        for r in p.runs:
+            for br in r._r.xpath("./w:br"):
+                if br.get(qn("w:type")) == "page":
+                    count += 1
+    return count
 
 
 @pytest.fixture
@@ -125,6 +174,78 @@ def sample_analysed_document() -> DocumentDetail:
 
 
 @pytest.fixture
+def sample_second_analysed_document() -> DocumentDetail:
+    """Fixture providing a second distinct analysed document from CNMC."""
+    doc_id = uuid.UUID("33333333-4444-5555-6666-777777777777")
+    source = DocumentSourceRef(
+        id=uuid.UUID("cccccccc-dddd-eeee-ffff-000000000000"),
+        name="Comisión Nacional de los Mercados y la Competencia",
+        type="website",
+        category="official",
+        tracked_entity_name="Dirección de Competencia",
+    )
+    analysis = DocumentAnalysisSummary(
+        id=uuid.UUID("88888888-7777-6666-5555-444444444444"),
+        status="completed",
+        relevance_status="relevant",
+        relevance_score=88,
+        confidence=0.91,
+        summary="La CNMC sanciona prácticas restrictivas consistentes en fijación vertical de precios de distribución.",
+        key_points=[
+            "Fijación vertical de precios de reventa prohibida por el artículo 1.1.a LDC.",
+            "Obligación de cesación inmediata bajo apercibimiento de multa coercitiva.",
+        ],
+        canonical_topics=[
+            ObservatoryTopicItem(code="vertical_restraints", name="Restricciones Verticales"),
+        ],
+        analyzed_at=datetime(2026, 5, 20, 9, 15, 0, tzinfo=timezone.utc),
+    )
+    evidence = ObservatoryEvidence(
+        source="deep",
+        summary_quotes=[
+            ObservatoryEvidenceQuote(
+                source_field="content",
+                quote="Las cláusulas contractuales limitaban la libertad de los distribuidores para fijar descuentos comerciales.",
+            )
+        ],
+        key_points=[
+            ObservatoryKeyPointEvidence(
+                point="Fijación vertical de precios de reventa prohibida por el artículo 1.1.a LDC.",
+                quotes=[
+                    ObservatoryEvidenceQuote(
+                        source_field="content",
+                        quote="Se constata la imposición sistemática de precios mínimos de venta al público en toda la red.",
+                    )
+                ],
+            )
+        ],
+    )
+    return DocumentDetail(
+        id=doc_id,
+        title="Resolución CNMC S/0045/25 sobre Sector Distribución",
+        url="https://cnmc.es/expedientes/s-0045-25",
+        canonical_url="https://cnmc.es/expedientes/s-0045-25",
+        author="Consejo de la CNMC",
+        published_at=datetime(2026, 5, 20, 0, 0, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 5, 20, 11, 0, 0, tzinfo=timezone.utc),
+        content_type="judicial_decision",
+        language="es",
+        source=source,
+        content=(
+            "RESOLUCIÓN DEL CONSEJO DE LA CNMC:\n\n"
+            "PRIMERO.- Se declara la existencia de infracción del artículo 1 LDC.\n"
+            "Las cláusulas contractuales limitaban la libertad de los distribuidores para fijar descuentos comerciales.\n"
+            "Se constata la imposición sistemática de precios mínimos de venta al público en toda la red.\n\n"
+            "SEGUNDO.- Se imponen sanciones por importe acumulado de 3.500.000 euros."
+        ),
+        excerpt="Resolución sancionadora por fijación vertical de precios...",
+        has_analysis=True,
+        analysis=analysis,
+        evidence=evidence,
+    )
+
+
+@pytest.fixture
 def sample_unanalysed_document() -> DocumentDetail:
     """Fixture providing a DocumentDetail from archive with no AI analysis."""
     doc_id = uuid.UUID("22222222-3333-4444-5555-666666666666")
@@ -152,9 +273,38 @@ def sample_unanalysed_document() -> DocumentDetail:
     )
 
 
-# ---------------------------------------------------------------------------
-# Test Cases
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def sample_third_document() -> DocumentDetail:
+    """Fixture providing a manual upload document without analysis."""
+    doc_id = uuid.UUID("44444444-5555-6666-7777-888888888888")
+    source = DocumentSourceRef(
+        id=uuid.UUID("dddddddd-eeee-ffff-0000-111111111111"),
+        name="Aportación Manual",
+        type="manual_upload",
+        category="internal",
+    )
+    return DocumentDetail(
+        id=doc_id,
+        title="Manual Interno de Cumplimiento Antitrust 2026",
+        url="upload://manual/44444444/compliance.pdf",
+        author="Área de Compliance",
+        published_at=datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 6, 15, 9, 30, 0, tzinfo=timezone.utc),
+        content_type="manual_upload",
+        language="es",
+        source=source,
+        content="Directrices internas de prevención y detección temprana de conductas colusorias y acuerdos prohibidos.",
+        excerpt="Manual corporativo de compliance...",
+        raw_metadata={"filename": "compliance.pdf", "file_size_bytes": 1048576},
+        has_analysis=False,
+        analysis=None,
+        evidence=None,
+    )
+
+
+# ===========================================================================
+# Bloque 12 — Fase 1: Tests Existentes de Exportación Individual
+# ===========================================================================
 
 def test_1_generate_docx_with_analysis(sample_analysed_document: DocumentDetail):
     """1. Generación correcta de DOCX con análisis."""
@@ -335,7 +485,7 @@ def test_13_special_characters_and_accents_in_filename():
     assert "?" not in filename
     assert "/" not in filename
     assert "'" not in filename
-    assert "ñ" not in filename  # Convertido a n
+    assert "ñ" not in filename
     assert len(filename) <= len("dictamen-") + 50 + len(".docx")
 
 
@@ -412,3 +562,456 @@ def test_16_generate_docx_from_entry_model_directly():
     assert "Resolución CNMC sobre Telecomunicaciones" in all_text
     assert "Comisión Nacional de los Mercados" in table_text
     assert "Expediente en archivo documental original sin análisis automatizado" in all_text
+
+
+# ===========================================================================
+# Bloque 12 — Fase 4A: Tests Específicos para Dossier Temático / Multidocumento
+# ===========================================================================
+
+def test_17_dossier_1_single_document(sample_analysed_document: DocumentDetail):
+    """17. Dossier de 1 documento genera DOCX válido con portada, índice y capítulo."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    assert isinstance(buf, io.BytesIO)
+    bytes_data = buf.getvalue()
+    assert bytes_data.startswith(b"PK")
+
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "DOSSIER DOCUMENTAL" in all_text
+    assert "Dossier documental HITCHINGS" in all_text
+    assert "ÍNDICE DE EXPEDIENTES Y DOCUMENTOS INCLUIDOS" in all_text
+    assert "DOCUMENTO 1 DE 1" in all_text
+    assert "Sentencia TS 452/2026 sobre Cártel de Fabricantes" in all_text
+
+
+def test_18_dossier_2_two_documents(
+    sample_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """18. Dossier de 2 documentos contiene ambos títulos, índice de 2 filas y capítulos numerados."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_unanalysed_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "DOCUMENTO 1 DE 2" in all_text
+    assert "DOCUMENTO 2 DE 2" in all_text
+    assert "Sentencia TS 452/2026 sobre Cártel de Fabricantes" in all_text
+    assert "Real Decreto-ley 7/2026 sobre Transparencia de Mercados" in all_text
+
+    # Verifica tabla del índice (la segunda tabla del documento, o la tabla con 5 columnas)
+    index_table = next(t for t in doc.tables if len(t.columns) == 5)
+    assert len(index_table.rows) == 3  # 1 cabecera + 2 expedientes
+    assert "Sentencia TS 452/2026" in index_table.rows[1].cells[1].text
+    assert "Real Decreto-ley 7/2026" in index_table.rows[2].cells[1].text
+
+
+def test_19_dossier_3_multiple_documents(
+    sample_analysed_document: DocumentDetail,
+    sample_second_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+    sample_third_document: DocumentDetail,
+):
+    """19. Dossier de varios documentos (4 documentos) refleja orden y total exacto."""
+    docs = [
+        sample_analysed_document,
+        sample_unanalysed_document,
+        sample_second_analysed_document,
+        sample_third_document,
+    ]
+    buf = document_export_service.generate_dossier_docx(docs)
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    for i in range(1, 5):
+        assert f"DOCUMENTO {i} DE 4" in all_text
+
+    index_table = next(t for t in doc.tables if len(t.columns) == 5)
+    assert len(index_table.rows) == 5
+
+
+def test_20_dossier_4_all_documents_analysed(
+    sample_analysed_document: DocumentDetail,
+    sample_second_analysed_document: DocumentDetail,
+):
+    """20. Dossier con todos los documentos analizados contiene dictámenes y ninguna advertencia de archivo."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_second_analysed_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Expediente en archivo documental original sin análisis" not in all_text
+    assert "Documento incorporado sin análisis IA" not in all_text
+
+    table_cells = [c.text for t in doc.tables for r in t.rows for c in r.cells]
+    table_text = " ".join(table_cells)
+
+    assert "RELEVANTE (95/100)" in table_text
+    assert "RELEVANTE (88/100)" in table_text
+
+
+def test_21_dossier_5_all_documents_unanalysed(
+    sample_unanalysed_document: DocumentDetail,
+    sample_third_document: DocumentDetail,
+):
+    """21. Dossier con documentos sin análisis no inventa conclusiones y los etiqueta claramente."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_unanalysed_document,
+        sample_third_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "DICTAMEN JURÍDICO Y CALIFICACIÓN DE RELEVANCIA" not in all_text
+    assert "PUNTOS CLAVE Y CRITERIOS DOCTRINALES" not in all_text
+    assert "FUNDAMENTACIÓN Y CITAS LITERALES" not in all_text
+    assert "Documento incorporado sin análisis IA" in all_text
+
+    index_table = next(t for t in doc.tables if len(t.columns) == 5)
+    assert "Sin análisis IA" in index_table.rows[1].cells[4].text
+    assert "Sin análisis IA" in index_table.rows[2].cells[4].text
+
+
+def test_22_dossier_6_mixed_documents(
+    sample_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """22. Dossier mixto con y sin análisis maneja ambos tipos de forma limpia y diferenciada."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_unanalysed_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    # El documento analizado tiene dictamen
+    assert "DICTAMEN JURÍDICO Y CALIFICACIÓN DE RELEVANCIA" in all_text
+    assert "Calificación de impacto: RELEVANTE" in all_text
+    assert "95/100" in all_text
+
+    # El documento sin análisis tiene aviso explícito
+    assert "Documento incorporado sin análisis IA" in all_text
+
+
+def test_23_dossier_7_individual_sections_per_document(
+    sample_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """23. Cada documento cuenta con su propia ficha técnica y capítulo segregado."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_unanalysed_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "DOCUMENTO 1 DE 2" in all_text
+    assert "DOCUMENTO 2 DE 2" in all_text
+
+    table_cells = [c.text for t in doc.tables for r in t.rows for c in r.cells]
+    table_text = " ".join(table_cells)
+
+    assert "Tribunal Supremo — Sala Tercera" in table_text
+    assert "Boletín Oficial del Estado" in table_text
+
+
+def test_24_dossier_8_page_breaks_between_documents(
+    sample_analysed_document: DocumentDetail,
+    sample_second_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """24. Saltos de página reales separan portada, índice y cada documento."""
+    # 1 documento -> Portada + Índice = 2 saltos
+    doc1 = docx.Document(document_export_service.generate_dossier_docx([sample_analysed_document]))
+    assert _count_page_breaks(doc1) == 2
+
+    # 2 documentos -> Portada + Índice + Doc 1 = 3 saltos
+    doc2 = docx.Document(document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_unanalysed_document,
+    ]))
+    assert _count_page_breaks(doc2) == 3
+
+    # 3 documentos -> Portada + Índice + Doc 1 + Doc 2 = 4 saltos
+    doc3 = docx.Document(document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_second_analysed_document,
+        sample_unanalysed_document,
+    ]))
+    assert _count_page_breaks(doc3) == 4
+
+
+def test_25_dossier_9_custom_title(sample_analysed_document: DocumentDetail):
+    """25. Título personalizado del dossier se plasma en portada y metadatos."""
+    custom = "Dossier Estratégico de Cárteles y Colusión Empresarial 2026"
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document], title=custom)
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert custom in all_text
+
+
+def test_26_dossier_10_default_title(sample_analysed_document: DocumentDetail):
+    """26. Título por defecto se utiliza cuando title es None o espacios en blanco."""
+    buf_none = document_export_service.generate_dossier_docx([sample_analysed_document], title=None)
+    doc_none = docx.Document(buf_none)
+    assert DEFAULT_DOSSIER_TITLE in "\n".join(p.text for p in doc_none.paragraphs)
+
+    buf_empty = document_export_service.generate_dossier_docx([sample_analysed_document], title="   ")
+    doc_empty = docx.Document(buf_empty)
+    assert DEFAULT_DOSSIER_TITLE in "\n".join(p.text for p in doc_empty.paragraphs)
+
+
+def test_27_dossier_11_correct_documents_count(
+    sample_analysed_document: DocumentDetail,
+    sample_second_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """27. Número correcto de documentos reflejado en portada e índice."""
+    docs = [sample_analysed_document, sample_second_analysed_document, sample_unanalysed_document]
+    buf = document_export_service.generate_dossier_docx(docs)
+    doc = docx.Document(buf)
+
+    # Portada metadatos
+    cover_table = doc.tables[0]
+    cover_content = " ".join(c.text for r in cover_table.rows for c in r.cells)
+    assert "Total de documentos incluidos 3" in cover_content
+
+    # Índice tabla
+    index_table = next(t for t in doc.tables if len(t.columns) == 5)
+    assert len(index_table.rows) == 4  # 1 cabecera + 3 docs
+
+
+def test_28_dossier_12_documentary_metadata(sample_analysed_document: DocumentDetail):
+    """28. Metadatos documentales de cada expediente integrados en la Ficha Técnica."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+
+    table_cells = [c.text for t in doc.tables for r in t.rows for c in r.cells]
+    table_text = " ".join(table_cells)
+
+    assert "Tribunal Supremo — Sala Tercera" in table_text
+    assert "Sala de lo Contencioso-Administrativo" in table_text
+    assert "Magistrado Ponente D. Fernando Gómez" in table_text
+    assert "14/05/2026" in table_text
+    assert "Resolución Judicial" in table_text
+    assert "https://supremo.poderjudicial.es/sentencias/452-2026" in table_text
+
+
+def test_29_dossier_13_relevance_when_present(sample_analysed_document: DocumentDetail):
+    """29. Relevancia y puntuación cuando existe análisis."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Calificación de impacto: RELEVANTE" in all_text
+    assert "Puntuación de relevancia: 95/100" in all_text
+
+
+def test_30_dossier_14_summary_when_present(sample_analysed_document: DocumentDetail):
+    """30. Resumen analítico cuando existe análisis."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "La Sala desestima el recurso y confirma la existencia de cártel colusorio sancionado." in all_text
+
+
+def test_31_dossier_15_key_points_when_present(sample_analysed_document: DocumentDetail):
+    """31. Puntos clave cuando existen en el análisis."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Infracción muy grave del artículo 1 de la Ley de Defensa de la Competencia." in all_text
+    assert "Desestimación de la prescripción extintiva alegada por la recurrente." in all_text
+
+
+def test_32_dossier_16_topics_when_present(sample_analysed_document: DocumentDetail):
+    """32. Topics cuando existen en el análisis."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Cárteles y Colusión" in all_text
+    assert "Derecho Procesal Competencial" in all_text
+
+
+def test_33_dossier_17_evidence_quotes_when_present(sample_analysed_document: DocumentDetail):
+    """33. Evidencias y citas literales de respaldo (Grounding) cuando existen."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Los intercambios de información sensible sobre precios futuros constituyen una infracción por objeto." in all_text
+    assert "Queda acreditada la concurrencia de voluntades para falsear la competencia en el mercado nacional." in all_text
+    assert "[Cita literal" in all_text
+
+
+def test_34_dossier_18_unanalysed_document_clearly_identified(sample_unanalysed_document: DocumentDetail):
+    """34. Documento sin análisis claramente identificado como registro de archivo original."""
+    buf = document_export_service.generate_dossier_docx([sample_unanalysed_document])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "Documento incorporado sin análisis IA" in all_text
+    assert "Expediente en archivo documental original sin análisis automatizado vigente en la matriz de seguimiento." in all_text
+    assert "DICTAMEN JURÍDICO" not in all_text
+
+
+def test_35_dossier_19_original_content_included(
+    sample_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """35. Contenido original incluido con reflow limpio sin saltos artificiales."""
+    buf = document_export_service.generate_dossier_docx([
+        sample_analysed_document,
+        sample_unanalysed_document,
+    ])
+    doc = docx.Document(buf)
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+
+    assert "ANTECEDENTES DE HECHO:" in all_text
+    assert "Desestimamos íntegramente el recurso con imposición de costas." in all_text
+    assert "Artículo único. Medidas de transparencia y supervisión." in all_text
+
+
+def test_36_dossier_20_empty_collection_raises_error():
+    """36. Colección vacía eleva DossierEmptyError (subclase de ValueError)."""
+    with pytest.raises(DossierEmptyError) as exc_info:
+        document_export_service.generate_dossier_docx([])
+
+    assert "al menos 1 documento" in str(exc_info.value)
+    assert issubclass(DossierEmptyError, ValueError)
+    assert issubclass(DossierEmptyError, DossierError)
+
+
+def test_37_dossier_21_more_than_30_documents_raises_error(sample_unanalysed_document: DocumentDetail):
+    """37. Más de 30 documentos eleva DossierLimitExceededError (subclase de ValueError)."""
+    oversized = [sample_unanalysed_document] * 31
+    with pytest.raises(DossierLimitExceededError) as exc_info:
+        document_export_service.generate_dossier_docx(oversized)
+
+    assert "límite máximo de 30 documentos" in str(exc_info.value)
+    assert issubclass(DossierLimitExceededError, ValueError)
+    assert issubclass(DossierLimitExceededError, DossierError)
+
+    # Exactamente 30 documentos debe permitirse
+    exact_30 = [sample_unanalysed_document] * MAX_DOSSIER_DOCUMENTS
+    buf = document_export_service.generate_dossier_docx(exact_30)
+    assert isinstance(buf, io.BytesIO)
+
+
+def test_38_dossier_22_no_temporary_files_created(sample_analysed_document: DocumentDetail):
+    """38. Generación 100% en memoria sin creación de archivos temporales en disco."""
+    cwd_files_before = set(os.listdir("."))
+    temp_files_before = set(os.listdir(tempfile.gettempdir()))
+
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+
+    cwd_files_after = set(os.listdir("."))
+    temp_files_after = set(os.listdir(tempfile.gettempdir()))
+
+    assert cwd_files_after == cwd_files_before
+    # No .docx or temporary export files left in temp
+    new_temp = temp_files_after - temp_files_before
+    assert not any(f.endswith(".docx") for f in new_temp)
+
+    assert isinstance(buf, io.BytesIO)
+    assert buf.tell() == 0
+
+
+def test_39_dossier_23_valid_docx_structure(sample_analysed_document: DocumentDetail):
+    """39. Validación de estructura y márgenes del DOCX generado."""
+    buf = document_export_service.generate_dossier_docx([sample_analysed_document])
+    doc = docx.Document(buf)
+
+    assert len(doc.sections) >= 1
+    section = doc.sections[0]
+    # Márgenes de 1 pulgada (914400 EMUs)
+    assert section.top_margin.inches == pytest.approx(1.0, 0.01)
+    assert section.bottom_margin.inches == pytest.approx(1.0, 0.01)
+    assert section.left_margin.inches == pytest.approx(1.0, 0.01)
+    assert section.right_margin.inches == pytest.approx(1.0, 0.01)
+
+
+def test_40_dossier_24_existing_single_export_still_works(
+    sample_analysed_document: DocumentDetail,
+    sample_unanalysed_document: DocumentDetail,
+):
+    """40. Compatibilidad regresiva total de la exportación individual existente."""
+    buf_ana = document_export_service.generate_docx(sample_analysed_document)
+    assert isinstance(buf_ana, io.BytesIO)
+    doc_ana = docx.Document(buf_ana)
+    assert "Sentencia TS 452/2026 sobre Cártel de Fabricantes" in "\n".join(p.text for p in doc_ana.paragraphs)
+
+    buf_unan = document_export_service.generate_docx(sample_unanalysed_document)
+    assert isinstance(buf_unan, io.BytesIO)
+    doc_unan = docx.Document(buf_unan)
+    assert "Real Decreto-ley 7/2026 sobre Transparencia de Mercados" in "\n".join(p.text for p in doc_unan.paragraphs)
+
+
+def test_41_dossier_25_real_integration_inspection(
+    sample_analysed_document: DocumentDetail,
+    sample_second_analysed_document: DocumentDetail,
+    sample_third_document: DocumentDetail,
+):
+    """41. Test de integración real del generador con inspección exhaustiva de todos los elementos."""
+    docs = [sample_analysed_document, sample_second_analysed_document, sample_third_document]
+    title = "Dossier Integral de Derecho de la Competencia y Regulación de Mercados"
+
+    buf = document_export_service.generate_dossier_docx(docs, title=title)
+    doc = docx.Document(buf)
+
+    # 1. Portada
+    all_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "HITCHINGS" in all_text
+    assert title in all_text
+
+    # 2. Número de documentos
+    assert "DOCUMENTO 1 DE 3" in all_text
+    assert "DOCUMENTO 2 DE 3" in all_text
+    assert "DOCUMENTO 3 DE 3" in all_text
+
+    # 3. Títulos en orden exacto
+    assert "Sentencia TS 452/2026 sobre Cártel de Fabricantes" in all_text
+    assert "Resolución CNMC S/0045/25 sobre Sector Distribución" in all_text
+    assert "Manual Interno de Cumplimiento Antitrust 2026" in all_text
+
+    # 4. Estados de análisis
+    assert "RELEVANTE" in all_text
+    assert "Documento incorporado sin análisis IA" in all_text
+
+    # 5. Contenidos originales
+    assert "ANTECEDENTES DE HECHO:" in all_text
+    assert "RESOLUCIÓN DEL CONSEJO DE LA CNMC:" in all_text
+    assert "Directrices internas de prevención y detección temprana" in all_text
+
+    # 6. Saltos de página
+    # Portada (1) + Índice (1) + Doc 1 (1) + Doc 2 (1) = 4 saltos
+    assert _count_page_breaks(doc) == 4
+
+    # 7. Cero HTML accidental
+    for bad_tag in ["<html", "<body", "<div>", "<span>", "<script", "</p>"]:
+        assert bad_tag not in all_text
+
+
+def test_42_dossier_filename_sanitization():
+    """42. Sanitización determinista de nombres de fichero de dossier."""
+    # Título estándar
+    name1 = sanitize_dossier_filename("Dossier de Cárteles y Competencia 2026")
+    assert name1 == "dossier-carteles-y-competencia-2026.docx"
+
+    # Título con tildes y caracteres especiales (nº normaliza 'º' a 'o' en NFKD)
+    name2 = sanitize_dossier_filename("¿Resolución nº 14/2026: 'Sector Lácteo'?")
+    assert name2 == "dossier-resolucion-no-14-2026-sector-lacteo.docx"
+
+    # Fallback sin título
+    assert sanitize_dossier_filename(None) == "dossier-documental-hitchings.docx"
+    assert sanitize_dossier_filename("") == "dossier-documental-hitchings.docx"
+    assert sanitize_dossier_filename("   ") == "dossier-documental-hitchings.docx"

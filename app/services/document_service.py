@@ -232,24 +232,8 @@ def list_documents(
     )
 
 
-def get_document_detail(db: Session, document_id: uuid.UUID) -> Optional[DocumentDetail]:
-    """Retrieve full detail of a document including full text and evidence if analyzed."""
-    hierarchy = build_topic_hierarchy(db)
-
-    stmt = (
-        select(Entry)
-        .where(Entry.id == document_id)
-        .options(
-            selectinload(Entry.source).selectinload(Source.tracked_entity),
-            selectinload(Entry.analyses).selectinload(EntryAnalysis.topics).selectinload(EntryAnalysisTopic.topic),
-            selectinload(Entry.analyses).selectinload(EntryAnalysis.calls),
-        )
-    )
-
-    entry = db.execute(stmt).scalars().first()
-    if not entry:
-        return None
-
+def _build_document_detail(entry: Entry, hierarchy: Any) -> DocumentDetail:
+    """Build a DocumentDetail schema from an Entry model and preloaded relationships."""
     current_ana = select_current_analysis(entry, analyses=list(entry.analyses))
     has_current_ana = current_ana is not None and current_ana.status == "completed"
 
@@ -280,3 +264,58 @@ def get_document_detail(db: Session, document_id: uuid.UUID) -> Optional[Documen
         analysis=analysis_summary,
         evidence=evidence,
     )
+
+
+def get_document_detail(db: Session, document_id: uuid.UUID) -> Optional[DocumentDetail]:
+    """Retrieve full detail of a document including full text and evidence if analyzed."""
+    hierarchy = build_topic_hierarchy(db)
+
+    stmt = (
+        select(Entry)
+        .where(Entry.id == document_id)
+        .options(
+            selectinload(Entry.source).selectinload(Source.tracked_entity),
+            selectinload(Entry.analyses).selectinload(EntryAnalysis.topics).selectinload(EntryAnalysisTopic.topic),
+            selectinload(Entry.analyses).selectinload(EntryAnalysis.calls),
+        )
+    )
+
+    entry = db.execute(stmt).scalars().first()
+    if not entry:
+        return None
+
+    return _build_document_detail(entry, hierarchy)
+
+
+def get_document_details_by_ids(
+    db: Session,
+    document_ids: Sequence[uuid.UUID],
+) -> dict[uuid.UUID, DocumentDetail]:
+    """Retrieve full details for multiple documents by ID in a single batch query without N+1.
+
+    Guarantees:
+    - 0 N+1: batch eager loading with selectinload for source, tracked entity, analyses, topics, and calls.
+    - Topic hierarchy built once per request.
+    - Returns a mapping of document_id -> DocumentDetail for fast, deterministic ordering.
+    """
+    if not document_ids:
+        return {}
+
+    hierarchy = build_topic_hierarchy(db)
+
+    stmt = (
+        select(Entry)
+        .where(Entry.id.in_(document_ids))
+        .options(
+            selectinload(Entry.source).selectinload(Source.tracked_entity),
+            selectinload(Entry.analyses).selectinload(EntryAnalysis.topics).selectinload(EntryAnalysisTopic.topic),
+            selectinload(Entry.analyses).selectinload(EntryAnalysis.calls),
+        )
+    )
+
+    entries = db.execute(stmt).scalars().all()
+    result: dict[uuid.UUID, DocumentDetail] = {}
+    for entry in entries:
+        result[entry.id] = _build_document_detail(entry, hierarchy)
+
+    return result

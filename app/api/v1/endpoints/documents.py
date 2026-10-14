@@ -34,10 +34,16 @@ from app.schemas.document import (
     DocumentDuplicateResponse,
     DocumentIngestionResponse,
     DocumentListResponse,
+    DossierExportRequest,
     IngestUrlRequest,
 )
 from app.services import document_service
-from app.services.document_export_service import document_export_service
+from app.services.document_export_service import (
+    DossierEmptyError,
+    DossierError,
+    DossierLimitExceededError,
+    document_export_service,
+)
 from app.services.manual_document_ingestion_service import (
     DocumentExtractionError,
     FileSizeLimitExceededError,
@@ -380,6 +386,87 @@ def get_document_detail(
 
 
 DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@router.post(
+    "/dossier/export",
+    summary="Export multi-document thematic dossier to Word (.docx)",
+    response_class=Response,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {DOCX_MIME_TYPE: {}},
+            "description": "Dossier temático en formato Microsoft Word (.docx)",
+        },
+        status.HTTP_400_BAD_REQUEST: {
+            "description": "Parámetros inválidos en la solicitud del dossier",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Uno o varios documentos solicitados no fueron encontrados",
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "description": "Error de validación en los identificadores o formato de solicitud",
+        },
+    },
+)
+def export_dossier_docx(
+    payload: DossierExportRequest,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Generate and download a multi-document thematic dossier in Word (.docx) format.
+
+    Guarantees:
+    - Strictly deterministic and read-only (0 DB mutations, 0 Gemini / AI model calls).
+    - Preserves the exact ordering of document IDs requested by the client.
+    - Fails with HTTP 404 if any requested document does not exist (no partial dossiers).
+    - 100% in-memory generation via io.BytesIO.
+    - Sanitized download filename based on custom or default title.
+    """
+    # 1. Fetch requested documents in a single batch query (0 N+1)
+    details_by_id = document_service.get_document_details_by_ids(
+        db=db,
+        document_ids=payload.document_ids,
+    )
+
+    # 2. Check for missing document IDs
+    missing_ids = [
+        str(doc_id)
+        for doc_id in payload.document_ids
+        if doc_id not in details_by_id
+    ]
+    if missing_ids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Los siguientes documentos no fueron encontrados en el archivo: {', '.join(missing_ids)}",
+        )
+
+    # 3. Preserve the exact order requested by the client
+    ordered_documents = [details_by_id[doc_id] for doc_id in payload.document_ids]
+
+    # 4. Invoke maquetation engine
+    try:
+        buffer = document_export_service.generate_dossier_docx(
+            documents=ordered_documents,
+            title=payload.title,
+        )
+    except (DossierEmptyError, DossierLimitExceededError, DossierError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+    # 5. Determine sanitized download filename
+    filename = document_export_service.sanitize_dossier_filename(
+        title=payload.title,
+    )
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type=DOCX_MIME_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get(

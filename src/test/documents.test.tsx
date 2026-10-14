@@ -4,14 +4,17 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { DocumentsPage } from '../pages/DocumentsPage';
 import { DocumentDetailPage } from '../pages/DocumentDetailPage';
 import { AddDocumentModal } from '../components/documents/AddDocumentModal';
+import { ExportDossierModal } from '../components/documents/ExportDossierModal';
 import {
   documentsApi,
   ApiError,
   parseContentDispositionFilename,
   triggerBrowserDownload,
+  mapDossierExportErrorMessage,
 } from '../services/documentsApi';
 import { observatoryApi } from '../services/observatoryApi';
 import { formatDocumentTitle, renderDocumentContent, healHistoricalContent } from '../utils/documentFormatter';
+import { DocumentListItem } from '../types/document';
 
 describe('Documentary Archive Module (Bloque 11B Frontend)', () => {
   beforeEach(() => {
@@ -1439,6 +1442,1015 @@ describe('Word Document Export Integration (Bloque 12 Fase 3)', () => {
       expect(screen.getByText('Resolución Sancionadora CNMC: Cártel de Fabricantes')).toBeInTheDocument();
       expect(screen.getByText('Cuerpo Documental Original')).toBeInTheDocument();
       expect(screen.getByText('Dictamen Jurídico IA')).toBeInTheDocument();
+    });
+  });
+
+  describe('Dossier Export Multiple Selection (Bloque 12 Fase 4C Frontend)', () => {
+    function createMockDocItem(id: string, title: string, hasAnalysis = true): DocumentListItem {
+      return {
+        id,
+        title,
+        url: `https://example.com/${id}`,
+        source: { id: 'src-1', name: 'CNMC' },
+        captured_at: '2026-09-01T10:00:00Z',
+        published_at: '2026-09-01T10:00:00Z',
+        is_linkedin: false,
+        source_origin_category: 'institutional',
+        has_analysis: hasAnalysis,
+        analysis: hasAnalysis
+          ? {
+              id: `ana-${id}`,
+              status: 'completed',
+              relevance_status: 'relevant',
+              relevance_score: 90,
+              summary: `Resumen de ${title}`,
+              key_points: ['Punto clave'],
+              canonical_topics: [{ code: 'antitrust', name: 'Competencia' }],
+            }
+          : null,
+      };
+    }
+
+    beforeEach(() => {
+      vi.restoreAllMocks();
+      vi.spyOn(observatoryApi, 'getSources').mockResolvedValue([
+        { id: 'src-1', name: 'CNMC', type: 'website', entry_count: 10 },
+      ]);
+    });
+
+    afterEach(() => {
+      cleanup();
+      vi.restoreAllMocks();
+    });
+
+    it('1. Renderizado de checkboxes en cada fila y checkbox maestro desmarcado inicialmente', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+          createMockDocItem('doc-3', 'Doc 3'),
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const master = screen.getByLabelText(
+        'Seleccionar todos los documentos en esta página'
+      ) as HTMLInputElement;
+      expect(master).not.toBeChecked();
+      expect(master.indeterminate).toBe(false);
+
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).not.toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 2')).not.toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 3')).not.toBeChecked();
+
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+    });
+
+    it('2. Seleccionar un documento individual actualiza el contador a "1 documento seleccionado" y muestra la barra flotante', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const check1 = screen.getByLabelText('Seleccionar documento: Doc 1');
+      fireEvent.click(check1);
+
+      expect(check1).toBeChecked();
+      expect(screen.getByLabelText('Acciones de documentos seleccionados')).toBeInTheDocument();
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Exportar Dossier Word/i })).toBeInTheDocument();
+    });
+
+    it('3. Deseleccionar un documento individual devuelve el contador a 0 y oculta la barra flotante', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const check1 = screen.getByLabelText('Seleccionar documento: Doc 1');
+      fireEvent.click(check1);
+      expect(screen.getByLabelText('Acciones de documentos seleccionados')).toBeInTheDocument();
+
+      fireEvent.click(check1);
+      expect(check1).not.toBeChecked();
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+    });
+
+    it('4. Seleccionar varios documentos individuales actualiza el contador reflejando la cantidad exacta', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+          createMockDocItem('doc-3', 'Doc 3'),
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 2'));
+
+      expect(screen.getByText(/2 documentos seleccionados/i)).toBeInTheDocument();
+    });
+
+    it('5. Checkbox maestro "Seleccionar todos" marca todos los documentos visibles de la pagina actual', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+          createMockDocItem('doc-3', 'Doc 3'),
+        ],
+        total: 3,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const master = screen.getByLabelText(
+        'Seleccionar todos los documentos en esta página'
+      ) as HTMLInputElement;
+      fireEvent.click(master);
+
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 2')).toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 3')).toBeChecked();
+      expect(master).toBeChecked();
+      expect(screen.getByText(/3 documentos seleccionados/i)).toBeInTheDocument();
+    });
+
+    it('6. Checkbox maestro desmarca todos si ya estaban seleccionados todos en la pagina', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const master = screen.getByLabelText(
+        'Seleccionar todos los documentos en esta página'
+      ) as HTMLInputElement;
+      fireEvent.click(master);
+      expect(master).toBeChecked();
+
+      fireEvent.click(master);
+      expect(master).not.toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).not.toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 2')).not.toBeChecked();
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+    });
+
+    it('7. Estado indeterminate del checkbox maestro cuando solo algunos documentos estan seleccionados', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const master = screen.getByLabelText(
+        'Seleccionar todos los documentos en esta página'
+      ) as HTMLInputElement;
+      expect(master.indeterminate).toBe(false);
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      expect(master.indeterminate).toBe(true);
+      expect(master.checked).toBe(false);
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 2'));
+      expect(master.indeterminate).toBe(false);
+      expect(master.checked).toBe(true);
+    });
+
+    it('8. Boton "Limpiar seleccion" en la barra flotante vacia la seleccion y oculta la barra', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      const floatingBar = screen.getByLabelText('Acciones de documentos seleccionados');
+      expect(floatingBar).toBeInTheDocument();
+
+      const clearBtn = floatingBar.querySelector('button');
+      expect(clearBtn).toHaveTextContent(/Limpiar selección/i);
+      fireEvent.click(clearBtn!);
+
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).not.toBeChecked();
+    });
+
+    it('9. Boton "Limpiar seleccion" en la barra superior vacia la seleccion', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      const clearBtns = screen.getAllByRole('button', { name: /^Limpiar selección$/i });
+      fireEvent.click(clearBtns[0]);
+
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).not.toBeChecked();
+    });
+
+    it('10. Limite maximo de 30 documentos: checkboxes de documentos no seleccionados quedan deshabilitados', async () => {
+      const items = Array.from({ length: 32 }, (_, i) =>
+        createMockDocItem(`doc-${i + 1}`, `Documento ${i + 1}`)
+      );
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items,
+        total: 32,
+        limit: 40,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Documento 1')).toBeInTheDocument();
+      });
+
+      for (let i = 1; i <= 30; i++) {
+        fireEvent.click(screen.getByLabelText(`Seleccionar documento: Documento ${i}`));
+      }
+
+      expect(screen.getByText(/30 documentos seleccionados/i)).toBeInTheDocument();
+      expect(screen.getByText(/Límite 30 alcanzado/i)).toBeInTheDocument();
+
+      const doc31 = screen.getByLabelText('Seleccionar documento: Documento 31') as HTMLInputElement;
+      const doc32 = screen.getByLabelText('Seleccionar documento: Documento 32') as HTMLInputElement;
+      expect(doc31).toBeDisabled();
+      expect(doc32).toBeDisabled();
+
+      const doc1 = screen.getByLabelText('Seleccionar documento: Documento 1') as HTMLInputElement;
+      expect(doc1).not.toBeDisabled();
+
+      fireEvent.click(doc1);
+      expect(doc31).not.toBeDisabled();
+      expect(doc32).not.toBeDisabled();
+    });
+
+    it('11. "Seleccionar todos en esta pagina" respeta el limite maximo de 30 si la pagina contiene mas de 30', async () => {
+      const items = Array.from({ length: 35 }, (_, i) =>
+        createMockDocItem(`doc-${i + 1}`, `Doc ${i + 1}`)
+      );
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items,
+        total: 35,
+        limit: 40,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      const master = screen.getByLabelText('Seleccionar todos los documentos en esta página');
+      fireEvent.click(master);
+
+      expect(screen.getByText(/30 documentos seleccionados/i)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Se han seleccionado documentos hasta completar el límite máximo de 30/i)
+      ).toBeInTheDocument();
+    });
+
+    it('12. La seleccion se preserva entre navegacion de paginas (paginacion con offset)', async () => {
+      const page1Items = [createMockDocItem('doc-1', 'Doc 1'), createMockDocItem('doc-2', 'Doc 2')];
+      const page2Items = [createMockDocItem('doc-3', 'Doc 3'), createMockDocItem('doc-4', 'Doc 4')];
+
+      vi.spyOn(documentsApi, 'getDocuments').mockImplementation(async (params) => {
+        const offset = params?.offset || 0;
+        return {
+          items: offset === 0 ? page1Items : page2Items,
+          total: 4,
+          limit: 2,
+          offset,
+        };
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos?limit=2']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+
+      const nextBtn = screen.getByRole('button', { name: /Siguiente/i });
+      fireEvent.click(nextBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 3')).toBeInTheDocument();
+      });
+
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 3'));
+      expect(screen.getByText(/2 documentos seleccionados/i)).toBeInTheDocument();
+
+      const prevBtn = screen.getByRole('button', { name: /Anterior/i });
+      fireEvent.click(prevBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).toBeChecked();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 2')).not.toBeChecked();
+      expect(screen.getByText(/2 documentos seleccionados/i)).toBeInTheDocument();
+    });
+
+    it('13. La seleccion se preserva al cambiar filtros', async () => {
+      const allItems = [createMockDocItem('doc-1', 'Doc 1', true), createMockDocItem('doc-2', 'Doc 2', false)];
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValue({
+        items: allItems,
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+
+      const statusSelect = screen.getByDisplayValue('Todos los estados');
+      fireEvent.change(statusSelect, { target: { value: 'with_analysis' } });
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).toBeChecked();
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+    });
+
+    it('14. Clic en "Exportar Dossier Word" en la barra flotante abre el modal ExportDossierModal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+
+      const exportBtn = screen.getByRole('button', { name: /Exportar Dossier Word/i });
+      fireEvent.click(exportBtn);
+
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'Exportar Dossier Word' })).toBeInTheDocument();
+      expect(screen.getByText(/Compilación temática de 1 expediente/i)).toBeInTheDocument();
+    });
+
+    it('15. El modal presenta el titulo por defecto sugerido "Dossier documental HITCHINGS"', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const input = screen.getByLabelText(/Título del dossier/i) as HTMLInputElement;
+      expect(input.value).toBe('Dossier documental HITCHINGS');
+    });
+
+    it('16. Cancelar el modal lo cierra sin disparar ninguna llamada a la API ni perder la seleccion', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      const exportSpy = vi.spyOn(documentsApi, 'exportDossierDocx');
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const cancelBtn = screen.getByRole('button', { name: /Cancelar/i });
+      fireEvent.click(cancelBtn);
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(exportSpy).not.toHaveBeenCalled();
+      expect(screen.getByText(/1 documento seleccionado/i)).toBeInTheDocument();
+    });
+
+    it('17. Cerrar el modal mediante la tecla Escape lo cierra sin llamar a la API ni perder la seleccion', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      const exportSpy = vi.spyOn(documentsApi, 'exportDossierDocx');
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      fireEvent.keyDown(window, { key: 'Escape' });
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(exportSpy).not.toHaveBeenCalled();
+    });
+
+    it('18. El usuario puede modificar el titulo del dossier en el modal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const input = screen.getByLabelText(/Título del dossier/i) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: 'Dossier Monográfico Sector Lácteo' } });
+      expect(input.value).toBe('Dossier Monográfico Sector Lácteo');
+    });
+
+    it('19. Confirmar el modal con titulo personalizado llama a exportDossierDocx con IDs ordenados y titulo', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [
+          createMockDocItem('doc-1', 'Doc 1'),
+          createMockDocItem('doc-2', 'Doc 2'),
+        ],
+        total: 2,
+        limit: 20,
+        offset: 0,
+      });
+      const fakeBlob = new Blob(['docx']);
+      (fakeBlob as any).filename = 'dossier-lacteo.docx';
+      const exportSpy = vi.spyOn(documentsApi, 'exportDossierDocx').mockResolvedValueOnce(fakeBlob);
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:mock');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 2'));
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const input = screen.getByLabelText(/Título del dossier/i);
+      fireEvent.change(input, { target: { value: 'Dossier Monográfico Sector Lácteo' } });
+
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(exportSpy).toHaveBeenCalledWith(
+          ['doc-2', 'doc-1'],
+          'Dossier Monográfico Sector Lácteo'
+        );
+      });
+    });
+
+    it('20. Confirmar el modal con titulo vacio llama a exportDossierDocx con titulo undefined', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      const fakeBlob = new Blob(['docx']);
+      const exportSpy = vi.spyOn(documentsApi, 'exportDossierDocx').mockResolvedValueOnce(fakeBlob);
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:mock');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const input = screen.getByLabelText(/Título del dossier/i);
+      fireEvent.change(input, { target: { value: '   ' } });
+
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(exportSpy).toHaveBeenCalledWith(['doc-1'], undefined);
+      });
+    });
+
+    it('21. Durante la generacion se muestra "Generando dossier..." y los controles quedan deshabilitados', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockReturnValue(new Promise(() => {}));
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      const submitBtn = screen.getByRole('button', { name: /Generar Dossier Word/i });
+      fireEvent.click(submitBtn);
+
+      await waitFor(() => {
+        expect(screen.getByText(/Generando dossier\.\.\./i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Generando dossier\.\.\./i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /Cancelar/i })).toBeDisabled();
+        expect(screen.getByLabelText(/Título del dossier/i)).toBeDisabled();
+      });
+    });
+
+    it('22. Exportacion exitosa descarga el blob, cierra el modal, muestra banner de exito y limpia la seleccion', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      const fakeBlob = new Blob(['docx content']);
+      (fakeBlob as any).filename = 'dossier-descargado.docx';
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockResolvedValueOnce(fakeBlob);
+      vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:mock');
+      vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {});
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(
+          screen.getByText(/Dossier generado correctamente: dossier-descargado\.docx/i)
+        ).toBeInTheDocument();
+      });
+
+      expect(screen.queryByLabelText('Acciones de documentos seleccionados')).not.toBeInTheDocument();
+      expect(screen.getByLabelText('Seleccionar documento: Doc 1')).not.toBeChecked();
+    });
+
+    it('23. Error 401 (sesion expirada) muestra feedback amigable de reautenticacion en el modal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockRejectedValueOnce(
+        new ApiError('Unauthorized', 401)
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /Tu sesión ha expirado\. Inicia sesión de nuevo\./i
+        );
+      });
+
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    it('24. Error 404 (documento no encontrado en BD) muestra mensaje amigable en el modal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockRejectedValueOnce(
+        new ApiError(
+          'Not found',
+          404,
+          'Uno o varios documentos seleccionados ya no están disponibles en el Fondo Documental.'
+        )
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /Uno o varios documentos seleccionados ya no están disponibles en el Fondo Documental\./i
+        );
+      });
+    });
+
+    it('25. Error 422 (validacion o mas de 30 documentos) muestra mensaje amigable en el modal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockRejectedValueOnce(
+        new ApiError(
+          'Validation Error',
+          422,
+          'Los documentos seleccionados no cumplen las condiciones para generar el dossier.'
+        )
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /Los documentos seleccionados no cumplen las condiciones para generar el dossier\./i
+        );
+      });
+    });
+
+    it('26. Error 500 (error interno de servidor) muestra mensaje generico amigable en el modal', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockRejectedValueOnce(
+        new ApiError('Internal Error', 500)
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent(
+          /No se ha podido generar el dossier\. Inténtalo de nuevo\./i
+        );
+      });
+    });
+
+    it('27. Escribir en el campo de titulo tras un error limpia el mensaje de error', async () => {
+      vi.spyOn(documentsApi, 'getDocuments').mockResolvedValueOnce({
+        items: [createMockDocItem('doc-1', 'Doc 1')],
+        total: 1,
+        limit: 20,
+        offset: 0,
+      });
+      vi.spyOn(documentsApi, 'exportDossierDocx').mockRejectedValueOnce(
+        new ApiError('Internal Error', 500)
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/documentos']}>
+          <DocumentsPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Doc 1')).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Seleccionar documento: Doc 1'));
+      fireEvent.click(screen.getByRole('button', { name: /Exportar Dossier Word/i }));
+      fireEvent.click(screen.getByRole('button', { name: /Generar Dossier Word/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toBeInTheDocument();
+      });
+
+      const input = screen.getByLabelText(/Título del dossier/i);
+      fireEvent.change(input, { target: { value: 'Nuevo título limpio' } });
+
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('28. ExportDossierModal componente aislado valida props error y onClearError', () => {
+      const handleClear = vi.fn();
+      const handleClose = vi.fn();
+      const handleConfirm = vi.fn();
+
+      render(
+        <ExportDossierModal
+          isOpen={true}
+          onClose={handleClose}
+          selectedCount={5}
+          onConfirm={handleConfirm}
+          isGenerating={false}
+          error="Error forzado de prueba"
+          onClearError={handleClear}
+        />
+      );
+
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      expect(screen.getByText('Error forzado de prueba')).toBeInTheDocument();
+      expect(screen.getByText(/5 expedientes/i)).toBeInTheDocument();
+
+      const input = screen.getByLabelText(/Título del dossier/i);
+      fireEvent.change(input, { target: { value: 'Otro título' } });
+      expect(handleClear).toHaveBeenCalled();
+    });
+
+    it('29. parseContentDispositionFilename extrae nombres de archivo con o sin comillas y maneja null', () => {
+      expect(
+        parseContentDispositionFilename('attachment; filename="dossier-cnmc.docx"')
+      ).toBe('dossier-cnmc.docx');
+      expect(
+        parseContentDispositionFilename('attachment; filename=dossier-cnmc.docx')
+      ).toBe('dossier-cnmc.docx');
+      expect(
+        parseContentDispositionFilename("attachment; filename*=UTF-8''dossier%20utf8.docx")
+      ).toBe('dossier utf8.docx');
+      expect(parseContentDispositionFilename(null)).toBeNull();
+      expect(parseContentDispositionFilename('')).toBeNull();
+    });
+
+    it('30. mapDossierExportErrorMessage maneja correctamente errores de red, ApiError y tipos desconocidos', () => {
+      expect(mapDossierExportErrorMessage(new ApiError('test', 401))).toBe(
+        'Tu sesión ha expirado. Inicia sesión de nuevo.'
+      );
+      expect(
+        mapDossierExportErrorMessage(
+          new ApiError(
+            'test',
+            404,
+            'Uno o varios documentos seleccionados ya no están disponibles en el Fondo Documental.'
+          )
+        )
+      ).toBe('Uno o varios documentos seleccionados ya no están disponibles en el Fondo Documental.');
+      expect(
+        mapDossierExportErrorMessage(
+          new ApiError(
+            'test',
+            422,
+            'Los documentos seleccionados no cumplen las condiciones para generar el dossier.'
+          )
+        )
+      ).toBe('Los documentos seleccionados no cumplen las condiciones para generar el dossier.');
+      expect(mapDossierExportErrorMessage(new ApiError('test', 500))).toBe(
+        'No se ha podido generar el dossier. Inténtalo de nuevo.'
+      );
+      expect(mapDossierExportErrorMessage(new Error('Fallo de red'))).toBe('Fallo de red');
+      expect(mapDossierExportErrorMessage('error no estándar')).toBe(
+        'No se ha podido generar el dossier. Inténtalo de nuevo.'
+      );
     });
   });
 });
