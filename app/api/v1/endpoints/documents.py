@@ -23,7 +23,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints.auth import get_current_user
@@ -37,6 +37,7 @@ from app.schemas.document import (
     IngestUrlRequest,
 )
 from app.services import document_service
+from app.services.document_export_service import document_export_service
 from app.services.manual_document_ingestion_service import (
     DocumentExtractionError,
     FileSizeLimitExceededError,
@@ -376,3 +377,53 @@ def get_document_detail(
             detail=f"Documento '{document_id}' no encontrado en el archivo",
         )
     return detail
+
+
+DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+@router.get(
+    "/{document_id}/export",
+    summary="Export document report to Word (.docx)",
+    response_class=Response,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {DOCX_MIME_TYPE: {}},
+            "description": "Informe jurídico en formato Microsoft Word (.docx)",
+        },
+        status.HTTP_404_NOT_FOUND: {
+            "description": "Documento no encontrado en el archivo",
+        },
+    },
+)
+def export_document_docx(
+    document_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Generate and download a professional Word (.docx) document report.
+
+    Deterministic, in-memory, read-only generation.
+    Returns 404 if the document does not exist.
+    """
+    detail = document_service.get_document_detail(db=db, document_id=document_id)
+    if detail is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Documento '{document_id}' no encontrado en el archivo",
+        )
+
+    buffer = document_export_service.generate_docx(document=detail)
+    filename = document_export_service.sanitize_filename(
+        title=detail.title,
+        document_id=detail.id,
+        has_analysis=detail.has_analysis,
+    )
+
+    return Response(
+        content=buffer.getvalue(),
+        media_type=DOCX_MIME_TYPE,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
