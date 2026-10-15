@@ -11,6 +11,7 @@ import {
   Building2,
   Calendar,
   Sliders,
+  Tag,
 } from 'lucide-react';
 import { observatoryApi } from '../services/observatoryApi';
 import { ObservatoryDashboard } from '../types/observatory';
@@ -228,6 +229,13 @@ export const DashboardPage: React.FC = () => {
               Áreas y Temas con Mayor Actividad
             </h3>
             <div className="flex items-center gap-2.5">
+              <Link
+                to="/configuracion/palabras-clave"
+                className="text-xs text-navy-800 hover:text-navy-950 font-semibold flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 hover:bg-slate-200 transition-colors border border-slate-200 shadow-xs"
+              >
+                <Tag className="w-3.5 h-3.5 text-legal-gold" />
+                <span>Palabras clave</span>
+              </Link>
               <button
                 type="button"
                 onClick={() => setIsTaxonomyModalOpen(true)}

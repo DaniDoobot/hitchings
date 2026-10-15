@@ -11,6 +11,7 @@ import { EntryDetailPage } from './pages/EntryDetailPage';
 import { DocumentsPage } from './pages/DocumentsPage';
 import { DocumentDetailPage } from './pages/DocumentDetailPage';
 import { AdminUsersPage } from './pages/AdminUsersPage';
+import { KeywordSettingsPage } from './pages/KeywordSettingsPage';
 
 export const App: React.FC = () => {
   return (
@@ -62,6 +63,15 @@ export const App: React.FC = () => {
                 </AppLayout>
               }
             />
+            <Route
+              path="/configuracion/palabras-clave"
+              element={
+                <AppLayout>
+                  <KeywordSettingsPage />
+                </AppLayout>
+              }
+            />
+            <Route path="/palabras-clave" element={<Navigate to="/configuracion/palabras-clave" replace />} />
 
             {/* Dedicated Administrative Routes */}
             <Route element={<AdminRoute />}>

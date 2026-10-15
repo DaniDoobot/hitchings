@@ -9,6 +9,7 @@ import {
   Scale,
   LogOut,
   Users,
+  Tag,
 } from 'lucide-react';
 import { observatoryApi } from '../../services/observatoryApi';
 import { useAuth } from '../../context/AuthContext';
@@ -33,6 +34,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ children }) => {
     { name: 'Cuadro de Mando', path: '/', icon: LayoutDashboard },
     { name: 'Observatorio', path: '/observatorio', icon: Compass },
     { name: 'Fondo Documental', path: '/documentos', icon: FolderArchive },
+    { name: 'Palabras Clave', path: '/configuracion/palabras-clave', icon: Tag },
   ];
 
   if (user?.role === 'admin') {
