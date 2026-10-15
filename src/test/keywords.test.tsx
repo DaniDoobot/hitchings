@@ -340,4 +340,234 @@ describe('Keyword Settings Management Interface', () => {
       ]);
     });
   });
+
+  it('11. El botón de eliminar aparece en cada keyword', async () => {
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole('button', { name: 'Eliminar cartel' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Eliminar price fixing' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Eliminar 101 TFEU' })).toBeInTheDocument();
+  });
+
+  it('12. Al pulsar eliminar aparece la confirmación indicando la palabra clave', async () => {
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar cartel' });
+    fireEvent.click(deleteBtn);
+
+    expect(screen.getByText(/¿eliminar la palabra clave/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /cancelar/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /eliminar$/i })).toBeInTheDocument();
+  });
+
+  it('13. Cancelar la eliminación NO modifica la keyword ni llama a la API', async () => {
+    const updateSpy = vi.spyOn(trackingApi, 'updateTopicKeywords');
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar cartel' });
+    fireEvent.click(deleteBtn);
+
+    const cancelBtn = screen.getByRole('button', { name: /cancelar/i });
+    fireEvent.click(cancelBtn);
+
+    expect(screen.queryByText(/¿eliminar la palabra clave/i)).not.toBeInTheDocument();
+    expect(screen.getByText('cartel')).toBeInTheDocument();
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('14. Confirmar llama al PATCH con el array correcto, la keyword desaparece y muestra mensaje de éxito', async () => {
+    const updateSpy = vi.spyOn(trackingApi, 'updateTopicKeywords').mockResolvedValue({
+      ...MOCK_TOPICS[0],
+      keywords: ['price fixing', '101 TFEU'],
+    });
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar cartel' });
+    fireEvent.click(deleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: /eliminar$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith('topic-1', ['price fixing', '101 TFEU']);
+      expect(screen.getByText('Palabra clave eliminada correctamente.')).toBeInTheDocument();
+      expect(screen.queryByText('cartel')).not.toBeInTheDocument();
+      expect(screen.getByText('price fixing')).toBeInTheDocument();
+      expect(screen.getByText('101 TFEU')).toBeInTheDocument();
+    });
+  });
+
+  it('15. Si el PATCH falla, la keyword permanece y aparece el mensaje de error', async () => {
+    vi.spyOn(trackingApi, 'updateTopicKeywords').mockRejectedValue(new Error('Network error'));
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar cartel' });
+    fireEvent.click(deleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: /eliminar$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText('No se ha podido guardar el cambio.')).toBeInTheDocument();
+      expect(screen.getByText('cartel')).toBeInTheDocument();
+    });
+  });
+
+  it('16. Eliminar "AI" no afecta a "artificial intelligence" ni a otros términos similares', async () => {
+    const aiTopic: TrackingTopic = {
+      id: 'topic-ai-test',
+      matrix_id: 'matrix-1',
+      code: 'ai_test',
+      name: 'Inteligencia Artificial Test',
+      keywords: ['artificial intelligence', 'AI', 'AI / copyright'],
+      priority: 70,
+      active: true,
+      provisional: false,
+      created_at: '2026-10-14T12:00:00Z',
+      updated_at: '2026-10-14T12:00:00Z',
+    };
+
+    vi.spyOn(trackingApi, 'getTopics').mockResolvedValue([aiTopic]);
+    const updateSpy = vi.spyOn(trackingApi, 'updateTopicKeywords').mockResolvedValue({
+      ...aiTopic,
+      keywords: ['artificial intelligence', 'AI / copyright'],
+    });
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('artificial intelligence')).toBeInTheDocument();
+      expect(screen.getByText('AI')).toBeInTheDocument();
+      expect(screen.getByText('AI / copyright')).toBeInTheDocument();
+    });
+
+    // Delete precisely 'AI'
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar AI' });
+    fireEvent.click(deleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: /eliminar$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith('topic-ai-test', ['artificial intelligence', 'AI / copyright']);
+      expect(screen.queryByText('AI')).not.toBeInTheDocument();
+      expect(screen.getByText('artificial intelligence')).toBeInTheDocument();
+      expect(screen.getByText('AI / copyright')).toBeInTheDocument();
+    });
+  });
+
+  it('17. Eliminar una keyword intermedia conserva todas las demás exactamente igual y en orden', async () => {
+    const updateSpy = vi.spyOn(trackingApi, 'updateTopicKeywords').mockResolvedValue({
+      ...MOCK_TOPICS[0],
+      keywords: ['cartel', '101 TFEU'],
+    });
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('price fixing')).toBeInTheDocument();
+    });
+
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar price fixing' });
+    fireEvent.click(deleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: /eliminar$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith('topic-1', ['cartel', '101 TFEU']);
+    });
+  });
+
+  it('18. Eliminar una keyword normativa conserva literalmente el resto de términos regulatorios', async () => {
+    const updateSpy = vi.spyOn(trackingApi, 'updateTopicKeywords').mockResolvedValue({
+      ...MOCK_TOPICS[1],
+      keywords: ['Digital Markets Act', 'Regulation (EU) 2022/1925', 'gatekeepers'],
+    });
+
+    render(
+      <MemoryRouter>
+        <KeywordSettingsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Aplicación del Reglamento de Mercados Digitales (DMA)')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('heading', { level: 4, name: /aplicación del reglamento de mercados digitales/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('DMA')).toBeInTheDocument();
+      expect(screen.getByText('Regulation (EU) 2022/1925')).toBeInTheDocument();
+    });
+
+    // Delete 'DMA'
+    const deleteBtn = screen.getByRole('button', { name: 'Eliminar DMA' });
+    fireEvent.click(deleteBtn);
+
+    const confirmBtn = screen.getByRole('button', { name: /eliminar$/i });
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith('topic-2', [
+        'Digital Markets Act',
+        'Regulation (EU) 2022/1925',
+        'gatekeepers',
+      ]);
+      expect(screen.getByText('Regulation (EU) 2022/1925')).toBeInTheDocument();
+      expect(screen.getByText('Digital Markets Act')).toBeInTheDocument();
+    });
+  });
 });

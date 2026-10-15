@@ -133,6 +133,39 @@ export const KeywordSettingsPage: React.FC = () => {
     }
   };
 
+  const handleDeleteKeyword = async (
+    _keywordToDelete: string,
+    index: number
+  ): Promise<boolean> => {
+    if (!selectedTopic) return false;
+    setIsSaving(true);
+    setFeedback(null);
+
+    const currentKeywords = selectedTopic.keywords ? [...selectedTopic.keywords] : [];
+    const updatedKeywords = currentKeywords.filter((_, idx) => idx !== index);
+
+    try {
+      const updated = await trackingApi.updateTopicKeywords(selectedTopic.id, updatedKeywords);
+      setTopics((prev) =>
+        prev.map((t) => (t.id === updated.id ? { ...t, keywords: updated.keywords || updatedKeywords } : t))
+      );
+      setFeedback({
+        type: 'success',
+        message: 'Palabra clave eliminada correctamente.',
+      });
+      return true;
+    } catch (err: any) {
+      console.error('Error deleting keyword:', err);
+      setFeedback({
+        type: 'error',
+        message: 'No se ha podido guardar el cambio.',
+      });
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Page Header */}
@@ -268,11 +301,13 @@ export const KeywordSettingsPage: React.FC = () => {
           <div className="lg:col-span-8 h-full">
             {selectedTopic ? (
               <KeywordList
+                key={selectedTopic.id}
                 topic={selectedTopic}
                 keywords={selectedTopic.keywords || []}
                 searchQuery={searchQuery}
                 onAddKeyword={handleAddKeyword}
                 onUpdateKeyword={handleUpdateKeyword}
+                onDeleteKeyword={handleDeleteKeyword}
                 isSaving={isSaving}
               />
             ) : (

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Edit2, Tag, Hash } from 'lucide-react';
+import { Plus, Edit2, Trash2, AlertTriangle, Tag, Hash } from 'lucide-react';
 import { TrackingTopic } from '../../types/tracking';
 import { KeywordEditor } from './KeywordEditor';
 
@@ -9,6 +9,7 @@ interface KeywordListProps {
   searchQuery?: string;
   onAddKeyword: (newKeyword: string) => Promise<boolean>;
   onUpdateKeyword: (oldKeyword: string, newKeyword: string, index: number) => Promise<boolean>;
+  onDeleteKeyword: (keyword: string, index: number) => Promise<boolean>;
   isSaving: boolean;
 }
 
@@ -18,10 +19,12 @@ export const KeywordList: React.FC<KeywordListProps> = ({
   searchQuery = '',
   onAddKeyword,
   onUpdateKeyword,
+  onDeleteKeyword,
   isSaving,
 }) => {
   const [isAdding, setIsAdding] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [deletingIndex, setDeletingIndex] = useState<number | null>(null);
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
 
@@ -37,6 +40,14 @@ export const KeywordList: React.FC<KeywordListProps> = ({
     const success = await onUpdateKeyword(oldKw, val, index);
     if (success) {
       setEditingIndex(null);
+    }
+  };
+
+  const handleConfirmDelete = async (kw: string, index: number) => {
+    try {
+      await onDeleteKeyword(kw, index);
+    } finally {
+      setDeletingIndex(null);
     }
   };
 
@@ -78,6 +89,7 @@ export const KeywordList: React.FC<KeywordListProps> = ({
                 onClick={() => {
                   setIsAdding(true);
                   setEditingIndex(null);
+                  setDeletingIndex(null);
                 }}
                 disabled={isSaving}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-navy-900 hover:bg-navy-950 text-white text-xs font-semibold rounded-md shadow-xs transition-colors cursor-pointer"
@@ -134,7 +146,11 @@ export const KeywordList: React.FC<KeywordListProps> = ({
             {!isAdding && (
               <button
                 type="button"
-                onClick={() => setIsAdding(true)}
+                onClick={() => {
+                  setIsAdding(true);
+                  setEditingIndex(null);
+                  setDeletingIndex(null);
+                }}
                 className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-md border border-slate-300 transition-colors"
               >
                 <Plus className="w-3.5 h-3.5 text-navy-700" />
@@ -174,6 +190,41 @@ export const KeywordList: React.FC<KeywordListProps> = ({
                 );
               }
 
+              if (deletingIndex === idx) {
+                return (
+                  <div
+                    key={`delete-${idx}-${kw}`}
+                    className="p-3 rounded-lg bg-rose-50/80 border border-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs"
+                  >
+                    <div className="flex items-center gap-2 text-xs text-rose-950 font-medium min-w-0">
+                      <AlertTriangle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                      <span className="truncate">
+                        ¿Eliminar la palabra clave <strong className="font-mono text-rose-900">"{kw}"</strong>?
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0 self-end sm:self-auto">
+                      <button
+                        type="button"
+                        onClick={() => setDeletingIndex(null)}
+                        disabled={isSaving}
+                        className="px-2.5 py-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-white border border-slate-300 rounded hover:bg-slate-50 transition-colors cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmDelete(kw, idx)}
+                        disabled={isSaving}
+                        className="px-2.5 py-1 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded transition-colors shadow-xs cursor-pointer flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>{isSaving ? 'Eliminando...' : 'Eliminar'}</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <div
                   key={`kw-${idx}-${kw}`}
@@ -192,6 +243,7 @@ export const KeywordList: React.FC<KeywordListProps> = ({
                       onClick={() => {
                         setEditingIndex(idx);
                         setIsAdding(false);
+                        setDeletingIndex(null);
                       }}
                       disabled={isSaving}
                       className="p-1.5 rounded text-slate-400 hover:text-navy-900 hover:bg-slate-100 transition-colors cursor-pointer"
@@ -199,6 +251,20 @@ export const KeywordList: React.FC<KeywordListProps> = ({
                       aria-label={`Editar ${kw}`}
                     >
                       <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeletingIndex(idx);
+                        setEditingIndex(null);
+                        setIsAdding(false);
+                      }}
+                      disabled={isSaving}
+                      className="p-1.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                      title="Eliminar palabra clave"
+                      aria-label={`Eliminar ${kw}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
